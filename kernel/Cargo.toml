@@ -1,0 +1,22 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+authors = ["losfair <zhy20000919@hotmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bootloader = { version = "0.8", features = ["map_physical_memory"] }
+x86 = "0.28"
+x86_64 = "0.7"
+spin = "0.5"
+pic8259_simple = "0.1"
+bitflags = "1.2"
+goblin = { version = "0.1", features = ["elf64"], default-features = false}
+num_enum = { version = "0.4", default-features = false }
+
+[package.metadata.bootloader]
+kernel-stack-address = "0xFFFFFF8000000000"
+kernel-stack-size = 512
+physical-memory-offset = "0xFFFF800000000000"
