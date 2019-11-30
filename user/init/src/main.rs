@@ -4,19 +4,21 @@
 mod serial;
 mod vga;
 
+use crate::serial::SerialPort;
+use core::fmt::Write;
 use flatruntime_user::{
     io::Port,
     syscall::{Delegation, RootCap},
 };
-use crate::serial::SerialPort;
-use core::fmt::Write;
 
 static mut ANY_PORT_DELEGATION: Delegation = Delegation::new();
 
 #[no_mangle]
 pub unsafe extern "C" fn user_start() -> ! {
     let root_cap = RootCap::init();
-    let any_port = root_cap.make_any_x86_port(&mut ANY_PORT_DELEGATION).unwrap();
+    let any_port = root_cap
+        .make_any_x86_port(&mut ANY_PORT_DELEGATION)
+        .unwrap();
     let serial_ports: [Port; 8] = [
         Port::new(any_port.get_port(0x3f8).unwrap()),
         Port::new(any_port.get_port(0x3f9).unwrap()),

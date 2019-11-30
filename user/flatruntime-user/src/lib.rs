@@ -1,8 +1,8 @@
 #![no_std]
 #![feature(asm, naked_functions, lang_items, core_intrinsics)]
 
-pub mod syscall;
 pub mod io;
+pub mod syscall;
 
 #[panic_handler]
 fn on_panic(info: &core::panic::PanicInfo) -> ! {

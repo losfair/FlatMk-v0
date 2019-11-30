@@ -9,9 +9,7 @@ pub struct Port {
 
 impl Port {
     pub unsafe fn new(cap: CPtr) -> Port {
-        Port {
-            cap,
-        }
+        Port { cap }
     }
 
     pub unsafe fn outb(&self, x: u8) {

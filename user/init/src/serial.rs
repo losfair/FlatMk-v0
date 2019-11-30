@@ -7,9 +7,7 @@ pub struct SerialPort {
 
 impl SerialPort {
     pub const unsafe fn new(ports: [Port; 8]) -> SerialPort {
-        SerialPort {
-            ports,
-        }
+        SerialPort { ports }
     }
 
     pub fn get_lsts(&mut self) -> u8 {
@@ -17,7 +15,7 @@ impl SerialPort {
             self.ports[5].inb() // line status register is on port 5.
         }
     }
-    
+
     pub fn send(&mut self, data: u8) {
         unsafe {
             match data {
