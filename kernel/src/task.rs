@@ -1,4 +1,5 @@
 use crate::capability::{Capability, CapabilitySet};
+use crate::kobj::KernelObject;
 use crate::paging::phys_to_virt;
 use crate::serial::with_serial_port;
 use bootloader::bootinfo::MemoryRegionType;
@@ -26,14 +27,35 @@ static mut IA32_KERNEL_GS_BASE: Msr = Msr::new(0xc0000102);
 /// A task must not be larger than 4096 bytes.
 #[repr(C, align(4096))]
 pub struct Task {
+    /// Address of the kernel syscall stack.
     pub kernel_stack: u64,
-    pub user_stack: u64,
-    pub prev: UnsafeCell<Option<NonNull<Task>>>,
-    pub next: UnsafeCell<Option<NonNull<Task>>>,
-    pub page_table_root: *mut PageTable,
+
+    /// Saved address of the user stack.
+    pub user_stack: Cell<u64>,
+
+    /// Previous task in a circular task list.
+    pub prev: UnsafeCell<NonNull<Task>>,
+
+    /// Next task in a circular task list.
+    pub next: UnsafeCell<NonNull<Task>>,
+
+    /// Page table of this task.
+    pub page_table_root: KernelObject<UnsafeCell<PageTable>>,
+
+    /// Saved registers when scheduled out.
     pub registers: UnsafeCell<TaskRegisters>,
-    pub capabilities: *const CapabilitySet,
+
+    /// Root capability set.
+    pub capabilities: KernelObject<CapabilitySet>,
+
+    /// Is there a pending page fault on this task?
     pub pending_page_fault: Cell<bool>,
+
+    /// Number of (KernelObject + Task + SchedQueue) that refer to this task.
+    pub kobj_refcount: Cell<usize>,
+
+    /// Parent task of this task. Can be null.
+    pub parent: *const Task,
 }
 
 #[repr(C)]
@@ -124,13 +146,13 @@ unsafe fn recursively_map_region<I: Iterator<Item = u64>>(
 unsafe fn make_continuous_map<I: Iterator<Item = u64>>(
     mut region: I,
     start: u64,
-    root: *mut PageTable,
+    root: &mut PageTable,
 ) -> u64 {
     let mut levels: [(u64, *mut PageTable); 4] = [
         ((start >> 12) & 511, core::ptr::null_mut()),
         ((start >> 21) & 511, core::ptr::null_mut()),
         ((start >> 30) & 511, core::ptr::null_mut()),
-        ((start >> 39) & 511, root),
+        ((start >> 39) & 511, root as *mut PageTable),
     ];
     let mut count: u64 = 0;
     while !recursively_map_region(&mut region, &mut levels, &mut count).is_null() {
@@ -139,30 +161,109 @@ unsafe fn make_continuous_map<I: Iterator<Item = u64>>(
     count
 }
 
-impl Task {
-    pub fn new(kernel_stack: u64) -> Task {
-        Task {
-            kernel_stack: kernel_stack,
-            user_stack: 0,
-            prev: UnsafeCell::new(None),
-            next: UnsafeCell::new(None),
-            page_table_root: core::ptr::null_mut(),
-            registers: UnsafeCell::new(TaskRegisters::new()),
-            capabilities: core::ptr::null(),
-            pending_page_fault: Cell::new(false),
+impl Default for Task {
+    fn default() -> Task {
+        unsafe { core::mem::zeroed() }
+    }
+}
+
+impl Drop for Task {
+    fn drop(&mut self) {
+        if !self.parent.is_null() {
+            unsafe {
+                Task::dec_ref(self.parent);
+                let maybe_next = self.detach();
+
+                if get_current_task().unwrap().as_ptr() == self as *mut Task {
+                    if let Some(next) = maybe_next {
+                        set_current_task(Some(next));
+                    } else {
+                        set_current_task(None);
+                    }
+                }
+            }
+        } else {
+            panic!("Attempting to drop root task");
         }
     }
-    pub unsafe fn init_as_root(
-        &mut self,
-        page_table_root: *mut PageTable,
-        cap_root: *const CapabilitySet,
-    ) {
-        *self.prev.get() = NonNull::new(self as *mut _);
-        *self.next.get() = NonNull::new(self as *mut _);
-        self.page_table_root = page_table_root;
-        self.capabilities = cap_root;
-        crate::paging::make_page_table(&mut *self.page_table_root);
+}
+
+impl Task {
+    pub fn inc_ref(&self) {
+        self.kobj_refcount.set(self.kobj_refcount.get() + 1);
     }
+
+    pub unsafe fn detach(&self) -> Option<NonNull<Task>> {
+        let next_ptr = *self.next.get();
+        if next_ptr.as_ptr() != self as *const Task as *mut Task {
+            let prev = (*self.prev.get()).as_ref();
+            let next = (*self.next.get()).as_ref();
+            *prev.next.get() = *self.next.get();
+            *next.prev.get() = *self.prev.get();
+            *self.prev.get() = NonNull::new(self as *const Task as *mut Task).unwrap();
+            *self.next.get() = NonNull::new(self as *const Task as *mut Task).unwrap();
+            Some(next_ptr)
+        } else {
+            None
+        }
+    }
+
+    pub unsafe fn attach(&self, that: &Task) {
+        *self.prev.get() = NonNull::new(that as *const Task as *mut Task).unwrap();
+        *self.next.get() = *that.next.get();
+
+        let prev = (*self.prev.get()).as_ref();
+        let next = (*self.next.get()).as_ref();
+
+        *prev.next.get() = NonNull::new(self as *const Task as *mut Task).unwrap();
+        *next.prev.get() = NonNull::new(self as *const Task as *mut Task).unwrap();
+    }
+
+    pub unsafe fn dec_ref(me: *const Task) {
+        let prev = (*me).kobj_refcount.get();
+        assert!(prev >= 1);
+        (*me).kobj_refcount.set(prev - 1);
+        if (prev == 1) {
+            core::ptr::drop_in_place(&mut *(me as *mut Task));
+        }
+    }
+
+    /// Initializes an empty Task.
+    pub fn init(
+        &mut self,
+        parent: Option<&Task>,
+        kernel_stack: u64,
+        page_table_root: KernelObject<UnsafeCell<PageTable>>,
+        cap_root: KernelObject<CapabilitySet>,
+    ) {
+        if let Some(parent) = parent {
+            parent.inc_ref();
+        }
+
+        {
+            let me = self as *mut _;
+            unsafe {
+                core::ptr::write(
+                    me,
+                    Task {
+                        kernel_stack: kernel_stack,
+                        user_stack: Cell::new(0),
+                        prev: UnsafeCell::new(NonNull::new(me).unwrap()),
+                        next: UnsafeCell::new(NonNull::new(me).unwrap()),
+                        page_table_root: page_table_root,
+                        registers: UnsafeCell::new(TaskRegisters::new()),
+                        capabilities: cap_root,
+                        pending_page_fault: Cell::new(false),
+                        parent: parent
+                            .map(|x| x as *const Task)
+                            .unwrap_or(core::ptr::null()),
+                        kobj_refcount: Cell::new(1),
+                    },
+                );
+            }
+        }
+    }
+
     pub unsafe fn load_root_image(&self) -> u64 {
         assert_eq!(get_current_task(), NonNull::new(self as *const _ as *mut _));
 
@@ -181,7 +282,7 @@ impl Task {
                     })
                     .flatten(),
                 ROOT_TASK_FULL_MAP_BASE,
-                self.page_table_root,
+                &mut *self.page_table_root.get(),
             )
         };
         x86_64::instructions::tlb::flush_all();
@@ -198,18 +299,8 @@ impl Task {
             }
         }
     }
-    pub fn kill(&self) {
-        // FIXME: Task leaked
-        unsafe {
-            assert_eq!(get_current_task(), NonNull::new(self as *const _ as *mut _));
-            if *self.prev.get() == NonNull::new(self as *const _ as *mut _) {
-                set_current_task(None);
-            } else {
-                *(*self.prev.get()).unwrap().as_ref().next.get() = *self.next.get();
-                *(*self.next.get()).unwrap().as_ref().prev.get() = *self.prev.get();
-                set_current_task(*self.next.get());
-            }
-        }
+    pub unsafe fn release(&self) {
+        Task::dec_ref(self);
     }
     pub fn current() -> Option<NonNull<Task>> {
         unsafe { get_current_task() }
@@ -235,16 +326,20 @@ pub fn retype_user<T: Retype>(vaddr: VirtAddr) -> Option<*mut T> {
     }
 }
 
-pub unsafe fn switch_to(task: NonNull<Task>) {
-    set_current_task(Some(task));
-    Cr3::write(
-        PhysFrame::from_start_address(
-            crate::paging::virt_to_phys(VirtAddr::new(task.as_ref().page_table_root as u64))
-                .unwrap(),
+pub fn switch_to(task: &Task) {
+    set_current_task(Some(
+        NonNull::new(task as *const Task as *mut Task).unwrap(),
+    ));
+    unsafe {
+        Cr3::write(
+            PhysFrame::from_start_address(
+                crate::paging::virt_to_phys(VirtAddr::new(task.page_table_root.get() as u64))
+                    .unwrap(),
+            )
+            .unwrap(),
+            Cr3Flags::empty(),
         )
-        .unwrap(),
-        Cr3Flags::empty(),
-    );
+    };
 }
 
 pub unsafe fn enter_user_mode() -> ! {
@@ -304,7 +399,7 @@ pub unsafe fn schedule() -> ! {
             .as_ref()
             .next
             .get())
-        .expect("empty next pointer"),
+        .as_ref(),
     );
     enter_user_mode();
 }

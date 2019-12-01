@@ -102,14 +102,11 @@ pub unsafe fn init_idt() {
         .set_stack_index(DOUBLE_FAULT_IST_INDEX);
 
     IDT.breakpoint
-        .set_handler_fn(intr_breakpoint)
-        .disable_interrupts(false);
+        .set_handler_fn(core::mem::transmute(intr_breakpoint as usize));
     IDT.page_fault
-        .set_handler_fn(intr_page_fault)
-        .disable_interrupts(false);
+        .set_handler_fn(core::mem::transmute(intr_page_fault as usize));
     IDT.general_protection_fault
-        .set_handler_fn(intr_gpf)
-        .disable_interrupts(false);
+        .set_handler_fn(core::mem::transmute(intr_gpf as usize));
     IDT[InterruptIndex::Timer as u8 as usize]
         .set_handler_fn(core::mem::transmute(intr_timer as usize));
     IDT.load();
@@ -201,33 +198,71 @@ macro_rules! interrupt {
     };
 }
 
-extern "x86-interrupt" fn intr_breakpoint(frame: &mut InterruptStackFrame) {
-    prepare_interrupt_entry(frame);
+macro_rules! interrupt_with_code {
+    ($name:ident, $internal_name:ident, $arg0:ident, $arg1:ident, $arg2:ident, $body:block) => {
+        #[no_mangle]
+        extern "C" fn $internal_name($arg0: &mut ::x86_64::structures::idt::InterruptStackFrame, $arg1: &mut $crate::task::TaskRegisters, $arg2: u64) {
+            $body
+        }
 
-    with_serial_port(|p| {
-        writeln!(p, "Breakpoint: {:#?}", frame).unwrap();
-    });
+        #[naked]
+        unsafe extern "C" fn $name() {
+            asm!(concat!(r#"
+                swapgs
+                sti
 
-    prepare_interrupt_exit(frame);
-}
+                push %rbp
+                mov %rsp, %rbp
 
-extern "x86-interrupt" fn intr_gpf(frame: &mut InterruptStackFrame, code: u64) {
-    prepare_interrupt_entry(frame);
+                push 32(%rbp) // rflags
+                push 16(%rbp) // rip
+                push 0(%rbp) // rbp
+                push 40(%rbp) // rsp
+                push %rdi
+                push %rsi
+                push %rdx
+                push %rcx
+                push %rbx
+                push %rax
+                push %r8
+                push %r9
+                push %r10
+                push %r11
+                push %r12
+                push %r13
+                push %r14
+                push %r15
 
-    with_serial_port(|p| {
-        writeln!(p, "General protection fault: code = {} {:#?}", code, frame).unwrap();
-    });
-    if !is_user_fault(frame) {
-        panic!("Kernel GPF");
-    }
-    let mut current = Task::current().expect("User GPF without current task");
-    let current = unsafe { current.as_ref() };
-    current.kill();
-    unsafe {
-        crate::task::schedule();
-    }
+                leaq 16(%rbp), %rdi
+                mov %rsp, %rsi
+                mov 8(%rbp), %rdx // error code
+                call "#, stringify!($internal_name), r#"
 
-    prepare_interrupt_exit(frame);
+                pop %r15
+                pop %r14
+                pop %r13
+                pop %r12
+                pop %r11
+                pop %r10
+                pop %r9
+                pop %r8
+                pop %rax
+                pop %rbx
+                pop %rcx
+                pop %rdx
+                pop %rsi
+                pop %rdi
+                add $$32, %rsp
+                pop %rbp
+
+                add $$8, %rsp // error code
+
+                cli
+                swapgs
+                iretq
+            "#) :::: "volatile");
+        }
+    };
 }
 
 /// Double fault. Entry/exit mode switch code should not run.
@@ -238,49 +273,72 @@ extern "x86-interrupt" fn intr_double_fault(frame: &mut InterruptStackFrame, cod
     panic!("Double fault");
 }
 
+interrupt_with_code!(
+    intr_breakpoint,
+    __intr_breakpoint,
+    _frame,
+    _registers,
+    _code,
+    {}
+);
+
+interrupt_with_code!(intr_gpf, __intr_gpf, frame, registers, code, {
+    with_serial_port(|p| {
+        writeln!(p, "General protection fault: code = {} {:#?}", code, frame).unwrap();
+    });
+    if !is_user_fault(frame) {
+        panic!("Kernel GPF");
+    }
+    let mut current = Task::current().unwrap();
+    let current = unsafe { current.as_ref() };
+    unsafe {
+        *current.registers.get() = *registers;
+        current.release();
+        crate::task::schedule();
+    }
+});
+
+interrupt_with_code!(
+    intr_page_fault,
+    __intr_page_fault,
+    frame,
+    registers,
+    code,
+    {
+        with_serial_port(|p| {
+            writeln!(
+                p,
+                "Page fault at {:p}. code = {:?} {:#?}",
+                Cr2::read().as_ptr::<u8>(),
+                code,
+                frame
+            )
+            .unwrap();
+        });
+        if !is_user_fault(frame) {
+            panic!("Kernel page fault");
+        }
+        let mut current = Task::current().unwrap();
+        let current = unsafe { current.as_ref() };
+        unsafe {
+            *current.registers.get() = *registers;
+            current.release();
+            crate::task::schedule();
+        }
+    }
+);
+
 interrupt!(intr_timer, __intr_timer, frame, registers, {
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Timer as u8);
     }
     if is_user_fault(frame) {
+        let mut current = Task::current().unwrap();
+        let current = unsafe { current.as_ref() };
         unsafe {
-            let current = crate::task::get_current_task().unwrap();
-            *current.as_ref().registers.get() = *registers;
+            *current.registers.get() = *registers;
             crate::task::schedule();
         }
     }
 });
-
-extern "x86-interrupt" fn intr_page_fault(
-    frame: &mut InterruptStackFrame,
-    code: PageFaultErrorCode,
-) {
-    prepare_interrupt_entry(frame);
-
-    with_serial_port(|p| {
-        writeln!(
-            p,
-            "Page fault at {:p}. code = {:?} {:#?}",
-            Cr2::read().as_ptr::<u8>(),
-            code,
-            frame
-        )
-        .unwrap();
-    });
-    if !is_user_fault(frame) {
-        panic!("Kernel page fault");
-    }
-    let mut current = Task::current().expect("User page fault without current task");
-    let current = unsafe { current.as_ref() };
-    if current.pending_page_fault.get() {
-        current.kill();
-        unsafe {
-            crate::task::schedule();
-        }
-    } else {
-        current.pending_page_fault.set(true);
-    }
-
-    prepare_interrupt_exit(frame);
-}
