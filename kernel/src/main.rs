@@ -14,6 +14,7 @@ extern crate bitflags;
 
 mod boot;
 mod capability;
+mod debug;
 mod elf;
 mod exception;
 mod kobj;
@@ -40,6 +41,7 @@ static mut ROOT_CAPSET: Option<CapabilitySet> = None;
 pub extern "C" fn kstart(boot_info: &'static BootInfo) -> ! {
     with_serial_port(|p| {
         writeln!(p, "Starting FlatRuntime Microkernel.").unwrap();
+        writeln!(p, "Boot info: {:#?}", boot_info).unwrap();
     });
     unsafe {
         boot::set_boot_info(boot_info);
@@ -58,7 +60,7 @@ pub extern "C" fn kstart(boot_info: &'static BootInfo) -> ! {
         root_capset.init_for_root_task();
 
         let root_pt = ROOT_PAGE_TABLE.as_mut().unwrap();
-        crate::paging::make_page_table(&mut *root_pt.get());
+        crate::paging::make_page_table(crate::paging::active_level_4_table(), &mut *root_pt.get());
 
         let rt = ROOT_TASK.as_mut().unwrap();
         rt.init(

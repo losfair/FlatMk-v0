@@ -13,7 +13,11 @@ use x86_64::{
         model_specific::{GsBase, Msr},
         rflags::RFlags,
     },
-    structures::paging::{frame::PhysFrame, page_table::PageTableFlags, PageTable},
+    structures::paging::{
+        frame::PhysFrame,
+        page_table::{PageTableEntry, PageTableFlags},
+        PageTable,
+    },
     PhysAddr, VirtAddr,
 };
 
@@ -106,57 +110,50 @@ impl TaskRegisters {
     }
 }
 
-unsafe fn recursively_map_region<I: Iterator<Item = u64>>(
-    region: &mut I,
-    levels: &mut [(u64, *mut PageTable)],
-    count: &mut u64,
-) -> *mut PageTable {
-    if levels.len() == 1 && levels[0].0 >= 256 {
-        panic!("recursively_map_region: Attempting to map into kernel range");
-    }
-    if levels[0].1.is_null() {
-        let new_pt = recursively_map_region(region, &mut levels[1..], count);
-        if new_pt.is_null() {
-            return new_pt;
-        }
-        levels[0].1 = new_pt;
-    }
-    let region_addr = match region.next() {
-        Some(x) => x,
-        None => return core::ptr::null_mut(),
-    };
-    let phys = PhysAddr::new(region_addr);
-
-    (*levels[0].1)[levels[0].0 as usize].set_addr(
-        phys,
-        PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
-    );
-    if levels[0].0 == 511 {
-        levels[0].0 = 0;
-        levels[0].1 = core::ptr::null_mut();
-    } else {
-        levels[0].0 += 1;
-    }
-    let pt = phys_to_virt(phys).as_mut_ptr::<PageTable>();
-    (*pt).zero();
-    *count += 1;
-    pt
-}
-
 unsafe fn make_continuous_map<I: Iterator<Item = u64>>(
     mut region: I,
-    start: u64,
+    mut vaddr: u64,
     root: &mut PageTable,
 ) -> u64 {
-    let mut levels: [(u64, *mut PageTable); 4] = [
-        ((start >> 12) & 511, core::ptr::null_mut()),
-        ((start >> 21) & 511, core::ptr::null_mut()),
-        ((start >> 30) & 511, core::ptr::null_mut()),
-        ((start >> 39) & 511, root as *mut PageTable),
-    ];
     let mut count: u64 = 0;
-    while !recursively_map_region(&mut region, &mut levels, &mut count).is_null() {
-        //with_serial_port(|p| writeln!(p, "mapped: ({}, {}, {}, {})", levels[3].0, levels[2].0, levels[1].0, levels[0].0).unwrap());
+    for page_phys in region {
+        let page_phys = PhysAddr::new(page_phys);
+        let page_virt = VirtAddr::new(vaddr);
+
+        let mut entry = &mut root[u16::from(page_virt.p4_index()) as usize];
+        let mut reached_leaf = false;
+        {
+            if !entry.is_unused() {
+                entry = &mut (*crate::paging::phys_to_virt(entry.addr()).as_mut_ptr::<PageTable>())
+                    [u16::from(page_virt.p3_index()) as usize];
+                if !entry.is_unused() {
+                    entry = &mut (*crate::paging::phys_to_virt(entry.addr())
+                        .as_mut_ptr::<PageTable>())
+                        [u16::from(page_virt.p2_index()) as usize];
+                    if !entry.is_unused() {
+                        entry = &mut (*crate::paging::phys_to_virt(entry.addr())
+                            .as_mut_ptr::<PageTable>())
+                            [u16::from(page_virt.p1_index()) as usize];
+                        reached_leaf = true;
+                    }
+                }
+            }
+        }
+        entry.set_addr(
+            page_phys,
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
+        );
+        {
+            let page = &mut *crate::paging::phys_to_virt(page_phys)
+                .as_mut_ptr::<[u8; PAGE_SIZE as usize]>();
+            for b in page.iter_mut() {
+                *b = 0;
+            }
+        }
+        if reached_leaf {
+            vaddr += PAGE_SIZE;
+            count += 1;
+        }
     }
     count
 }
@@ -172,15 +169,7 @@ impl Drop for Task {
         if !self.parent.is_null() {
             unsafe {
                 Task::dec_ref(self.parent);
-                let maybe_next = self.detach();
-
-                if get_current_task().unwrap().as_ptr() == self as *mut Task {
-                    if let Some(next) = maybe_next {
-                        set_current_task(Some(next));
-                    } else {
-                        set_current_task(None);
-                    }
-                }
+                self.detach();
             }
         } else {
             panic!("Attempting to drop root task");
@@ -193,7 +182,7 @@ impl Task {
         self.kobj_refcount.set(self.kobj_refcount.get() + 1);
     }
 
-    pub unsafe fn detach(&self) -> Option<NonNull<Task>> {
+    pub unsafe fn detach(&self) {
         let next_ptr = *self.next.get();
         if next_ptr.as_ptr() != self as *const Task as *mut Task {
             let prev = (*self.prev.get()).as_ref();
@@ -202,9 +191,14 @@ impl Task {
             *next.prev.get() = *self.prev.get();
             *self.prev.get() = NonNull::new(self as *const Task as *mut Task).unwrap();
             *self.next.get() = NonNull::new(self as *const Task as *mut Task).unwrap();
-            Some(next_ptr)
+
+            if get_current_task().unwrap().as_ptr() == self as *const Task as *mut Task {
+                set_current_task(Some(next_ptr));
+            }
         } else {
-            None
+            if get_current_task().unwrap().as_ptr() == self as *const Task as *mut Task {
+                set_current_task(None);
+            }
         }
     }
 
@@ -307,14 +301,14 @@ impl Task {
     }
 }
 
-pub fn retype_user<T: Retype>(vaddr: VirtAddr) -> Option<*mut T> {
-    assert!(core::mem::size_of::<T>() <= 4096);
+pub fn retype_user<T: Retype>(current: &mut PageTable, vaddr: VirtAddr) -> Option<*mut T> {
+    assert!(core::mem::size_of::<T>() <= PAGE_SIZE as usize);
 
     if !vaddr.is_aligned(PAGE_SIZE) {
         return None;
     }
 
-    let mut kvaddr = match crate::paging::take_from_user(vaddr) {
+    let mut kvaddr = match crate::paging::take_from_user(current, vaddr) {
         Some(x) => x,
         None => return None,
     };
@@ -326,6 +320,95 @@ pub fn retype_user<T: Retype>(vaddr: VirtAddr) -> Option<*mut T> {
     }
 }
 
+impl Retype for PageTable {
+    unsafe fn retype_in_place(&mut self) -> bool {
+        core::ptr::write(self, core::mem::zeroed());
+        true
+    }
+}
+
+/// This function is unsafe because the caller needs to guarantee that `pt` is an L4 page table.
+unsafe fn lookup_pt_entry<'a, 'b>(
+    mut pt: &'a mut PageTable,
+    vaddr: VirtAddr,
+) -> Option<&'a mut PageTableEntry> {
+    let indexes: [usize; 3] = [
+        u16::from(vaddr.p4_index()) as usize,
+        u16::from(vaddr.p3_index()) as usize,
+        u16::from(vaddr.p2_index()) as usize,
+    ];
+    for &index in indexes.iter() {
+        if pt[index].is_unused() {
+            return None;
+        }
+        let virt = crate::paging::phys_to_virt(pt[index].addr());
+        pt = &mut *virt.as_mut_ptr::<PageTable>();
+    }
+    return Some(&mut pt[u16::from(vaddr.p1_index()) as usize]);
+}
+
+pub unsafe fn map_physical_page_into_user(
+    current_root: &mut PageTable,
+    target_vaddr: VirtAddr,
+    phys: PhysAddr,
+    flags: PageTableFlags,
+) -> bool {
+    if u16::from(target_vaddr.p4_index()) >= 256 || !target_vaddr.is_aligned(PAGE_SIZE) {
+        return false;
+    }
+    let entry = if let Some(x) = lookup_pt_entry(current_root, target_vaddr) {
+        x
+    } else {
+        return false;
+    };
+    entry.set_addr(phys, flags);
+    true
+}
+
+pub fn retype_page_table_from_user(
+    current_root: &mut PageTable,
+    target_vaddr: VirtAddr,
+    user_page: VirtAddr,
+) -> Option<u8> {
+    if u16::from(target_vaddr.p4_index()) >= 256 || !target_vaddr.is_aligned(PAGE_SIZE) {
+        return None;
+    }
+
+    unsafe {
+        let current = Task::current().unwrap();
+        let current = current.as_ref();
+        let mut pt = current.page_table_root.get();
+
+        let indexes: [usize; 4] = [
+            u16::from(target_vaddr.p4_index()) as usize,
+            u16::from(target_vaddr.p3_index()) as usize,
+            u16::from(target_vaddr.p2_index()) as usize,
+            u16::from(target_vaddr.p1_index()) as usize,
+        ];
+        for (i, &index) in indexes.iter().enumerate() {
+            if (*pt)[index].is_unused() {
+                let kvaddr: *mut PageTable = match retype_user(current_root, user_page) {
+                    Some(x) => x,
+                    None => return None,
+                };
+                let phys = crate::paging::virt_to_phys(current_root, VirtAddr::new(kvaddr as u64))
+                    .expect("retype_user returned invalid address");
+                (*pt)[index].set_addr(
+                    phys,
+                    PageTableFlags::PRESENT
+                        | PageTableFlags::WRITABLE
+                        | PageTableFlags::USER_ACCESSIBLE,
+                );
+                return Some((4 - i) as u8); // in range 1..=4
+            } else {
+                let virt = crate::paging::phys_to_virt((*pt)[index].addr());
+                pt = virt.as_mut_ptr::<PageTable>();
+            }
+        }
+        Some(0)
+    }
+}
+
 pub fn switch_to(task: &Task) {
     set_current_task(Some(
         NonNull::new(task as *const Task as *mut Task).unwrap(),
@@ -333,8 +416,11 @@ pub fn switch_to(task: &Task) {
     unsafe {
         Cr3::write(
             PhysFrame::from_start_address(
-                crate::paging::virt_to_phys(VirtAddr::new(task.page_table_root.get() as u64))
-                    .unwrap(),
+                crate::paging::virt_to_phys(
+                    crate::paging::active_level_4_table(),
+                    VirtAddr::new(task.page_table_root.get() as u64),
+                )
+                .unwrap(),
             )
             .unwrap(),
             Cr3Flags::empty(),
@@ -394,16 +480,13 @@ pub unsafe fn enter_user_mode() -> ! {
 }
 
 pub unsafe fn schedule() -> ! {
-    switch_to(
-        (*(get_current_task().expect("All processes exited"))
-            .as_ref()
-            .next
-            .get())
-        .as_ref(),
-    );
+    let task = loop {
+        if let Some(t) = get_current_task() {
+            break t;
+        } else {
+            x86_64::instructions::hlt();
+        }
+    };
+    switch_to((*task.as_ref().next.get()).as_ref());
     enter_user_mode();
-}
-
-pub unsafe fn switch_task_mode() {
-    asm!("swapgs" :::: "volatile");
 }

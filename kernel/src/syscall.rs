@@ -1,4 +1,5 @@
 use crate::serial::with_serial_port;
+use crate::task::TaskRegisters;
 use core::convert::TryFrom;
 use core::fmt::Write;
 use num_enum::TryFromPrimitive;
@@ -40,7 +41,16 @@ enum SyscallIndex {
 
 #[inline(never)]
 #[no_mangle]
-extern "C" fn syscall_entry(p0: i64, p1: i64, p2: i64, p3: i64, p4: i64, p5: i64, nr: i64) -> i64 {
+extern "C" fn syscall_entry(
+    p0: i64,
+    p1: i64,
+    p2: i64,
+    p3: i64,
+    p4: i64,
+    p5: i64,
+    nr: i64,
+    registers: &TaskRegisters,
+) -> i64 {
     let idx = match SyscallIndex::try_from(nr as u32) {
         Ok(x) => x,
         Err(_) => return -1,
@@ -64,8 +74,17 @@ extern "C" fn syscall_entry(p0: i64, p1: i64, p2: i64, p3: i64, p4: i64, p5: i64
                 let result = call(&*cap.object, p1, p2, p3, p4);
                 //with_serial_port(|p| writeln!(p, "Call result = {}", result).unwrap());
                 result
+            } else if let Some(call_async) = (*cap.vtable).call_async {
+                match call_async(&*cap.object, p1, p2, p3, p4) {
+                    Ok(()) => {
+                        task.detach();
+                        *task.registers.get() = *registers;
+                        crate::task::schedule();
+                    }
+                    Err(x) => x,
+                }
             } else {
-                return -1;
+                -1
             }
         },
     }
@@ -79,29 +98,52 @@ unsafe extern "C" fn lowlevel_syscall_entry() {
         swapgs
         mov %rsp, %gs:8
         mov %gs:0, %rsp
-        pushq %rcx
-        pushq %r11
-        pushq %rbx
-        pushq %rbp
-        pushq %r12
-        pushq %r13
-        pushq %r14
-        pushq %r15
+
+        push %r11 // rflags
+        push %rcx // rip
+        push %rbp // rbp
+        push %gs:8 // rsp
+        push %rdi
+        push %rsi
+        push %rdx
+        push %rcx
+        push %rbx
+        push %rax
+        push %r8
+        push %r9
+        push %r10
+        push %r11
+        push %r12
+        push %r13
+        push %r14
+        push %r15
 
         subq $$16, %rsp
         mov %rax, (%rsp) // nr
+        leaq 16(%rsp), %rax
+        mov %rax, 8(%rsp) // saved registers
         mov %r10, %rcx
         call syscall_entry
         addq $$16, %rsp
 
-        popq %r15
-        popq %r14
-        popq %r13
-        popq %r12
-        popq %rbp
-        popq %rbx
-        popq %r11
-        popq %rcx
+        pop %r15
+        pop %r14
+        pop %r13
+        pop %r12
+        pop %r11
+        pop %r10
+        pop %r9
+        pop %r8
+        add $$8, %rsp // rax
+        pop %rbx
+        pop %rcx
+        pop %rdx
+        pop %rsi
+        pop %rdi
+        add $$8, %rsp // rsp
+        pop %rbp
+        pop %rcx
+        pop %r11
 
         cli
         mov %gs:8, %rsp

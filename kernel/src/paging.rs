@@ -43,12 +43,12 @@ pub unsafe fn init() {
     }
 }
 
-pub fn take_from_user(addr: VirtAddr) -> Option<VirtAddr> {
+pub fn take_from_user(current: &mut PageTable, addr: VirtAddr) -> Option<VirtAddr> {
     if u16::from(addr.p4_index()) >= 256 {
         return None; // kernel memory
     }
 
-    let mut table = unsafe { OffsetPageTable::new(active_level_4_table(), PHYSICAL_OFFSET) };
+    let mut table = unsafe { OffsetPageTable::new(current, PHYSICAL_OFFSET) };
     let page = match Page::<Size4KiB>::from_start_address(addr) {
         Ok(x) => x,
         _ => return None,
@@ -67,12 +67,12 @@ pub fn take_from_user(addr: VirtAddr) -> Option<VirtAddr> {
     }
 }
 
-pub fn put_to_user(addr: VirtAddr) -> bool {
+pub fn put_to_user(current: &mut PageTable, addr: VirtAddr) -> bool {
     if u16::from(addr.p4_index()) >= 256 {
         return false; // kernel memory
     }
 
-    let mut table = unsafe { OffsetPageTable::new(active_level_4_table(), PHYSICAL_OFFSET) };
+    let mut table = unsafe { OffsetPageTable::new(current, PHYSICAL_OFFSET) };
     let page = match Page::<Size4KiB>::from_start_address(addr) {
         Ok(x) => x,
         _ => return false,
@@ -92,8 +92,8 @@ pub fn put_to_user(addr: VirtAddr) -> bool {
     }
 }
 
-pub fn virt_to_phys(addr: VirtAddr) -> Option<PhysAddr> {
-    unsafe { OffsetPageTable::new(active_level_4_table(), PHYSICAL_OFFSET).translate_addr(addr) }
+pub fn virt_to_phys(current: &mut PageTable, addr: VirtAddr) -> Option<PhysAddr> {
+    unsafe { OffsetPageTable::new(current, PHYSICAL_OFFSET).translate_addr(addr) }
 }
 
 pub fn phys_to_virt(addr: PhysAddr) -> VirtAddr {
@@ -110,8 +110,7 @@ pub unsafe fn active_level_4_table() -> &'static mut PageTable {
     &mut *page_table_ptr
 }
 
-pub fn make_page_table(pt: &mut PageTable) {
-    let current = unsafe { active_level_4_table() };
+pub fn make_page_table(current: &mut PageTable, pt: &mut PageTable) {
     for (i, entry) in current.iter().enumerate().skip(256) {
         pt[i] = entry.clone();
     }

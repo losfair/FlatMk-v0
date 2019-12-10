@@ -122,18 +122,6 @@ fn is_user_fault(frame: &mut InterruptStackFrame) -> bool {
     (frame.code_segment >> 3) == get_selectors().user_code_selector.index() as u64
 }
 
-fn prepare_interrupt_entry(_frame: &mut InterruptStackFrame) {
-    unsafe {
-        crate::task::switch_task_mode();
-    }
-}
-
-fn prepare_interrupt_exit(_frame: &mut InterruptStackFrame) {
-    unsafe {
-        crate::task::switch_task_mode();
-    }
-}
-
 macro_rules! interrupt {
     ($name:ident, $internal_name:ident, $arg0:ident, $arg1:ident, $body:block) => {
         #[no_mangle]
@@ -310,7 +298,7 @@ interrupt_with_code!(
                 p,
                 "Page fault at {:p}. code = {:?} {:#?}",
                 Cr2::read().as_ptr::<u8>(),
-                code,
+                PageFaultErrorCode::from_bits(code),
                 frame
             )
             .unwrap();

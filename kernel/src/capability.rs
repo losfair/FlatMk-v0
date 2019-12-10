@@ -1,9 +1,11 @@
+use crate::serial::with_serial_port;
 use crate::task::Retype;
 use core::cell::{Cell, UnsafeCell};
 use core::convert::TryFrom;
+use core::fmt::Write;
 use core::sync::atomic::{AtomicU64, Ordering};
 use num_enum::TryFromPrimitive;
-use x86_64::VirtAddr;
+use x86_64::{instructions::tlb, structures::paging::PageTableFlags, PhysAddr, VirtAddr};
 
 bitflags! {
     pub struct Rights: u64 {
@@ -47,6 +49,7 @@ pub struct VTable<T> {
     pub lookup_capability: Option<unsafe fn(&T, cptr: u64) -> Option<&Capability>>,
     pub entry_capability: Option<unsafe fn(&T, cptr: u64) -> Option<*mut Capability>>,
     pub call: Option<unsafe fn(&T, i64, i64, i64, i64) -> i64>,
+    pub call_async: Option<unsafe fn(&T, i64, i64, i64, i64) -> Result<(), i64>>,
 }
 
 impl<T> VTable<T> {
@@ -56,6 +59,7 @@ impl<T> VTable<T> {
             lookup_capability: None,
             entry_capability: None,
             call: None,
+            call_async: None,
         }
     }
 }
@@ -178,6 +182,8 @@ pub struct CapRootTask {
 #[derive(Debug, Copy, Clone, TryFromPrimitive)]
 pub enum RootTaskCapRequest {
     AnyX86IoPort = 0,
+    LocalMap = 1,
+    LocalMmio = 2,
 }
 
 impl CapRootTask {
@@ -203,11 +209,13 @@ impl CapRootTask {
         };
         match requested_cap {
             RootTaskCapRequest::AnyX86IoPort => {
-                let target_cap: *mut CapAnyX86IoPort =
-                    match crate::task::retype_user(VirtAddr::new(p2 as u64)) {
-                        Some(x) => x,
-                        None => return -1,
-                    };
+                let target_cap: *mut CapAnyX86IoPort = match crate::task::retype_user(
+                    crate::paging::active_level_4_table(),
+                    VirtAddr::new(p2 as u64),
+                ) {
+                    Some(x) => x,
+                    None => return -1,
+                };
                 *cap_slot = Capability {
                     object: target_cap as *const Opaque,
                     vtable: CapAnyX86IoPort::vtable() as *const _ as *const VTable<Opaque>,
@@ -215,6 +223,124 @@ impl CapRootTask {
                 };
                 0
             }
+            RootTaskCapRequest::LocalMap => {
+                *cap_slot = Capability {
+                    object: core::ptr::null(),
+                    vtable: CapLocalMap::vtable() as *const _ as *const VTable<Opaque>,
+                    rights: Rights::DEFAULT,
+                };
+                0
+            }
+            RootTaskCapRequest::LocalMmio => {
+                let target_cap: *mut CapLocalMmio = match crate::task::retype_user(
+                    crate::paging::active_level_4_table(),
+                    VirtAddr::new(p2 as u64),
+                ) {
+                    Some(x) => x,
+                    None => return -1,
+                };
+                (*target_cap).make_root();
+                *cap_slot = Capability {
+                    object: target_cap as *const Opaque,
+                    vtable: CapLocalMmio::vtable() as *const _ as *const VTable<Opaque>,
+                    rights: Rights::DEFAULT,
+                };
+                0
+            }
+        }
+    }
+}
+
+pub struct CapLocalMap {
+    _unused: u64,
+}
+
+impl CapLocalMap {
+    pub fn vtable() -> &'static VTable<CapLocalMap> {
+        static VT: VTable<CapLocalMap> = VTable {
+            call: Some(CapLocalMap::call),
+            ..VTable::const_default()
+        };
+        &VT
+    }
+
+    unsafe fn call(obj: &CapLocalMap, p0: i64, p1: i64, _p2: i64, _p3: i64) -> i64 {
+        let target_vaddr = VirtAddr::new(p0 as u64);
+        let user_page = VirtAddr::new(p1 as u64);
+        match crate::task::retype_page_table_from_user(
+            crate::paging::active_level_4_table(),
+            target_vaddr,
+            user_page,
+        ) {
+            Some(x) => x as i64,
+            None => -1,
+        }
+    }
+}
+
+pub struct CapLocalMmio {
+    n_pages: usize,
+    pages: [PhysAddr; 500],
+}
+
+impl Retype for CapLocalMmio {
+    unsafe fn retype_in_place(&mut self) -> bool {
+        core::ptr::write(self, core::mem::zeroed());
+        true
+    }
+}
+
+impl CapLocalMmio {
+    pub fn vtable() -> &'static VTable<CapLocalMmio> {
+        assert!(core::mem::size_of::<Self>() <= 4096);
+
+        static VT: VTable<CapLocalMmio> = VTable {
+            call: Some(CapLocalMmio::call),
+            ..VTable::const_default()
+        };
+        &VT
+    }
+
+    fn make_root(&mut self) {
+        static PAGES: &'static [u64] = &[
+            0xb8000, // VGA
+        ];
+        self.n_pages = PAGES.len();
+        for i in 0..PAGES.len() {
+            self.pages[i] = PhysAddr::new(PAGES[i]);
+        }
+    }
+
+    unsafe fn call(obj: &CapLocalMmio, p0: i64, p1: i64, _p2: i64, _p3: i64) -> i64 {
+        let target_vaddr = VirtAddr::new(p0 as u64);
+        let phys_addr = PhysAddr::new(p1 as u64);
+
+        let mut ok = false;
+        for i in 0..obj.n_pages {
+            if obj.pages[i] == phys_addr {
+                ok = true;
+                break;
+            }
+        }
+        if !ok {
+            return -1;
+        }
+
+        match crate::task::map_physical_page_into_user(
+            crate::paging::active_level_4_table(),
+            target_vaddr,
+            phys_addr,
+            PageTableFlags::PRESENT
+                | PageTableFlags::WRITABLE
+                | PageTableFlags::NO_EXECUTE
+                | PageTableFlags::USER_ACCESSIBLE
+                | PageTableFlags::NO_CACHE,
+        ) {
+            true => {
+                tlb::flush(target_vaddr);
+                0
+            }
+            false => -1,
         }
     }
 }
@@ -227,7 +353,7 @@ pub struct CapAnyX86IoPort {
 
 impl Retype for CapAnyX86IoPort {
     unsafe fn retype_in_place(&mut self) -> bool {
-        *self = core::mem::zeroed();
+        core::ptr::write(self, core::mem::zeroed());
         true
     }
 }
