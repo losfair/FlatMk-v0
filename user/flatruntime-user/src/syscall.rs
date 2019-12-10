@@ -1,3 +1,6 @@
+use alloc::boxed::Box;
+use core::intrinsics::abort;
+
 #[naked]
 #[inline(never)]
 unsafe extern "C" fn _do_syscall() {
@@ -17,6 +20,8 @@ static mut CAP_SLOTS: [bool; 128] = [false; 128];
 #[derive(Debug, Copy, Clone)]
 pub enum RootTaskCapRequest {
     AnyX86IoPort = 0,
+    LocalMap = 1,
+    LocalMmio = 2,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -58,23 +63,80 @@ impl CPtr {
 
 pub struct RootCap(CPtr);
 
+pub struct RootResources {
+    pub x86_port: AnyX86Port,
+    pub local_mapper: crate::mm::LocalMapper,
+    pub local_mmio: crate::mm::LocalMmio,
+}
+
 impl RootCap {
     pub unsafe fn init() -> RootCap {
         CAP_SLOTS[0] = true; // any x86 port
         RootCap(CPtr(0))
     }
 
-    pub unsafe fn make_any_x86_port(&self, del: &'static mut Delegation) -> Option<AnyX86Port> {
+    /// Must be panic-free to avoid recursive panicks.
+    pub unsafe fn into_resources(self) -> RootResources {
+        RootResources {
+            x86_port: self.make_any_x86_port().unwrap_or_else(|| abort()),
+            local_mapper: self.make_local_mapper().unwrap_or_else(|| abort()),
+            local_mmio: self.make_local_mmio().unwrap_or_else(|| abort()),
+        }
+    }
+
+    pub unsafe fn make_any_x86_port(&self) -> Option<AnyX86Port> {
         if let Some(cptr) = alloc_cap() {
+            let mut del = Box::new(Delegation::new());
             if self.0.call(
                 cptr.0 as _,
                 RootTaskCapRequest::AnyX86IoPort as u32 as _,
-                del as *mut _ as i64,
+                &mut *del as *mut _ as i64,
                 0,
             ) == 0
             {
+                Box::leak(del);
                 Some(AnyX86Port { cap: cptr })
             } else {
+                Box::leak(del);
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    pub unsafe fn make_local_mapper(&self) -> Option<crate::mm::LocalMapper> {
+        if let Some(cptr) = alloc_cap() {
+            if self.0.call(
+                cptr.0 as _,
+                RootTaskCapRequest::LocalMap as u32 as _,
+                0,
+                0,
+            ) == 0
+            {
+                Some(crate::mm::LocalMapper::new(cptr))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    pub unsafe fn make_local_mmio(&self) -> Option<crate::mm::LocalMmio> {
+        if let Some(cptr) = alloc_cap() {
+            let mut del = Box::new(Delegation::new());
+            if self.0.call(
+                cptr.0 as _,
+                RootTaskCapRequest::LocalMmio as u32 as _,
+                &mut *del as *mut _ as i64,
+                0,
+            ) == 0
+            {
+                Box::leak(del);
+                Some(crate::mm::LocalMmio::new(cptr))
+            } else {
+                Box::leak(del);
                 None
             }
         } else {
