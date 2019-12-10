@@ -1,5 +1,9 @@
 #![no_main]
 #![no_std]
+#![feature(core_intrinsics)]
+
+#[macro_use]
+extern crate lazy_static;
 
 mod serial;
 mod vga;
@@ -8,29 +12,48 @@ use crate::serial::SerialPort;
 use core::fmt::Write;
 use flatruntime_user::{
     io::Port,
-    syscall::{Delegation, RootCap},
+    syscall::{Delegation, RootCap, RootResources},
 };
 
-static mut ANY_PORT_DELEGATION: Delegation = Delegation::new();
+lazy_static! {
+    static ref RESOURCES: RootResources = {
+        unsafe {
+            let root_cap = RootCap::init();
+            root_cap.into_resources()
+        }
+    };
+    static ref SERIAL_PORT: SerialPort = {
+        unsafe {
+            use core::intrinsics::abort;
+            let serial_ports: [Port; 8] = [
+                Port::new(RESOURCES.x86_port.get_port(0x3f8).unwrap_or_else(|| abort())),
+                Port::new(RESOURCES.x86_port.get_port(0x3f9).unwrap_or_else(|| abort())),
+                Port::new(RESOURCES.x86_port.get_port(0x3fa).unwrap_or_else(|| abort())),
+                Port::new(RESOURCES.x86_port.get_port(0x3fb).unwrap_or_else(|| abort())),
+                Port::new(RESOURCES.x86_port.get_port(0x3fc).unwrap_or_else(|| abort())),
+                Port::new(RESOURCES.x86_port.get_port(0x3fd).unwrap_or_else(|| abort())),
+                Port::new(RESOURCES.x86_port.get_port(0x3fe).unwrap_or_else(|| abort())),
+                Port::new(RESOURCES.x86_port.get_port(0x3ff).unwrap_or_else(|| abort())),
+            ];
+            SerialPort::new(serial_ports)
+        }
+    };
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn user_start() -> ! {
-    let root_cap = RootCap::init();
-    let any_port = root_cap
-        .make_any_x86_port(&mut ANY_PORT_DELEGATION)
-        .unwrap();
-    let serial_ports: [Port; 8] = [
-        Port::new(any_port.get_port(0x3f8).unwrap()),
-        Port::new(any_port.get_port(0x3f9).unwrap()),
-        Port::new(any_port.get_port(0x3fa).unwrap()),
-        Port::new(any_port.get_port(0x3fb).unwrap()),
-        Port::new(any_port.get_port(0x3fc).unwrap()),
-        Port::new(any_port.get_port(0x3fd).unwrap()),
-        Port::new(any_port.get_port(0x3fe).unwrap()),
-        Port::new(any_port.get_port(0x3ff).unwrap()),
-    ];
-    let mut serial = SerialPort::new(serial_ports);
-    writeln!(serial, "Hello, world!");
+    writeln!(SERIAL_PORT.handle(), "Init process started.");
+
+    RESOURCES.local_mapper.map_page(0x1b8000).unwrap();
+    RESOURCES.local_mmio.alloc_at(0x1b8000, 0xb8000).unwrap();
+    writeln!(SERIAL_PORT.handle(), "VGA memory mapped.");
     println!("Hello, world!");
+    writeln!(SERIAL_PORT.handle(), "Printed to VGA.");
+    loop {}
+}
+
+#[panic_handler]
+fn on_panic(info: &core::panic::PanicInfo) -> ! {
+    writeln!(SERIAL_PORT.handle(), "panic(): {:#?}", info);
     loop {}
 }

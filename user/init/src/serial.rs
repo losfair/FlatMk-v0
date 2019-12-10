@@ -10,13 +10,13 @@ impl SerialPort {
         SerialPort { ports }
     }
 
-    pub fn get_lsts(&mut self) -> u8 {
+    fn get_lsts(&self) -> u8 {
         unsafe {
             self.ports[5].inb() // line status register is on port 5.
         }
     }
 
-    pub fn send(&mut self, data: u8) {
+    pub fn send(&self, data: u8) {
         unsafe {
             match data {
                 8 | 0x7F => {
@@ -34,12 +34,18 @@ impl SerialPort {
             }
         }
     }
+
+    pub fn handle<'a>(&'a self) -> SerialPortHandle<'a> {
+        SerialPortHandle(self)
+    }
 }
 
-impl Write for SerialPort {
+pub struct SerialPortHandle<'a>(&'a SerialPort);
+
+impl<'a> Write for SerialPortHandle<'a> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for byte in s.bytes() {
-            self.send(byte);
+            self.0.send(byte);
         }
         Ok(())
     }
