@@ -1,21 +1,25 @@
 #![no_std]
-#![feature(asm, naked_functions, lang_items, core_intrinsics)]
+#![feature(asm, naked_functions, lang_items, core_intrinsics, alloc_error_handler)]
+
+extern crate alloc;
 
 pub mod io;
 pub mod syscall;
+pub mod mm;
 
-#[panic_handler]
-fn on_panic(info: &core::panic::PanicInfo) -> ! {
-    loop {}
-}
+#[global_allocator]
+static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
 #[lang = "eh_personality"]
 fn eh_personality() -> ! {
     loop {}
 }
 
+#[repr(align(4096))]
+struct Stack([u8; 1048576]);
+
 #[no_mangle]
-static mut STACK: [u8; 1048576] = [0; 1048576];
+static mut STACK: Stack = Stack([0; 1048576]);
 
 #[no_mangle]
 #[naked]
@@ -27,5 +31,10 @@ pub unsafe extern "C" fn _start() -> ! {
         pushq %rax
         jmp user_start
     "# :::: "volatile");
+    loop {}
+}
+
+#[alloc_error_handler]
+fn on_alloc_error(_: core::alloc::Layout) -> ! {
     loop {}
 }
