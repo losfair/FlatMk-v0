@@ -41,7 +41,6 @@ static mut ROOT_CAPSET: Option<CapabilitySet> = None;
 pub extern "C" fn kstart(boot_info: &'static BootInfo) -> ! {
     with_serial_port(|p| {
         writeln!(p, "Starting FlatRuntime Microkernel.").unwrap();
-        writeln!(p, "Boot info: {:#?}", boot_info).unwrap();
     });
     unsafe {
         boot::set_boot_info(boot_info);

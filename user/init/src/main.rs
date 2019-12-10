@@ -40,15 +40,16 @@ lazy_static! {
     };
 }
 
+unsafe fn resource_init() {
+    RESOURCES.local_mapper.map_page(0x1b8000).unwrap();
+    RESOURCES.local_mmio.alloc_at(0x1b8000, 0xb8000).unwrap();
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn user_start() -> ! {
     writeln!(SERIAL_PORT.handle(), "Init process started.");
-
-    RESOURCES.local_mapper.map_page(0x1b8000).unwrap();
-    RESOURCES.local_mmio.alloc_at(0x1b8000, 0xb8000).unwrap();
-    writeln!(SERIAL_PORT.handle(), "VGA memory mapped.");
-    println!("Hello, world!");
-    writeln!(SERIAL_PORT.handle(), "Printed to VGA.");
+    resource_init();
+    println!("init: FlatRuntime init task started.");
     loop {}
 }
 
