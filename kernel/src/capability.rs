@@ -1,10 +1,16 @@
+use crate::error::*;
+use crate::kobj::*;
+use crate::paging::PageTableObject;
 use crate::serial::with_serial_port;
-use crate::task::Retype;
+use crate::task::{retype_user, Task, PAGE_SIZE};
 use core::cell::{Cell, UnsafeCell};
 use core::convert::TryFrom;
 use core::fmt::Write;
+use core::mem::MaybeUninit;
+use core::ops::Deref;
 use core::sync::atomic::{AtomicU64, Ordering};
 use num_enum::TryFromPrimitive;
+use spin::Mutex;
 use x86_64::{instructions::tlb, structures::paging::PageTableFlags, PhysAddr, VirtAddr};
 
 bitflags! {
@@ -18,416 +24,320 @@ bitflags! {
     }
 }
 
-pub const N_CAPSET_SLOTS: usize = 128;
+pub const N_CAPSET_SLOTS: usize = 256;
+pub const N_ENDPOINT_SLOTS: usize = 32;
 
-#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+#[repr(transparent)]
+pub struct CapPtr(pub u64);
+
+pub struct CapabilityInvocation {
+    pub args: [i64; 4],
+}
+
+#[derive(Clone)]
 pub struct Capability {
-    pub object: *const Opaque,
-    pub vtable: *const VTable<Opaque>,
-    pub rights: Rights,
-}
-
-#[repr(C)]
-pub struct Opaque {
-    _unsafe_do_not_use: u64,
-}
-
-impl Opaque {
-    pub unsafe fn typed<T>(&self) -> &T {
-        core::mem::transmute(self)
-    }
-
-    pub unsafe fn typed_mut<T>(&mut self) -> &mut T {
-        core::mem::transmute(self)
-    }
-}
-
-/// VTable for an object.
-/// T must not be a DST or ZST.
-pub struct VTable<T> {
-    pub drop: Option<unsafe fn(*mut T)>,
-    pub lookup_capability: Option<unsafe fn(&T, cptr: u64) -> Option<&Capability>>,
-    pub entry_capability: Option<unsafe fn(&T, cptr: u64) -> Option<*mut Capability>>,
-    pub call: Option<unsafe fn(&T, i64, i64, i64, i64) -> i64>,
-    pub call_async: Option<unsafe fn(&T, i64, i64, i64, i64) -> Result<(), i64>>,
-}
-
-impl<T> VTable<T> {
-    pub const fn const_default() -> VTable<T> {
-        VTable {
-            drop: None,
-            lookup_capability: None,
-            entry_capability: None,
-            call: None,
-            call_async: None,
-        }
-    }
+    /// The object behind this capability.
+    ///
+    /// Option can be used here because KernelObjectRef is a transparent,
+    /// non-null reference.
+    pub object: Option<KernelObjectRef<LockedCapabilityObject>>,
 }
 
 impl Default for Capability {
     fn default() -> Capability {
-        unsafe { core::mem::zeroed() }
+        assert_eq!(
+            core::mem::size_of::<Capability>(),
+            core::mem::size_of::<usize>()
+        );
+        Capability { object: None }
     }
 }
 
-impl Drop for Capability {
-    fn drop(&mut self) {
-        if self.object.is_null() {
-            return;
-        }
-        unsafe {
-            if !self.vtable.is_null() {
-                if let Some(f) = (*self.vtable).drop {
-                    f(self.object as *mut _);
-                }
-            }
+pub struct LockedCapabilityObject(Mutex<CapabilityObject>);
+impl Deref for LockedCapabilityObject {
+    type Target = Mutex<CapabilityObject>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl Retype for LockedCapabilityObject {
+    unsafe fn retype_in_place(&mut self) -> KernelResult<()> {
+        core::ptr::write(
+            self,
+            LockedCapabilityObject(Mutex::new(CapabilityObject::Empty)),
+        );
+        Ok(())
+    }
+}
+impl Notify for LockedCapabilityObject {}
+
+pub enum CapabilityObject {
+    Empty,
+    Nested(CapabilitySet),
+    Endpoint([CapabilityEndpoint; N_ENDPOINT_SLOTS]),
+}
+
+#[derive(Clone)]
+pub struct CapabilityEndpoint {
+    pub object: CapabilityEndpointObject,
+    pub rights: Rights,
+}
+
+impl Default for CapabilityEndpoint {
+    fn default() -> CapabilityEndpoint {
+        CapabilityEndpoint {
+            object: CapabilityEndpointObject::Empty,
+            rights: Rights::NONE,
         }
     }
 }
 
-// Object types.
+#[derive(Clone)]
+pub enum CapabilityEndpointObject {
+    Empty,
+    BasicTask(KernelObjectRef<Task>),
+    RootTask,
+    X86IoPort(u16),
+    Mmio(CapMmio),
+    Vmap(CapVmap),
+}
 
-/// Nested capability set.
-#[repr(C, align(4096))]
+#[derive(Clone)]
+pub struct CapMmio {
+    pub page_table: KernelObjectRef<PageTableObject>,
+    pub page_addr: PhysAddr,
+}
+
+#[derive(Clone)]
+pub struct CapVmap {
+    pub page_table: KernelObjectRef<PageTableObject>,
+}
+
 pub struct CapabilitySet {
-    pub capabilities: UnsafeCell<[Capability; N_CAPSET_SLOTS]>,
+    pub capabilities: Mutex<[Capability; N_CAPSET_SLOTS]>,
 }
+
+impl Retype for CapabilitySet {
+    unsafe fn retype_in_place(&mut self) -> KernelResult<()> {
+        core::ptr::write(self, CapabilitySet::default());
+        Ok(())
+    }
+}
+impl Notify for CapabilitySet {}
 
 impl Default for CapabilitySet {
     fn default() -> CapabilitySet {
-        assert!(core::mem::size_of::<CapabilitySet>() <= 4096);
-        unsafe { core::mem::zeroed() }
+        CapabilitySet {
+            capabilities: Mutex::new(unsafe { core::mem::zeroed() }),
+        }
     }
 }
 
 impl CapabilitySet {
-    pub fn vtable() -> &'static VTable<CapabilitySet> {
-        static VT: VTable<CapabilitySet> = VTable {
-            drop: Some(capability_set_drop),
-            lookup_capability: Some(capability_set_lookup_capability),
-            entry_capability: Some(capability_set_entry_capability),
-            ..VTable::const_default()
-        };
-        &VT
-    }
+    pub fn entry_endpoint<T, F: FnOnce(&mut CapabilityEndpoint) -> T>(
+        &self,
+        mut cptr: CapPtr,
+        f: F,
+    ) -> KernelResult<T> {
+        let index = (cptr.0 >> 56) as usize;
+        cptr.0 <<= 8;
 
-    pub fn init_for_root_task(&self) {
-        unsafe {
-            let caps = &mut *self.capabilities.get();
-            caps[0].vtable = CapRootTask::vtable() as *const _ as *const VTable<Opaque>;
-            caps[0].rights = Rights::DEFAULT;
-        }
-    }
-
-    pub fn lookup_capability(&self, mut cptr: u64) -> Option<&Capability> {
-        unsafe {
-            let index = cptr & 255;
-            cptr >>= 8;
-            if index >= N_CAPSET_SLOTS as u64 {
-                return None;
-            }
-            let child = &(*self.capabilities.get())[index as usize];
-            if !child.vtable.is_null() {
-                if let Some(f) = (*child.vtable).lookup_capability {
-                    f(&*child.object, cptr)
-                } else {
-                    Some(child)
+        let mut caps = self.capabilities.lock();
+        if index >= caps.len() {
+            Err(KernelError::EmptyCapability)
+        } else {
+            if let Some(ref obj) = caps[index].object {
+                let mut obj = obj.lock();
+                match *obj {
+                    CapabilityObject::Empty => Err(KernelError::EmptyCapability),
+                    CapabilityObject::Nested(ref inner) => inner.entry_endpoint(cptr, f),
+                    CapabilityObject::Endpoint(ref mut inner) => {
+                        let index = (cptr.0 >> 56) as usize;
+                        cptr.0 <<= 8;
+                        if index >= inner.len() {
+                            Err(KernelError::EmptyCapability)
+                        } else {
+                            Ok(f(&mut inner[index]))
+                        }
+                    }
                 }
             } else {
-                None
+                Err(KernelError::EmptyCapability)
             }
         }
     }
+    pub fn lookup(&self, cptr: CapPtr) -> KernelResult<CapabilityEndpoint> {
+        self.entry_endpoint(cptr, |x| x.clone())
+    }
+}
 
-    pub unsafe fn entry_capability(&self, mut cptr: u64) -> Option<*mut Capability> {
-        let index = cptr & 255;
-        cptr >>= 8;
-        if index >= N_CAPSET_SLOTS as u64 {
-            return None;
-        }
-        let child = &mut (*self.capabilities.get())[index as usize];
-        if !child.vtable.is_null() {
-            if let Some(f) = (*child.vtable).entry_capability {
-                f(&*child.object, cptr)
-            } else {
-                Some(child as *mut _)
+impl CapabilityEndpointObject {
+    pub fn invoke(&self, invocation: CapabilityInvocation) -> KernelResult<i64> {
+        match *self {
+            CapabilityEndpointObject::Empty => Err(KernelError::EmptyCapability),
+            CapabilityEndpointObject::BasicTask(ref task) => {
+                invoke_cap_basic_task(invocation, task)
             }
+            CapabilityEndpointObject::RootTask => invoke_cap_root_task(invocation),
+            CapabilityEndpointObject::X86IoPort(index) => invoke_cap_x86_io_port(invocation, index),
+            CapabilityEndpointObject::Mmio(ref mmio) => invoke_cap_mmio(invocation, mmio),
+            CapabilityEndpointObject::Vmap(ref vmap) => invoke_cap_vmap(invocation, vmap),
+        }
+    }
+}
+
+fn invoke_cap_basic_task(
+    invocation: CapabilityInvocation,
+    task: &KernelObjectRef<Task>,
+) -> KernelResult<i64> {
+    #[repr(u32)]
+    #[derive(Debug, Copy, Clone, TryFromPrimitive)]
+    enum BasicTaskRequest {
+        MakeFirstLevelEndpoint = 0,
+        CapVmap = 1,
+    }
+
+    let current = Task::current().unwrap();
+
+    let req = match BasicTaskRequest::try_from(invocation.args[0] as u32) {
+        Ok(x) => x,
+        Err(_) => return Err(KernelError::InvalidArgument),
+    };
+    match req {
+        BasicTaskRequest::MakeFirstLevelEndpoint => {
+            let mut caps = task.capabilities.capabilities.lock();
+            let target_first_level_index = invocation.args[1] as usize;
+            if target_first_level_index >= caps.len() {
+                return Err(KernelError::InvalidArgument);
+            }
+
+            let delegation: KernelObjectRef<LockedCapabilityObject> =
+                current.page_table_root.with(|pt| {
+                    retype_user(
+                        pt,
+                        current.clone(),
+                        VirtAddr::new(invocation.args[2] as u64),
+                    )
+                })?;
+            let mut endpoints: MaybeUninit<[CapabilityEndpoint; N_ENDPOINT_SLOTS]> =
+                MaybeUninit::uninit();
+            unsafe {
+                let inner = &mut *endpoints.as_mut_ptr();
+                for elem in inner.iter_mut() {
+                    core::ptr::write(elem, CapabilityEndpoint::default());
+                }
+            }
+            *delegation.lock() = CapabilityObject::Endpoint(unsafe { endpoints.assume_init() });
+            caps[target_first_level_index].object = Some(delegation);
+            Ok(0)
+        }
+        BasicTaskRequest::CapVmap => {
+            let cptr = CapPtr(invocation.args[1] as u64);
+            task.capabilities.entry_endpoint(cptr, |endpoint| {
+                endpoint.object = CapabilityEndpointObject::Vmap(CapVmap {
+                    page_table: task.page_table_root.clone(),
+                });
+            })?;
+            Ok(0)
+        }
+    }
+}
+
+fn invoke_cap_root_task(invocation: CapabilityInvocation) -> KernelResult<i64> {
+    #[repr(u32)]
+    #[derive(Debug, Copy, Clone, TryFromPrimitive)]
+    enum RootTaskCapRequest {
+        X86IoPort = 0,
+        Mmio = 1,
+    }
+
+    let current = Task::current().unwrap();
+
+    let cptr = CapPtr(invocation.args[0] as u64);
+
+    let requested_cap = match RootTaskCapRequest::try_from(invocation.args[1] as u32) {
+        Ok(x) => x,
+        Err(_) => return Err(KernelError::InvalidArgument),
+    };
+    match requested_cap {
+        RootTaskCapRequest::X86IoPort => {
+            let cptr = CapPtr(invocation.args[1] as u64);
+            let port = invocation.args[2] as u16;
+            current.capabilities.entry_endpoint(cptr, |endpoint| {
+                endpoint.object = CapabilityEndpointObject::X86IoPort(port);
+            })?;
+            Ok(0)
+        }
+        RootTaskCapRequest::Mmio => {
+            let cptr = CapPtr(invocation.args[1] as u64);
+            let phys_addr = PhysAddr::new(invocation.args[2] as u64);
+
+            if !phys_addr.is_aligned(PAGE_SIZE) {
+                return Err(KernelError::NotAligned);
+            }
+
+            current.capabilities.entry_endpoint(cptr, |endpoint| {
+                endpoint.object = CapabilityEndpointObject::Mmio(CapMmio {
+                    page_table: current.page_table_root.clone(),
+                    page_addr: phys_addr,
+                });
+            })?;
+            Ok(0)
+        }
+    }
+}
+
+fn invoke_cap_x86_io_port(invocation: CapabilityInvocation, port: u16) -> KernelResult<i64> {
+    use x86::io;
+    unsafe {
+        if invocation.args[0] == 0 {
+            // read
+            Ok(match invocation.args[1] {
+                1 => io::inb(port) as i64,
+                2 => io::inw(port) as i64,
+                4 => io::inl(port) as i64,
+                _ => return Err(KernelError::InvalidArgument),
+            })
+        } else if invocation.args[0] == 1 {
+            // write
+            match invocation.args[1] {
+                1 => io::outb(port, invocation.args[2] as u8),
+                2 => io::outw(port, invocation.args[2] as u16),
+                4 => io::outl(port, invocation.args[2] as u32),
+                _ => return Err(KernelError::InvalidArgument),
+            }
+            Ok(0)
         } else {
-            Some(child as *mut _)
+            Err(KernelError::InvalidArgument)
         }
     }
 }
 
-unsafe fn capability_set_drop(obj: *mut CapabilitySet) {
-    core::ptr::drop_in_place(&mut *obj);
+fn invoke_cap_vmap(invocation: CapabilityInvocation, vmap: &CapVmap) -> KernelResult<i64> {
+    let target_vaddr = VirtAddr::new(invocation.args[0] as u64);
+    let user_page = VirtAddr::new(invocation.args[1] as u64);
+
+    vmap.page_table
+        .with(|pt| crate::task::retype_page_table_from_user(pt, target_vaddr, user_page))
+        .map(|x| x as i64)
 }
 
-unsafe fn capability_set_lookup_capability(obj: &CapabilitySet, cptr: u64) -> Option<&Capability> {
-    obj.lookup_capability(cptr)
-}
+fn invoke_cap_mmio(invocation: CapabilityInvocation, mmio: &CapMmio) -> KernelResult<i64> {
+    let target_vaddr = VirtAddr::new(invocation.args[0] as u64);
 
-unsafe fn capability_set_entry_capability(
-    obj: &CapabilitySet,
-    cptr: u64,
-) -> Option<*mut Capability> {
-    obj.entry_capability(cptr)
-}
-
-/// Root task capability generator.
-pub struct CapRootTask {
-    _unused: u64,
-}
-
-#[repr(u32)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
-pub enum RootTaskCapRequest {
-    AnyX86IoPort = 0,
-    LocalMap = 1,
-    LocalMmio = 2,
-}
-
-impl CapRootTask {
-    pub fn vtable() -> &'static VTable<CapRootTask> {
-        static VT: VTable<CapRootTask> = VTable {
-            call: Some(CapRootTask::call),
-            ..VTable::const_default()
-        };
-        &VT
-    }
-
-    unsafe fn call(obj: &CapRootTask, p0: i64, p1: i64, p2: i64, _p3: i64) -> i64 {
-        let task = crate::task::get_current_task().unwrap();
-        let caps = &(*task.as_ref().capabilities);
-
-        let cap_slot = match caps.entry_capability(p0 as u64) {
-            Some(x) => x,
-            None => return -1,
-        };
-        let requested_cap = match RootTaskCapRequest::try_from(p1 as u32) {
-            Ok(x) => x,
-            Err(_) => return -1,
-        };
-        match requested_cap {
-            RootTaskCapRequest::AnyX86IoPort => {
-                let target_cap: *mut CapAnyX86IoPort = match crate::task::retype_user(
-                    crate::paging::active_level_4_table(),
-                    VirtAddr::new(p2 as u64),
-                ) {
-                    Some(x) => x,
-                    None => return -1,
-                };
-                *cap_slot = Capability {
-                    object: target_cap as *const Opaque,
-                    vtable: CapAnyX86IoPort::vtable() as *const _ as *const VTable<Opaque>,
-                    rights: Rights::DEFAULT,
-                };
-                0
-            }
-            RootTaskCapRequest::LocalMap => {
-                *cap_slot = Capability {
-                    object: core::ptr::null(),
-                    vtable: CapLocalMap::vtable() as *const _ as *const VTable<Opaque>,
-                    rights: Rights::DEFAULT,
-                };
-                0
-            }
-            RootTaskCapRequest::LocalMmio => {
-                let target_cap: *mut CapLocalMmio = match crate::task::retype_user(
-                    crate::paging::active_level_4_table(),
-                    VirtAddr::new(p2 as u64),
-                ) {
-                    Some(x) => x,
-                    None => return -1,
-                };
-                (*target_cap).make_root();
-                *cap_slot = Capability {
-                    object: target_cap as *const Opaque,
-                    vtable: CapLocalMmio::vtable() as *const _ as *const VTable<Opaque>,
-                    rights: Rights::DEFAULT,
-                };
-                0
-            }
-        }
-    }
-}
-
-pub struct CapLocalMap {
-    _unused: u64,
-}
-
-impl CapLocalMap {
-    pub fn vtable() -> &'static VTable<CapLocalMap> {
-        static VT: VTable<CapLocalMap> = VTable {
-            call: Some(CapLocalMap::call),
-            ..VTable::const_default()
-        };
-        &VT
-    }
-
-    unsafe fn call(obj: &CapLocalMap, p0: i64, p1: i64, _p2: i64, _p3: i64) -> i64 {
-        let target_vaddr = VirtAddr::new(p0 as u64);
-        let user_page = VirtAddr::new(p1 as u64);
-        match crate::task::retype_page_table_from_user(
-            crate::paging::active_level_4_table(),
+    mmio.page_table.with(|pt| unsafe {
+        crate::task::map_physical_page_into_user(
+            pt,
             target_vaddr,
-            user_page,
-        ) {
-            Some(x) => x as i64,
-            None => -1,
-        }
-    }
-}
-
-pub struct CapLocalMmio {
-    n_pages: usize,
-    pages: [PhysAddr; 500],
-}
-
-impl Retype for CapLocalMmio {
-    unsafe fn retype_in_place(&mut self) -> bool {
-        core::ptr::write(self, core::mem::zeroed());
-        true
-    }
-}
-
-impl CapLocalMmio {
-    pub fn vtable() -> &'static VTable<CapLocalMmio> {
-        assert!(core::mem::size_of::<Self>() <= 4096);
-
-        static VT: VTable<CapLocalMmio> = VTable {
-            call: Some(CapLocalMmio::call),
-            ..VTable::const_default()
-        };
-        &VT
-    }
-
-    fn make_root(&mut self) {
-        static PAGES: &'static [u64] = &[
-            0xb8000, // VGA
-        ];
-        self.n_pages = PAGES.len();
-        for i in 0..PAGES.len() {
-            self.pages[i] = PhysAddr::new(PAGES[i]);
-        }
-    }
-
-    unsafe fn call(obj: &CapLocalMmio, p0: i64, p1: i64, _p2: i64, _p3: i64) -> i64 {
-        let target_vaddr = VirtAddr::new(p0 as u64);
-        let phys_addr = PhysAddr::new(p1 as u64);
-
-        let mut ok = false;
-        for i in 0..obj.n_pages {
-            if obj.pages[i] == phys_addr {
-                ok = true;
-                break;
-            }
-        }
-        if !ok {
-            return -1;
-        }
-
-        match crate::task::map_physical_page_into_user(
-            crate::paging::active_level_4_table(),
-            target_vaddr,
-            phys_addr,
+            mmio.page_addr,
             PageTableFlags::PRESENT
                 | PageTableFlags::WRITABLE
                 | PageTableFlags::NO_EXECUTE
                 | PageTableFlags::USER_ACCESSIBLE
                 | PageTableFlags::NO_CACHE,
-        ) {
-            true => {
-                tlb::flush(target_vaddr);
-                0
-            }
-            false => -1,
-        }
-    }
-}
-
-/// Capability to request any I/O ports.
-pub struct CapAnyX86IoPort {
-    ports: [UnsafeCell<CapX86IoPort>; 1024],
-    next: Cell<usize>,
-}
-
-impl Retype for CapAnyX86IoPort {
-    unsafe fn retype_in_place(&mut self) -> bool {
-        core::ptr::write(self, core::mem::zeroed());
-        true
-    }
-}
-
-impl CapAnyX86IoPort {
-    pub fn vtable() -> &'static VTable<CapAnyX86IoPort> {
-        static VT: VTable<CapAnyX86IoPort> = VTable {
-            call: Some(CapAnyX86IoPort::call),
-            ..VTable::const_default()
-        };
-        &VT
-    }
-
-    unsafe fn call(obj: &CapAnyX86IoPort, p0: i64, p1: i64, _p2: i64, _p3: i64) -> i64 {
-        if obj.next.get() == obj.ports.len() {
-            return -1;
-        }
-
-        let task = crate::task::get_current_task().unwrap();
-        let caps = &(*task.as_ref().capabilities);
-
-        let cap_slot = match caps.entry_capability(p0 as u64) {
-            Some(x) => x,
-            None => return -1,
-        };
-        let port = p1 as u16;
-
-        let index = obj.next.get();
-        obj.next.set(index + 1);
-        (*obj.ports[index].get()).which = port;
-        *cap_slot = Capability {
-            object: obj.ports[index].get() as *const Opaque,
-            vtable: CapX86IoPort::vtable() as *const _ as *const VTable<Opaque>,
-            rights: Rights::DEFAULT,
-        };
-        0
-    }
-}
-
-/// Capability to an I/O port.\
-#[repr(transparent)]
-pub struct CapX86IoPort {
-    pub which: u16,
-}
-
-impl CapX86IoPort {
-    pub fn vtable() -> &'static VTable<CapX86IoPort> {
-        static VT: VTable<CapX86IoPort> = VTable {
-            call: Some(CapX86IoPort::call),
-            ..VTable::const_default()
-        };
-        &VT
-    }
-
-    unsafe fn call(me: &CapX86IoPort, p0: i64, p1: i64, p2: i64, p3: i64) -> i64 {
-        use x86::io;
-        if p0 == 0 {
-            // read
-            match p1 {
-                1 => io::inb(me.which) as i64,
-                2 => io::inw(me.which) as i64,
-                4 => io::inl(me.which) as i64,
-                _ => -1,
-            }
-        } else if p0 == 1 {
-            match p1 {
-                1 => io::outb(me.which, p2 as u8),
-                2 => io::outw(me.which, p2 as u16),
-                4 => io::outl(me.which, p2 as u32),
-                _ => return -1,
-            }
-            0
-        } else {
-            -1
-        }
-    }
+        )
+    })?;
+    tlb::flush(target_vaddr);
+    Ok(0)
 }

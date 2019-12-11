@@ -101,6 +101,10 @@ pub unsafe fn init_idt() {
         .set_handler_fn(intr_double_fault)
         .set_stack_index(DOUBLE_FAULT_IST_INDEX);
 
+    IDT.divide_error
+        .set_handler_fn(core::mem::transmute(intr_divide_error as usize));
+    IDT.invalid_opcode
+        .set_handler_fn(core::mem::transmute(intr_invalid_opcode as usize));
     IDT.breakpoint
         .set_handler_fn(core::mem::transmute(intr_breakpoint as usize));
     IDT.page_fault
@@ -133,7 +137,6 @@ macro_rules! interrupt {
         unsafe extern "C" fn $name() {
             asm!(concat!(r#"
                 swapgs
-                sti
 
                 push %rbp
                 mov %rsp, %rbp
@@ -178,7 +181,6 @@ macro_rules! interrupt {
                 add $$32, %rsp
                 pop %rbp
 
-                cli
                 swapgs
                 iretq
             "#) :::: "volatile");
@@ -197,7 +199,6 @@ macro_rules! interrupt_with_code {
         unsafe extern "C" fn $name() {
             asm!(concat!(r#"
                 swapgs
-                sti
 
                 push %rbp
                 mov %rsp, %rbp
@@ -245,7 +246,6 @@ macro_rules! interrupt_with_code {
 
                 add $$8, %rsp // error code
 
-                cli
                 swapgs
                 iretq
             "#) :::: "volatile");
@@ -254,7 +254,7 @@ macro_rules! interrupt_with_code {
 }
 
 /// Double fault. Entry/exit mode switch code should not run.
-extern "x86-interrupt" fn intr_double_fault(frame: &mut InterruptStackFrame, code: u64) {
+extern "x86-interrupt" fn intr_double_fault(frame: &mut InterruptStackFrame, code: u64) -> ! {
     with_serial_port(|p| {
         writeln!(p, "Double fault: code = {} {:#?}", code, frame).unwrap();
     });
@@ -270,6 +270,32 @@ interrupt_with_code!(
     {}
 );
 
+interrupt!(intr_divide_error, __intr_divide_error, frame, _registers, {
+    with_serial_port(|p| {
+        writeln!(p, "Divide error: {:#?}", frame).unwrap();
+    });
+    if !is_user_fault(frame) {
+        panic!("Kernel divide error");
+    }
+    panic!("Unable to handle user divide error");
+});
+
+interrupt!(
+    intr_invalid_opcode,
+    __intr_invalid_opcode,
+    frame,
+    _registers,
+    {
+        with_serial_port(|p| {
+            writeln!(p, "Invalid opcode: {:#?}", frame).unwrap();
+        });
+        if !is_user_fault(frame) {
+            panic!("Kernel invalid opcode");
+        }
+        panic!("Unable to handle user invalid opcode");
+    }
+);
+
 interrupt_with_code!(intr_gpf, __intr_gpf, frame, registers, code, {
     with_serial_port(|p| {
         writeln!(p, "General protection fault: code = {} {:#?}", code, frame).unwrap();
@@ -277,13 +303,7 @@ interrupt_with_code!(intr_gpf, __intr_gpf, frame, registers, code, {
     if !is_user_fault(frame) {
         panic!("Kernel GPF");
     }
-    let mut current = Task::current().unwrap();
-    let current = unsafe { current.as_ref() };
-    unsafe {
-        *current.registers.get() = *registers;
-        current.release();
-        crate::task::schedule();
-    }
+    panic!("Unable to handle user GPF");
 });
 
 interrupt_with_code!(
@@ -306,13 +326,7 @@ interrupt_with_code!(
         if !is_user_fault(frame) {
             panic!("Kernel page fault");
         }
-        let mut current = Task::current().unwrap();
-        let current = unsafe { current.as_ref() };
-        unsafe {
-            *current.registers.get() = *registers;
-            current.release();
-            crate::task::schedule();
-        }
+        panic!("Unable to handle user page fault");
     }
 );
 
@@ -323,10 +337,10 @@ interrupt!(intr_timer, __intr_timer, frame, registers, {
     }
     if is_user_fault(frame) {
         let mut current = Task::current().unwrap();
-        let current = unsafe { current.as_ref() };
         unsafe {
-            *current.registers.get() = *registers;
-            crate::task::schedule();
+            *current.local_state.unsafe_deref().registers.get() = registers.clone();
+            drop(current);
+            crate::task::enter_user_mode();
         }
     }
 });

@@ -1,3 +1,6 @@
+use crate::capability::{CapPtr, CapabilityInvocation};
+use crate::error::*;
+use crate::kobj::*;
 use crate::serial::with_serial_port;
 use crate::task::TaskRegisters;
 use core::convert::TryFrom;
@@ -21,8 +24,9 @@ pub unsafe fn init() {
     Efer::write(efer);
 
     IA32_LSTAR.write(lowlevel_syscall_entry as usize as u64);
-    // FIXME: Fix this
-    //IA32_FMASK.write(!RFlags::INTERRUPT_FLAG.bits());
+
+    // Disable interrupts during syscall.
+    IA32_FMASK.write(RFlags::INTERRUPT_FLAG.bits());
 
     let selectors = crate::exception::get_selectors();
     IA32_STAR.write(
@@ -53,40 +57,25 @@ extern "C" fn syscall_entry(
 ) -> i64 {
     let idx = match SyscallIndex::try_from(nr as u32) {
         Ok(x) => x,
-        Err(_) => return -1,
+        Err(_) => return KernelError::InvalidArgument as i32 as i64,
     };
     match idx {
-        SyscallIndex::Call => unsafe {
-            // call
-            let task = crate::task::get_current_task().unwrap();
-            let task = task.as_ref();
-            let caps = &*(*task.capabilities).capabilities.get();
-            let index = if p0 >= 0 && (p0 as usize) < caps.len() {
-                p0 as usize
-            } else {
-                return -1;
-            };
-            let cap = &caps[index];
-            if cap.vtable.is_null() {
-                return -1;
-            }
-            if let Some(call) = (*cap.vtable).call {
-                let result = call(&*cap.object, p1, p2, p3, p4);
-                //with_serial_port(|p| writeln!(p, "Call result = {}", result).unwrap());
-                result
-            } else if let Some(call_async) = (*cap.vtable).call_async {
-                match call_async(&*cap.object, p1, p2, p3, p4) {
-                    Ok(()) => {
-                        task.detach();
-                        *task.registers.get() = *registers;
-                        crate::task::schedule();
-                    }
-                    Err(x) => x,
+        SyscallIndex::Call => {
+            let cap = {
+                let task = crate::task::get_current_task().unwrap();
+                match task.capabilities.lookup(CapPtr(p0 as u64)) {
+                    Ok(x) => x,
+                    Err(e) => return e as i32 as i64,
                 }
-            } else {
-                -1
+            };
+            // TODO: Check rights.
+            match cap.object.invoke(CapabilityInvocation {
+                args: [p1, p2, p3, p4],
+            }) {
+                Ok(x) => x,
+                Err(e) => e as i32 as i64,
             }
-        },
+        }
     }
     //with_serial_port(|p| writeln!(p, "Syscall nr={}, params=[{}, {}, {}, {}, {}, {}]", nr, p0, p1, p2, p3, p4, p5).unwrap());
 }
@@ -96,13 +85,13 @@ extern "C" fn syscall_entry(
 unsafe extern "C" fn lowlevel_syscall_entry() {
     asm!(r#"
         swapgs
-        mov %rsp, %gs:8
-        mov %gs:0, %rsp
+        mov %rsp, %gs:32
+        mov %gs:24, %rsp
 
         push %r11 // rflags
         push %rcx // rip
         push %rbp // rbp
-        push %gs:8 // rsp
+        push %gs:32 // rsp
         push %rdi
         push %rsi
         push %rdx
@@ -145,8 +134,7 @@ unsafe extern "C" fn lowlevel_syscall_entry() {
         pop %rcx
         pop %r11
 
-        cli
-        mov %gs:8, %rsp
+        mov %gs:32, %rsp
         swapgs
         sysretq
     "# :::: "volatile");

@@ -1,6 +1,11 @@
+use crate::error::*;
+use crate::kobj::*;
 use crate::serial::with_serial_port;
 use bootloader::BootInfo;
+use core::cell::UnsafeCell;
 use core::fmt::Write;
+use core::ops::Deref;
+use spin::Mutex;
 use x86_64::{
     instructions::tlb,
     registers::control::Cr3,
@@ -13,6 +18,35 @@ use x86_64::{
 };
 
 static mut PHYSICAL_OFFSET: VirtAddr = VirtAddr::zero();
+
+pub struct PageTableObject {
+    inner: Mutex<&'static mut PageTable>,
+}
+
+impl Retype for PageTableObject {}
+impl Notify for PageTableObject {}
+
+impl PageTableObject {
+    /// Creates a PageTableObject from a page-sized PageTable.
+    /// Getting the `&'static mut PageTable` itself is unsafe, but this function is not.
+    pub fn new(inner: &'static mut PageTable) -> PageTableObject {
+        PageTableObject {
+            inner: Mutex::new(inner),
+        }
+    }
+
+    pub fn with<T, F: FnOnce(&mut PageTable) -> T>(&self, cb: F) -> T {
+        let mut lg = self.inner.lock();
+        let inner: &mut PageTable = unsafe { core::ptr::read(&*lg) };
+        cb(inner)
+    }
+}
+
+pub enum PageFaultState {
+    NoPageFault,
+    Permission,
+    NotPresent,
+}
 
 pub unsafe fn init() {
     let (l4pt, _) = Cr3::read();
@@ -43,15 +77,15 @@ pub unsafe fn init() {
     }
 }
 
-pub fn take_from_user(current: &mut PageTable, addr: VirtAddr) -> Option<VirtAddr> {
+pub fn take_from_user(current: &mut PageTable, addr: VirtAddr) -> KernelResult<VirtAddr> {
     if u16::from(addr.p4_index()) >= 256 {
-        return None; // kernel memory
+        return Err(KernelError::InvalidDelegation);
     }
 
     let mut table = unsafe { OffsetPageTable::new(current, PHYSICAL_OFFSET) };
     let page = match Page::<Size4KiB>::from_start_address(addr) {
         Ok(x) => x,
-        _ => return None,
+        _ => return Err(KernelError::InvalidDelegation),
     };
     match table.update_flags(
         page,
@@ -59,14 +93,15 @@ pub fn take_from_user(current: &mut PageTable, addr: VirtAddr) -> Option<VirtAdd
     ) {
         Ok(flusher) => {
             flusher.flush();
-            table
-                .translate_addr(page.start_address())
-                .map(|x| unsafe { PHYSICAL_OFFSET } + x.as_u64())
+            match table.translate_addr(page.start_address()) {
+                Some(x) => Ok(phys_to_virt(x)),
+                None => Err(KernelError::InvalidState),
+            }
         }
-        Err(_) => None,
+        Err(_) => Err(KernelError::InvalidState),
     }
 }
-
+/*
 pub fn put_to_user(current: &mut PageTable, addr: VirtAddr) -> bool {
     if u16::from(addr.p4_index()) >= 256 {
         return false; // kernel memory
@@ -91,9 +126,13 @@ pub fn put_to_user(current: &mut PageTable, addr: VirtAddr) -> bool {
         Err(_) => false,
     }
 }
+*/
 
-pub fn virt_to_phys(current: &mut PageTable, addr: VirtAddr) -> Option<PhysAddr> {
-    unsafe { OffsetPageTable::new(current, PHYSICAL_OFFSET).translate_addr(addr) }
+pub fn virt_to_phys(current: &mut PageTable, addr: VirtAddr) -> KernelResult<PhysAddr> {
+    match unsafe { OffsetPageTable::new(current, PHYSICAL_OFFSET).translate_addr(addr) } {
+        Some(x) => Ok(x),
+        None => Err(KernelError::InvalidAddress),
+    }
 }
 
 pub fn phys_to_virt(addr: PhysAddr) -> VirtAddr {

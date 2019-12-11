@@ -1,6 +1,8 @@
 use crate::capability::{Capability, CapabilitySet};
-use crate::kobj::KernelObject;
-use crate::paging::phys_to_virt;
+use crate::error::*;
+use crate::kobj::*;
+use crate::kobj::{KernelObject, LikeKernelObjectRef, Retype};
+use crate::paging::{phys_to_virt, PageFaultState, PageTableObject};
 use crate::serial::with_serial_port;
 use bootloader::bootinfo::MemoryRegionType;
 use core::cell::{Cell, UnsafeCell};
@@ -28,42 +30,49 @@ static ROOT_IMAGE: &'static [u8] =
     include_bytes!("../../user/init/target/x86_64-flatmk/debug/init");
 static mut IA32_KERNEL_GS_BASE: Msr = Msr::new(0xc0000102);
 
-/// A task must not be larger than 4096 bytes.
-#[repr(C, align(4096))]
-pub struct Task {
+/// LocalState is NOT thread safe and should only be accessed on the task's
+/// own thread.
+#[repr(C)]
+pub struct LocalState {
     /// Address of the kernel syscall stack.
-    pub kernel_stack: u64,
+    pub kernel_stack: Cell<VirtAddr>,
 
     /// Saved address of the user stack.
-    pub user_stack: Cell<u64>,
+    pub user_stack: Cell<VirtAddr>,
 
-    /// Previous task in a circular task list.
-    pub prev: UnsafeCell<NonNull<Task>>,
-
-    /// Next task in a circular task list.
-    pub next: UnsafeCell<NonNull<Task>>,
-
-    /// Page table of this task.
-    pub page_table_root: KernelObject<UnsafeCell<PageTable>>,
+    /// Is there a pending page fault on this task?
+    pub pending_page_fault: Cell<PageFaultState>,
 
     /// Saved registers when scheduled out.
     pub registers: UnsafeCell<TaskRegisters>,
+}
+
+#[repr(transparent)]
+pub struct LocalStateWrapper(UnsafeCell<LocalState>);
+
+impl LocalStateWrapper {
+    pub unsafe fn unsafe_deref(&self) -> &LocalState {
+        &*self.0.get()
+    }
+}
+
+unsafe impl Send for LocalStateWrapper {}
+unsafe impl Sync for LocalStateWrapper {}
+
+#[repr(C)]
+pub struct Task {
+    /// Thread-unsafe local state.
+    pub local_state: LocalStateWrapper,
+
+    /// Page table of this task.
+    pub page_table_root: KernelObjectRef<PageTableObject>,
 
     /// Root capability set.
-    pub capabilities: KernelObject<CapabilitySet>,
-
-    /// Is there a pending page fault on this task?
-    pub pending_page_fault: Cell<bool>,
-
-    /// Number of (KernelObject + Task + SchedQueue) that refer to this task.
-    pub kobj_refcount: Cell<usize>,
-
-    /// Parent task of this task. Can be null.
-    pub parent: *const Task,
+    pub capabilities: KernelObjectRef<CapabilitySet>,
 }
 
 #[repr(C)]
-#[derive(Default, Copy, Clone, Debug)]
+#[derive(Default, Clone, Debug)]
 pub struct TaskRegisters {
     pub r15: u64,
     pub r14: u64,
@@ -85,20 +94,43 @@ pub struct TaskRegisters {
     pub rflags: u64,
 }
 
-pub trait Retype: Sized {
-    unsafe fn retype_in_place(&mut self) -> bool;
+pub fn get_current_task() -> Option<KernelObjectRef<Task>> {
+    // Clone the current reference, if any.
+    let ptr = GsBase::read().as_ptr::<KernelObject<Task>>();
+    if ptr.is_null() {
+        None
+    } else {
+        let obj = unsafe { KernelObjectRef::from_raw(ptr) };
+        let ret = obj.clone();
+        // We should not drop the old reference here.
+        KernelObjectRef::into_raw(obj);
+        Some(ret)
+    }
 }
 
-pub fn get_current_task() -> Option<NonNull<Task>> {
-    unsafe { core::mem::transmute(GsBase::read()) }
-}
+pub fn set_current_task(t: Option<KernelObjectRef<Task>>) {
+    // Drop the old reference.
+    let old = GsBase::read().as_ptr::<KernelObject<Task>>();
+    if !old.is_null() {
+        unsafe {
+            KernelObjectRef::from_raw(old);
+        }
+    }
 
-pub fn set_current_task(t: Option<NonNull<Task>>) {
-    GsBase::write(unsafe { core::mem::transmute(t) });
+    // Write the new reference.
+    match t {
+        Some(x) => {
+            let raw = KernelObjectRef::into_raw(x);
+            GsBase::write(VirtAddr::new(raw as u64));
+        }
+        None => {
+            GsBase::write(VirtAddr::new(0));
+        }
+    }
 }
 
 pub unsafe fn init() {
-    set_current_task(None);
+    GsBase::write(VirtAddr::new(0));
 }
 
 impl TaskRegisters {
@@ -110,15 +142,21 @@ impl TaskRegisters {
     }
 }
 
-unsafe fn make_continuous_map<I: Iterator<Item = u64>>(
+/// The caller needs to ensure that `root` is a root page table.
+unsafe fn make_user_continuous_map<I: Iterator<Item = PhysFrame>>(
     mut region: I,
-    mut vaddr: u64,
+    mut vaddr: VirtAddr,
     root: &mut PageTable,
 ) -> u64 {
     let mut count: u64 = 0;
     for page_phys in region {
-        let page_phys = PhysAddr::new(page_phys);
-        let page_virt = VirtAddr::new(vaddr);
+        let page_phys = page_phys.start_address();
+        let page_virt = vaddr;
+
+        // Kernel memory should not be remapped.
+        if u16::from(page_virt.p4_index()) >= 256 {
+            return count;
+        }
 
         let mut entry = &mut root[u16::from(page_virt.p4_index()) as usize];
         let mut reached_leaf = false;
@@ -158,30 +196,16 @@ unsafe fn make_continuous_map<I: Iterator<Item = u64>>(
     count
 }
 
-impl Default for Task {
-    fn default() -> Task {
-        unsafe { core::mem::zeroed() }
+impl Retype for Task {
+    unsafe fn retype_in_place(&mut self) -> KernelResult<()> {
+        Err(KernelError::NotImplemented)
     }
 }
 
-impl Drop for Task {
-    fn drop(&mut self) {
-        if !self.parent.is_null() {
-            unsafe {
-                Task::dec_ref(self.parent);
-                self.detach();
-            }
-        } else {
-            panic!("Attempting to drop root task");
-        }
-    }
-}
+impl Notify for Task {}
 
 impl Task {
-    pub fn inc_ref(&self) {
-        self.kobj_refcount.set(self.kobj_refcount.get() + 1);
-    }
-
+    /*
     pub unsafe fn detach(&self) {
         let next_ptr = *self.next.get();
         if next_ptr.as_ptr() != self as *const Task as *mut Task {
@@ -212,80 +236,61 @@ impl Task {
         *prev.next.get() = NonNull::new(self as *const Task as *mut Task).unwrap();
         *next.prev.get() = NonNull::new(self as *const Task as *mut Task).unwrap();
     }
+    */
 
-    pub unsafe fn dec_ref(me: *const Task) {
-        let prev = (*me).kobj_refcount.get();
-        assert!(prev >= 1);
-        (*me).kobj_refcount.set(prev - 1);
-        if (prev == 1) {
-            core::ptr::drop_in_place(&mut *(me as *mut Task));
+    /// Creates a new task.
+    pub fn new(
+        kernel_stack: VirtAddr,
+        page_table_root: KernelObjectRef<PageTableObject>,
+        cap_root: KernelObjectRef<CapabilitySet>,
+    ) -> Task {
+        Task {
+            local_state: LocalStateWrapper(UnsafeCell::new(LocalState {
+                kernel_stack: Cell::new(kernel_stack),
+                user_stack: Cell::new(VirtAddr::new(0)),
+                pending_page_fault: Cell::new(PageFaultState::NoPageFault),
+                registers: UnsafeCell::new(TaskRegisters::new()),
+            })),
+            page_table_root: page_table_root,
+            capabilities: cap_root,
         }
     }
 
-    /// Initializes an empty Task.
-    pub fn init(
-        &mut self,
-        parent: Option<&Task>,
-        kernel_stack: u64,
-        page_table_root: KernelObject<UnsafeCell<PageTable>>,
-        cap_root: KernelObject<CapabilitySet>,
-    ) {
-        if let Some(parent) = parent {
-            parent.inc_ref();
-        }
-
-        {
-            let me = self as *mut _;
-            unsafe {
-                core::ptr::write(
-                    me,
-                    Task {
-                        kernel_stack: kernel_stack,
-                        user_stack: Cell::new(0),
-                        prev: UnsafeCell::new(NonNull::new(me).unwrap()),
-                        next: UnsafeCell::new(NonNull::new(me).unwrap()),
-                        page_table_root: page_table_root,
-                        registers: UnsafeCell::new(TaskRegisters::new()),
-                        capabilities: cap_root,
-                        pending_page_fault: Cell::new(false),
-                        parent: parent
-                            .map(|x| x as *const Task)
-                            .unwrap_or(core::ptr::null()),
-                        kobj_refcount: Cell::new(1),
-                    },
-                );
-            }
-        }
-    }
-
-    pub unsafe fn load_root_image(&self) -> u64 {
-        assert_eq!(get_current_task(), NonNull::new(self as *const _ as *mut _));
-
+    pub fn load_root_image(&self) -> u64 {
         // Map all available physical memory into root task's address space.
         let num_pages_mapped = {
             let phys_mappings = &crate::boot::boot_info().memory_map;
 
-            make_continuous_map(
-                phys_mappings
+            self.page_table_root.with(|pt_root| {
+                let phys_iterator = phys_mappings
                     .iter()
                     .filter_map(|x| match x.region_type {
-                        MemoryRegionType::Usable | MemoryRegionType::Bootloader => {
-                            Some((x.range.start_addr()..x.range.end_addr()).step_by(PAGE_SIZE as _))
-                        }
+                        MemoryRegionType::Usable | MemoryRegionType::Bootloader => Some(
+                            (x.range.start_addr()..x.range.end_addr())
+                                .step_by(PAGE_SIZE as _)
+                                .map(|x| PhysFrame::from_start_address(PhysAddr::new(x)).unwrap()),
+                        ),
                         _ => None,
                     })
-                    .flatten(),
-                ROOT_TASK_FULL_MAP_BASE,
-                &mut *self.page_table_root.get(),
-            )
+                    .flatten();
+                unsafe {
+                    make_user_continuous_map(
+                        phys_iterator,
+                        VirtAddr::new(ROOT_TASK_FULL_MAP_BASE),
+                        pt_root,
+                    )
+                }
+            })
         };
         x86_64::instructions::tlb::flush_all();
         with_serial_port(|p| writeln!(p, "Mapped {} pages.", num_pages_mapped).unwrap());
 
-        let user_view = core::slice::from_raw_parts_mut(
-            ROOT_TASK_FULL_MAP_BASE as *mut u8,
-            (num_pages_mapped * PAGE_SIZE) as usize,
-        );
+        let user_view = unsafe {
+            core::slice::from_raw_parts_mut(
+                ROOT_TASK_FULL_MAP_BASE as *mut u8,
+                (num_pages_mapped * PAGE_SIZE) as usize,
+            )
+        };
         match crate::elf::load(ROOT_IMAGE, user_view, ROOT_TASK_FULL_MAP_BASE) {
             Some(x) => x,
             None => {
@@ -293,37 +298,35 @@ impl Task {
             }
         }
     }
-    pub unsafe fn release(&self) {
-        Task::dec_ref(self);
-    }
-    pub fn current() -> Option<NonNull<Task>> {
-        unsafe { get_current_task() }
+    pub fn current() -> Option<KernelObjectRef<Task>> {
+        get_current_task()
     }
 }
 
-pub fn retype_user<T: Retype>(current: &mut PageTable, vaddr: VirtAddr) -> Option<*mut T> {
-    assert!(core::mem::size_of::<T>() <= PAGE_SIZE as usize);
-
+pub fn retype_user<T: Retype + Notify + Send + Sync + 'static, K: Into<LikeKernelObjectRef>>(
+    current: &mut PageTable,
+    owner: K,
+    vaddr: VirtAddr,
+) -> KernelResult<KernelObjectRef<T>> {
     if !vaddr.is_aligned(PAGE_SIZE) {
-        return None;
+        return Err(KernelError::InvalidDelegation);
     }
 
-    let mut kvaddr = match crate::paging::take_from_user(current, vaddr) {
-        Some(x) => x,
-        None => return None,
-    };
-    let maybe_value = kvaddr.as_mut_ptr::<T>();
-    if !unsafe { (*maybe_value).retype_in_place() } {
-        None
-    } else {
-        Some(maybe_value)
+    let mut kvaddr = crate::paging::take_from_user(current, vaddr)?;
+    let maybe_value = kvaddr.as_mut_ptr::<KernelObject<T>>();
+    let owner = owner.into();
+
+    // TODO: return the page to user if init() failed.
+    unsafe {
+        (*maybe_value).init(owner.get(), true)?;
+        Ok((*maybe_value).get_ref())
     }
 }
 
 impl Retype for PageTable {
-    unsafe fn retype_in_place(&mut self) -> bool {
+    unsafe fn retype_in_place(&mut self) -> KernelResult<()> {
         core::ptr::write(self, core::mem::zeroed());
-        true
+        Ok(())
     }
 }
 
@@ -352,73 +355,75 @@ pub unsafe fn map_physical_page_into_user(
     target_vaddr: VirtAddr,
     phys: PhysAddr,
     flags: PageTableFlags,
-) -> bool {
+) -> KernelResult<()> {
     if u16::from(target_vaddr.p4_index()) >= 256 || !target_vaddr.is_aligned(PAGE_SIZE) {
-        return false;
+        return Err(KernelError::InvalidArgument);
     }
     let entry = if let Some(x) = lookup_pt_entry(current_root, target_vaddr) {
         x
     } else {
-        return false;
+        return Err(KernelError::InvalidAddress);
     };
     entry.set_addr(phys, flags);
-    true
+    Ok(())
 }
 
+/// Takes a page from userspace and uses it as the "next"
+/// level of page table needed for `target_vaddr`.
 pub fn retype_page_table_from_user(
     current_root: &mut PageTable,
     target_vaddr: VirtAddr,
     user_page: VirtAddr,
-) -> Option<u8> {
+) -> KernelResult<u8> {
     if u16::from(target_vaddr.p4_index()) >= 256 || !target_vaddr.is_aligned(PAGE_SIZE) {
-        return None;
+        return Err(KernelError::InvalidArgument);
     }
 
-    unsafe {
-        let current = Task::current().unwrap();
-        let current = current.as_ref();
-        let mut pt = current.page_table_root.get();
+    let kvaddr = crate::paging::take_from_user(current_root, user_page)?
+        .as_mut_ptr::<[u8; PAGE_SIZE as usize]>();
+    let phys = crate::paging::virt_to_phys(current_root, VirtAddr::new(kvaddr as u64))?;
 
-        let indexes: [usize; 4] = [
-            u16::from(target_vaddr.p4_index()) as usize,
-            u16::from(target_vaddr.p3_index()) as usize,
-            u16::from(target_vaddr.p2_index()) as usize,
-            u16::from(target_vaddr.p1_index()) as usize,
-        ];
-        for (i, &index) in indexes.iter().enumerate() {
-            if (*pt)[index].is_unused() {
-                let kvaddr: *mut PageTable = match retype_user(current_root, user_page) {
-                    Some(x) => x,
-                    None => return None,
-                };
-                let phys = crate::paging::virt_to_phys(current_root, VirtAddr::new(kvaddr as u64))
-                    .expect("retype_user returned invalid address");
-                (*pt)[index].set_addr(
-                    phys,
-                    PageTableFlags::PRESENT
-                        | PageTableFlags::WRITABLE
-                        | PageTableFlags::USER_ACCESSIBLE,
-                );
-                return Some((4 - i) as u8); // in range 1..=4
-            } else {
-                let virt = crate::paging::phys_to_virt((*pt)[index].addr());
-                pt = virt.as_mut_ptr::<PageTable>();
+    let mut pt = current_root;
+    let indexes: [usize; 4] = [
+        u16::from(target_vaddr.p4_index()) as usize,
+        u16::from(target_vaddr.p3_index()) as usize,
+        u16::from(target_vaddr.p2_index()) as usize,
+        // TODO: fixme: remove this?
+        u16::from(target_vaddr.p1_index()) as usize,
+    ];
+    for (i, &index) in indexes.iter().enumerate() {
+        if pt[index].is_unused() {
+            unsafe {
+                for b in (*kvaddr).iter_mut() {
+                    *b = 0;
+                }
             }
+            pt[index].set_addr(
+                phys,
+                PageTableFlags::PRESENT
+                    | PageTableFlags::WRITABLE
+                    | PageTableFlags::USER_ACCESSIBLE,
+            );
+            return Ok((4 - i) as u8); // in range 1..=4
+        } else {
+            let virt = crate::paging::phys_to_virt(pt[index].addr());
+            pt = unsafe { &mut *virt.as_mut_ptr::<PageTable>() };
         }
-        Some(0)
     }
+    // TODO: return the taken page back to userspace
+    Ok(0)
 }
 
-pub fn switch_to(task: &Task) {
-    set_current_task(Some(
-        NonNull::new(task as *const Task as *mut Task).unwrap(),
-    ));
+pub fn switch_to(task: KernelObjectRef<Task>) {
+    let pt_root: *const PageTable = task.page_table_root.with(|x| x as *mut _ as *const _);
+
+    set_current_task(Some(task));
     unsafe {
         Cr3::write(
             PhysFrame::from_start_address(
                 crate::paging::virt_to_phys(
                     crate::paging::active_level_4_table(),
-                    VirtAddr::new(task.page_table_root.get() as u64),
+                    VirtAddr::new(pt_root as u64),
                 )
                 .unwrap(),
             )
@@ -428,6 +433,8 @@ pub fn switch_to(task: &Task) {
     };
 }
 
+/// Switches out of kernel mode and enters user mode.
+/// Unsafe because the kernel stack is immediately invalidated after entering user mode.
 pub unsafe fn enter_user_mode() -> ! {
     #[naked]
     #[inline(never)]
@@ -469,24 +476,18 @@ pub unsafe fn enter_user_mode() -> ! {
     }
     assert_eq!(core::mem::size_of::<TaskRegisters>(), 144);
     let selectors = crate::exception::get_selectors();
+
     let task = get_current_task().unwrap();
+    let registers: *const TaskRegisters = task.local_state.unsafe_deref().registers.get();
+    // Here we won't get a dangling `registers` pointer after drop because we know that
+    // `GsBase` won't be dropped now.
+    drop(task);
+
     __enter_user_mode(
         0,
-        task.as_ref().registers.get(),
+        registers,
         selectors.user_code_selector.0 as u32,
         selectors.user_data_selector.0 as u32,
     );
     loop {}
-}
-
-pub unsafe fn schedule() -> ! {
-    let task = loop {
-        if let Some(t) = get_current_task() {
-            break t;
-        } else {
-            x86_64::instructions::hlt();
-        }
-    };
-    switch_to((*task.as_ref().next.get()).as_ref());
-    enter_user_mode();
 }
