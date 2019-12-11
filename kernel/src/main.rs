@@ -32,7 +32,9 @@ mod user;
 use crate::kobj::*;
 use crate::paging::PageTableObject;
 use bootloader::BootInfo;
-use capability::CapabilitySet;
+use capability::{
+    CapabilityEndpointObject, CapabilityObject, CapabilitySet, LockedCapabilityObject,
+};
 use core::cell::UnsafeCell;
 use core::fmt::Write;
 use core::mem::MaybeUninit;
@@ -78,7 +80,15 @@ lazy_static! {
         };
         task.get_ref()
     };
-
+    static ref ROOT_INITIAL_CAPS: KernelObjectRef<LockedCapabilityObject> = {
+        static mut KOBJ: MaybeUninit<KernelObject<LockedCapabilityObject>> = MaybeUninit::uninit();
+        let kobj = unsafe {
+            (*KOBJ.as_mut_ptr()).write(LockedCapabilityObject::new(CapabilityObject::new_empty_endpoints()));
+            (*KOBJ.as_mut_ptr()).init(&*ROOT_KOBJ, false).unwrap();
+            &*KOBJ.as_ptr()
+        };
+        kobj.get_ref()
+    };
 }
 
 #[no_mangle]
@@ -98,10 +108,20 @@ pub extern "C" fn kstart(boot_info: &'static BootInfo) -> ! {
         exception::init_interrupts();
     }
 
-    //ROOT_CAPSET.init_for_root_task();
     ROOT_PT_OBJECT.with(|x| {
         crate::paging::make_page_table(unsafe { crate::paging::active_level_4_table() }, x);
     });
+
+    {
+        let mut caps = ROOT_INITIAL_CAPS.lock();
+        if let CapabilityObject::Endpoint(ref mut endpoints) = *caps {
+            endpoints[0].object = CapabilityEndpointObject::BasicTask(ROOT_TASK.clone());
+            endpoints[1].object = CapabilityEndpointObject::RootTask;
+        } else {
+            panic!("expecting endpoints");
+        }
+    }
+    ROOT_CAPSET.capabilities.lock()[0].object = Some(ROOT_INITIAL_CAPS.clone());
 
     task::switch_to(ROOT_TASK.clone());
     let initial_ip = ROOT_TASK.load_root_image();

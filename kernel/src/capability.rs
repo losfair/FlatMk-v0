@@ -44,17 +44,14 @@ pub struct Capability {
     pub object: Option<KernelObjectRef<LockedCapabilityObject>>,
 }
 
-impl Default for Capability {
-    fn default() -> Capability {
-        assert_eq!(
-            core::mem::size_of::<Capability>(),
-            core::mem::size_of::<usize>()
-        );
-        Capability { object: None }
+pub struct LockedCapabilityObject(Mutex<CapabilityObject>);
+
+impl LockedCapabilityObject {
+    pub fn new(inner: CapabilityObject) -> LockedCapabilityObject {
+        LockedCapabilityObject(Mutex::new(inner))
     }
 }
 
-pub struct LockedCapabilityObject(Mutex<CapabilityObject>);
 impl Deref for LockedCapabilityObject {
     type Target = Mutex<CapabilityObject>;
     fn deref(&self) -> &Self::Target {
@@ -63,10 +60,7 @@ impl Deref for LockedCapabilityObject {
 }
 impl Retype for LockedCapabilityObject {
     unsafe fn retype_in_place(&mut self) -> KernelResult<()> {
-        core::ptr::write(
-            self,
-            LockedCapabilityObject(Mutex::new(CapabilityObject::Empty)),
-        );
+        core::ptr::write(self, LockedCapabilityObject::new(CapabilityObject::Empty));
         Ok(())
     }
 }
@@ -76,6 +70,20 @@ pub enum CapabilityObject {
     Empty,
     Nested(CapabilitySet),
     Endpoint([CapabilityEndpoint; N_ENDPOINT_SLOTS]),
+}
+
+impl CapabilityObject {
+    pub fn new_empty_endpoints() -> CapabilityObject {
+        let mut endpoints: MaybeUninit<[CapabilityEndpoint; N_ENDPOINT_SLOTS]> =
+            MaybeUninit::uninit();
+        unsafe {
+            let inner = &mut *endpoints.as_mut_ptr();
+            for elem in inner.iter_mut() {
+                core::ptr::write(elem, CapabilityEndpoint::default());
+            }
+        }
+        CapabilityObject::Endpoint(unsafe { endpoints.assume_init() })
+    }
 }
 
 #[derive(Clone)]
@@ -128,6 +136,11 @@ impl Notify for CapabilitySet {}
 
 impl Default for CapabilitySet {
     fn default() -> CapabilitySet {
+        assert_eq!(
+            core::mem::size_of::<Capability>(),
+            core::mem::size_of::<usize>()
+        );
+
         CapabilitySet {
             capabilities: Mutex::new(unsafe { core::mem::zeroed() }),
         }
@@ -220,15 +233,7 @@ fn invoke_cap_basic_task(
                         VirtAddr::new(invocation.args[2] as u64),
                     )
                 })?;
-            let mut endpoints: MaybeUninit<[CapabilityEndpoint; N_ENDPOINT_SLOTS]> =
-                MaybeUninit::uninit();
-            unsafe {
-                let inner = &mut *endpoints.as_mut_ptr();
-                for elem in inner.iter_mut() {
-                    core::ptr::write(elem, CapabilityEndpoint::default());
-                }
-            }
-            *delegation.lock() = CapabilityObject::Endpoint(unsafe { endpoints.assume_init() });
+            *delegation.lock() = CapabilityObject::new_empty_endpoints();
             caps[target_first_level_index].object = Some(delegation);
             Ok(0)
         }
@@ -254,9 +259,7 @@ fn invoke_cap_root_task(invocation: CapabilityInvocation) -> KernelResult<i64> {
 
     let current = Task::current().unwrap();
 
-    let cptr = CapPtr(invocation.args[0] as u64);
-
-    let requested_cap = match RootTaskCapRequest::try_from(invocation.args[1] as u32) {
+    let requested_cap = match RootTaskCapRequest::try_from(invocation.args[0] as u32) {
         Ok(x) => x,
         Err(_) => return Err(KernelError::InvalidArgument),
     };
