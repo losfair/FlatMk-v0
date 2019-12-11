@@ -8,3 +8,6 @@ edition = "2018"
 
 [dependencies]
 wee_alloc = { version = "0.4", features = ["size_classes", "static_array_backend"] }
+lazy_static = { version = "1.4", features = ["spin_no_std"] }
+spin = "0.5"
+num_enum = { version = "0.4", default-features = false }

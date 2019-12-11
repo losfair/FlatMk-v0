@@ -1,22 +1,24 @@
-use crate::syscall::{Delegation, CPtr};
+use crate::error::*;
+use crate::syscall::{CPtr, Delegation};
 use alloc::boxed::Box;
+use core::convert::TryFrom;
 
-pub struct LocalMapper {
+pub struct Vmap {
     cap: CPtr,
 }
 
-impl LocalMapper {
-    pub unsafe fn new(cap: CPtr) -> LocalMapper {
-        LocalMapper {
-            cap,
-        }
+impl Vmap {
+    pub unsafe fn new(cap: CPtr) -> Vmap {
+        Vmap { cap }
     }
 
     pub unsafe fn map_page(&self, vaddr: u64) -> Result<(), i64> {
         loop {
             let mut del = Box::new(Delegation::new());
-            let ret = self.cap.call(vaddr as i64, &mut *del as *mut Delegation as i64, 0, 0);
-            if ret <= 0  {
+            let ret = self
+                .cap
+                .call(vaddr as i64, &mut *del as *mut Delegation as i64, 0, 0);
+            if ret <= 0 {
                 return Err(ret);
             }
             Box::leak(del);
@@ -28,21 +30,19 @@ impl LocalMapper {
     }
 }
 
-pub struct LocalMmio {
+pub struct Mmio {
     cap: CPtr,
 }
 
-impl LocalMmio {
-    pub unsafe fn new(cap: CPtr) -> LocalMmio {
-        LocalMmio {
-            cap,
-        }
+impl Mmio {
+    pub unsafe fn new(cap: CPtr) -> Mmio {
+        Mmio { cap }
     }
 
-    pub unsafe fn alloc_at(&self, vaddr: u64, paddr: u64) -> Result<(), i64> {
-        let ret = self.cap.call(vaddr as i64, paddr as i64, 0, 0);
-        if ret != 0  {
-            Err(ret)
+    pub unsafe fn alloc_at(&self, vaddr: u64) -> KernelResult<()> {
+        let result = self.cap.call(vaddr as i64, 0, 0, 0);
+        if result < 0 {
+            Err(KernelError::try_from(result as i32).unwrap())
         } else {
             Ok(())
         }

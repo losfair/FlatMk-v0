@@ -1,4 +1,6 @@
+use crate::error::*;
 use crate::syscall::CPtr;
+use core::convert::TryFrom;
 
 const PORT_READ: i64 = 0;
 const PORT_WRITE: i64 = 1;
@@ -12,16 +14,21 @@ impl Port {
         Port { cap }
     }
 
-    pub unsafe fn outb(&self, x: u8) {
-        if self.cap.call(PORT_WRITE, 1, x as _, 0) < 0 {
-            panic!("PORT_WRITE failed");
+    pub unsafe fn outb(&self, x: u8) -> KernelResult<()> {
+        let result = self.cap.call(PORT_WRITE, 1, x as _, 0);
+        if result < 0 {
+            Err(KernelError::try_from(result as i32).unwrap())
+        } else {
+            Ok(())
         }
     }
 
-    pub unsafe fn inb(&self) -> u8 {
-        match self.cap.call(PORT_READ, 1, 0, 0) {
-            x if x >= 0 => x as u8,
-            _ => panic!("PORT_READ failed"),
+    pub unsafe fn inb(&self) -> KernelResult<u8> {
+        let result = self.cap.call(PORT_READ, 1, 0, 0);
+        if result < 0 {
+            Err(KernelError::try_from(result as i32).unwrap())
+        } else {
+            Ok(result as u8)
         }
     }
 }

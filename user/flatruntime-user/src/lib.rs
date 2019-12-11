@@ -3,9 +3,15 @@
 
 extern crate alloc;
 
+#[macro_use]
+extern crate lazy_static;
+
+pub mod error;
 pub mod io;
-pub mod syscall;
 pub mod mm;
+pub mod root;
+pub mod syscall;
+pub mod task;
 
 #[global_allocator]
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
