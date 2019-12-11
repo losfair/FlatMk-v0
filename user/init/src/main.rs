@@ -45,7 +45,7 @@ unsafe fn resource_init() {
 pub unsafe extern "C" fn user_start() -> ! {
     writeln!(SERIAL_PORT.handle(), "Init process started.");
     resource_init();
-    println!("init: FlatRuntime init task started.");
+    println!("init: FlatMK init task started.");
     loop {}
 }
 

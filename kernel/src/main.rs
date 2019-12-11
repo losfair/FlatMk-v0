@@ -94,7 +94,7 @@ lazy_static! {
 #[no_mangle]
 pub extern "C" fn kstart(boot_info: &'static BootInfo) -> ! {
     with_serial_port(|p| {
-        writeln!(p, "Starting FlatRuntime Microkernel.").unwrap();
+        writeln!(p, "Starting FlatMK.").unwrap();
     });
 
     // Early init.

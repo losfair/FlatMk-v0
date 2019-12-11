@@ -1,3 +1,3 @@
-# flatruntime-mk
+# FlatMK
 
-FlatRuntime Microkernel.
+The FlatMK Microkernel.
