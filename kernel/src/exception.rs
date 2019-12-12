@@ -1,5 +1,5 @@
 use crate::serial::with_serial_port;
-use crate::task::Task;
+use crate::task::{Task, TaskRegisters};
 use core::fmt::Write;
 use pic8259_simple::ChainedPics;
 use spin::Mutex;
@@ -111,14 +111,12 @@ pub unsafe fn init_idt() {
         .set_handler_fn(core::mem::transmute(intr_page_fault as usize));
     IDT.general_protection_fault
         .set_handler_fn(core::mem::transmute(intr_gpf as usize));
-    IDT[InterruptIndex::Timer as u8 as usize]
-        .set_handler_fn(core::mem::transmute(intr_timer as usize));
+    include!("../generated/interrupts_idt.rs");
     IDT.load();
 }
 
 pub unsafe fn init_interrupts() {
     PICS.lock().initialize();
-    x86_64::instructions::interrupts::enable();
 }
 
 fn is_user_fault(frame: &mut InterruptStackFrame) -> bool {
@@ -330,17 +328,14 @@ interrupt_with_code!(
     }
 );
 
-interrupt!(intr_timer, __intr_timer, frame, registers, {
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Timer as u8);
+include!("../generated/interrupts_impl.rs");
+
+fn handle_external_interrupt(
+    frame: &mut InterruptStackFrame,
+    registers: &mut TaskRegisters,
+    index: u8,
+) {
+    if !is_user_fault(frame) {
+        panic!("External interrupt in kernel mode");
     }
-    if is_user_fault(frame) {
-        let mut current = Task::current().unwrap();
-        unsafe {
-            *current.local_state.unsafe_deref().registers.get() = registers.clone();
-            drop(current);
-            crate::task::enter_user_mode();
-        }
-    }
-});
+}
