@@ -27,7 +27,7 @@ pub const ROOT_TASK_FULL_MAP_BASE: u64 = 0x20000000u64;
 pub const PAGE_SIZE: u64 = 4096;
 
 static ROOT_IMAGE: &'static [u8] =
-    include_bytes!("../../user/init/target/x86_64-flatmk/debug/init");
+    include_bytes!("../../user/init/target/x86_64-flatmk/release/init");
 static mut IA32_KERNEL_GS_BASE: Msr = Msr::new(0xc0000102);
 
 /// LocalState is NOT thread safe and should only be accessed on the task's
