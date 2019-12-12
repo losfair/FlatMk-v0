@@ -4,7 +4,7 @@ use crate::serial::with_serial_port;
 use bootloader::BootInfo;
 use core::cell::UnsafeCell;
 use core::fmt::Write;
-use core::ops::Deref;
+use core::ops::{Deref, DerefMut};
 use spin::Mutex;
 use x86_64::{
     instructions::tlb,
@@ -19,8 +19,32 @@ use x86_64::{
 
 static mut PHYSICAL_OFFSET: VirtAddr = VirtAddr::zero();
 
+#[repr(transparent)]
+pub struct RootPageTable(PageTable);
+
+impl Deref for RootPageTable {
+    type Target = PageTable;
+    fn deref(&self) -> &PageTable {
+        &self.0
+    }
+}
+
+impl DerefMut for RootPageTable {
+    fn deref_mut(&mut self) -> &mut PageTable {
+        &mut self.0
+    }
+}
+
+impl RootPageTable {
+    /// Unsafe because `inner` must be a root page table.
+    pub unsafe fn new(inner: PageTable) -> RootPageTable {
+        RootPageTable(inner)
+    }
+}
+
+/// A root page table object.
 pub struct PageTableObject {
-    inner: Mutex<&'static mut PageTable>,
+    inner: Mutex<&'static mut RootPageTable>,
 }
 
 impl Retype for PageTableObject {}
@@ -28,16 +52,16 @@ impl Notify for PageTableObject {}
 
 impl PageTableObject {
     /// Creates a PageTableObject from a page-sized PageTable.
-    /// Getting the `&'static mut PageTable` itself is unsafe, but this function is not.
-    pub fn new(inner: &'static mut PageTable) -> PageTableObject {
+    /// This function is unsafe because the caller needs to ensure that `inner` is a root page table.
+    pub unsafe fn new(inner: &'static mut RootPageTable) -> PageTableObject {
         PageTableObject {
             inner: Mutex::new(inner),
         }
     }
 
-    pub fn with<T, F: FnOnce(&mut PageTable) -> T>(&self, cb: F) -> T {
+    pub fn with<T, F: FnOnce(&mut RootPageTable) -> T>(&self, cb: F) -> T {
         let mut lg = self.inner.lock();
-        let inner: &mut PageTable = unsafe { core::ptr::read(&*lg) };
+        let inner: &mut RootPageTable = unsafe { core::ptr::read(&*lg) };
         cb(inner)
     }
 }
@@ -77,12 +101,13 @@ pub unsafe fn init() {
     }
 }
 
-pub fn take_from_user(current: &mut PageTable, addr: VirtAddr) -> KernelResult<VirtAddr> {
+/// Takes a page at `addr` from userspace.
+pub fn take_from_user(current: &mut RootPageTable, addr: VirtAddr) -> KernelResult<VirtAddr> {
     if u16::from(addr.p4_index()) >= 256 {
         return Err(KernelError::InvalidDelegation);
     }
 
-    let mut table = unsafe { OffsetPageTable::new(current, PHYSICAL_OFFSET) };
+    let mut table = unsafe { OffsetPageTable::new(&mut **current, PHYSICAL_OFFSET) };
     let page = match Page::<Size4KiB>::from_start_address(addr) {
         Ok(x) => x,
         _ => return Err(KernelError::InvalidDelegation),
@@ -101,16 +126,18 @@ pub fn take_from_user(current: &mut PageTable, addr: VirtAddr) -> KernelResult<V
         Err(_) => Err(KernelError::InvalidState),
     }
 }
-/*
-pub fn put_to_user(current: &mut PageTable, addr: VirtAddr) -> bool {
+
+/// Returns `addr` to userspace.
+/// This function is unsafe because userspace will be able to see contents pointed to by `addr`.
+pub unsafe fn put_to_user(current: &mut RootPageTable, addr: VirtAddr) -> KernelResult<()> {
     if u16::from(addr.p4_index()) >= 256 {
-        return false; // kernel memory
+        return Err(KernelError::InvalidAddress);
     }
 
-    let mut table = unsafe { OffsetPageTable::new(current, PHYSICAL_OFFSET) };
+    let mut table = unsafe { OffsetPageTable::new(&mut **current, PHYSICAL_OFFSET) };
     let page = match Page::<Size4KiB>::from_start_address(addr) {
         Ok(x) => x,
-        _ => return false,
+        _ => return Err(KernelError::InvalidAddress),
     };
     match table.update_flags(
         page,
@@ -121,15 +148,14 @@ pub fn put_to_user(current: &mut PageTable, addr: VirtAddr) -> bool {
     ) {
         Ok(flusher) => {
             flusher.flush();
-            true
+            Ok(())
         }
-        Err(_) => false,
+        Err(_) => Err(KernelError::InvalidState),
     }
 }
-*/
 
-pub fn virt_to_phys(current: &mut PageTable, addr: VirtAddr) -> KernelResult<PhysAddr> {
-    match unsafe { OffsetPageTable::new(current, PHYSICAL_OFFSET).translate_addr(addr) } {
+pub fn virt_to_phys(current: &mut RootPageTable, addr: VirtAddr) -> KernelResult<PhysAddr> {
+    match unsafe { OffsetPageTable::new(&mut **current, PHYSICAL_OFFSET).translate_addr(addr) } {
         Some(x) => Ok(x),
         None => Err(KernelError::InvalidAddress),
     }
@@ -139,17 +165,18 @@ pub fn phys_to_virt(addr: PhysAddr) -> VirtAddr {
     unsafe { PHYSICAL_OFFSET + addr.as_u64() }
 }
 
-pub unsafe fn active_level_4_table() -> &'static mut PageTable {
+/// This function is only intended to be used during early initialization.
+pub unsafe fn active_level_4_table() -> &'static mut RootPageTable {
     let (level_4_table_frame, _) = Cr3::read();
 
     let phys = level_4_table_frame.start_address();
     let virt = PHYSICAL_OFFSET + phys.as_u64();
-    let page_table_ptr: *mut PageTable = virt.as_mut_ptr();
+    let page_table_ptr: *mut RootPageTable = virt.as_mut_ptr();
 
     &mut *page_table_ptr
 }
 
-pub fn make_page_table(current: &mut PageTable, pt: &mut PageTable) {
+pub fn make_root_page_table(current: &mut RootPageTable, pt: &mut RootPageTable) {
     for (i, entry) in current.iter().enumerate().skip(256) {
         pt[i] = entry.clone();
     }

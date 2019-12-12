@@ -30,7 +30,7 @@ mod task;
 mod user;
 
 use crate::kobj::*;
-use crate::paging::PageTableObject;
+use crate::paging::{PageTableObject, RootPageTable};
 use bootloader::BootInfo;
 use capability::{
     CapabilityEndpointObject, CapabilityObject, CapabilitySet, LockedCapabilityObject,
@@ -57,9 +57,9 @@ lazy_static! {
         kobj.get_ref()
     };
     static ref ROOT_PT_OBJECT: KernelObjectRef<PageTableObject> = {
-        static mut PT: MaybeUninit<PageTable> = MaybeUninit::uninit();
+        static mut PT: MaybeUninit<RootPageTable> = MaybeUninit::uninit();
         let pt = unsafe {
-            PT.write(PageTable::new());
+            PT.write(RootPageTable::new(PageTable::new()));
             &mut *PT.as_mut_ptr()
         };
 
@@ -109,7 +109,7 @@ pub extern "C" fn kstart(boot_info: &'static BootInfo) -> ! {
     }
 
     ROOT_PT_OBJECT.with(|x| {
-        crate::paging::make_page_table(unsafe { crate::paging::active_level_4_table() }, x);
+        crate::paging::make_root_page_table(unsafe { crate::paging::active_level_4_table() }, x);
     });
 
     {

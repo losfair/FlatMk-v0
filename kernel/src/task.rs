@@ -2,7 +2,7 @@ use crate::capability::{Capability, CapabilitySet};
 use crate::error::*;
 use crate::kobj::*;
 use crate::kobj::{KernelObject, LikeKernelObjectRef, Retype};
-use crate::paging::{phys_to_virt, PageFaultState, PageTableObject};
+use crate::paging::{phys_to_virt, PageFaultState, PageTableObject, RootPageTable};
 use crate::serial::with_serial_port;
 use bootloader::bootinfo::MemoryRegionType;
 use core::cell::{Cell, UnsafeCell};
@@ -304,7 +304,7 @@ impl Task {
 }
 
 pub fn retype_user<T: Retype + Notify + Send + Sync + 'static, K: Into<LikeKernelObjectRef>>(
-    current: &mut PageTable,
+    current: &mut RootPageTable,
     owner: K,
     vaddr: VirtAddr,
 ) -> KernelResult<KernelObjectRef<T>> {
@@ -316,10 +316,16 @@ pub fn retype_user<T: Retype + Notify + Send + Sync + 'static, K: Into<LikeKerne
     let maybe_value = kvaddr.as_mut_ptr::<KernelObject<T>>();
     let owner = owner.into();
 
-    // TODO: return the page to user if init() failed.
     unsafe {
-        (*maybe_value).init(owner.get(), true)?;
-        Ok((*maybe_value).get_ref())
+        match (*maybe_value).init(owner.get(), true) {
+            Ok(_) => Ok((*maybe_value).get_ref()),
+            Err(e) => {
+                match crate::paging::put_to_user(current, kvaddr) {
+                    _ => {}
+                }
+                Err(e)
+            }
+        }
     }
 }
 
@@ -371,7 +377,7 @@ pub unsafe fn map_physical_page_into_user(
 /// Takes a page from userspace and uses it as the "next"
 /// level of page table needed for `target_vaddr`.
 pub fn retype_page_table_from_user(
-    current_root: &mut PageTable,
+    current_root: &mut RootPageTable,
     target_vaddr: VirtAddr,
     user_page: VirtAddr,
 ) -> KernelResult<u8> {
@@ -379,22 +385,20 @@ pub fn retype_page_table_from_user(
         return Err(KernelError::InvalidArgument);
     }
 
-    let kvaddr = crate::paging::take_from_user(current_root, user_page)?
-        .as_mut_ptr::<[u8; PAGE_SIZE as usize]>();
-    let phys = crate::paging::virt_to_phys(current_root, VirtAddr::new(kvaddr as u64))?;
+    let kvaddr = crate::paging::take_from_user(current_root, user_page)?;
+    let kmap = kvaddr.as_mut_ptr::<[u8; PAGE_SIZE as usize]>();
+    let phys = crate::paging::virt_to_phys(current_root, VirtAddr::new(kvaddr.as_u64()))?;
 
-    let mut pt = current_root;
-    let indexes: [usize; 4] = [
+    let mut pt = &mut **current_root;
+    let indexes: [usize; 3] = [
         u16::from(target_vaddr.p4_index()) as usize,
         u16::from(target_vaddr.p3_index()) as usize,
         u16::from(target_vaddr.p2_index()) as usize,
-        // TODO: fixme: remove this?
-        u16::from(target_vaddr.p1_index()) as usize,
     ];
     for (i, &index) in indexes.iter().enumerate() {
         if pt[index].is_unused() {
             unsafe {
-                for b in (*kvaddr).iter_mut() {
+                for b in (*kmap).iter_mut() {
                     *b = 0;
                 }
             }
@@ -404,13 +408,15 @@ pub fn retype_page_table_from_user(
                     | PageTableFlags::WRITABLE
                     | PageTableFlags::USER_ACCESSIBLE,
             );
-            return Ok((4 - i) as u8); // in range 1..=4
+            return Ok((3 - i) as u8); // in range 1..=3
         } else {
             let virt = crate::paging::phys_to_virt(pt[index].addr());
             pt = unsafe { &mut *virt.as_mut_ptr::<PageTable>() };
         }
     }
-    // TODO: return the taken page back to userspace
+    unsafe {
+        crate::paging::put_to_user(current_root, kvaddr)?;
+    }
     Ok(0)
 }
 
