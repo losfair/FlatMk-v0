@@ -95,3 +95,11 @@ pub fn new_vmap() -> KernelResult<Vmap> {
         Ok(unsafe { Vmap::new(cptr) })
     }
 }
+
+/// Invokes an invalid operation on CAP_TASK.
+/// Useful for benchmarking.
+pub fn call_invalid() {
+    unsafe {
+        CAP_TASK.call(-1, 0, 0, 0);
+    }
+}

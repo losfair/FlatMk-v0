@@ -48,9 +48,7 @@ pub struct SerialPortHandle<'a>(&'a SerialPort);
 impl<'a> Write for SerialPortHandle<'a> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for byte in s.bytes() {
-            match self.0.send(byte) {
-                _ => {}
-            }
+            self.0.send(byte).unwrap();
         }
         Ok(())
     }

@@ -14,6 +14,7 @@ use flatruntime_user::{
     io::Port,
     mm::{Mmio, Vmap},
 };
+use core::arch::x86_64::_rdtsc;
 
 lazy_static! {
     static ref SERIAL_PORT: SerialPort = {
@@ -46,7 +47,23 @@ pub unsafe extern "C" fn user_start() -> ! {
     writeln!(SERIAL_PORT.handle(), "Init process started.");
     resource_init();
     println!("init: FlatMK init task started.");
+
+    benchmark_cap_invoke(1000000);
+
     loop {}
+}
+
+fn benchmark_cap_invoke(n: usize) {
+    let begin = unsafe {
+        _rdtsc()
+    };
+    for i in 0..n {
+        flatruntime_user::task::call_invalid();
+    }
+    let end = unsafe {
+        _rdtsc()
+    };
+    writeln!(SERIAL_PORT.handle(), "Benchmark: {} cycles per capability invocation.", (end - begin) / (n as u64));
 }
 
 #[panic_handler]
