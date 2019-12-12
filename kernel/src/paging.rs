@@ -87,7 +87,7 @@ pub unsafe fn init() {
             .as_u64();
 
         // Invalidate and flush.
-        for (i, entry) in l4_table.iter_mut().enumerate().take(256) {
+        for entry in l4_table.iter_mut().take(256) {
             if !entry.is_unused() {
                 entry.set_unused();
             }
