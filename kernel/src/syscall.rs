@@ -37,12 +37,6 @@ pub unsafe fn init() {
     with_serial_port(|p| writeln!(p, "System call enabled.").unwrap());
 }
 
-#[derive(Copy, Clone, Debug, TryFromPrimitive)]
-#[repr(u32)]
-enum SyscallIndex {
-    Call = 0,
-}
-
 #[inline(never)]
 #[no_mangle]
 extern "C" fn syscall_entry(
@@ -52,32 +46,22 @@ extern "C" fn syscall_entry(
     p3: i64,
     p4: i64,
     p5: i64,
-    nr: i64,
     registers: &TaskRegisters,
 ) -> i64 {
-    let idx = match SyscallIndex::try_from(nr as u32) {
-        Ok(x) => x,
-        Err(_) => return KernelError::InvalidArgument as i32 as i64,
-    };
-    match idx {
-        SyscallIndex::Call => {
-            let cap = {
-                let task = crate::task::get_current_task().unwrap();
-                match task.capabilities.lookup(CapPtr(p0 as u64)) {
-                    Ok(x) => x,
-                    Err(e) => return e as i32 as i64,
-                }
-            };
-            // TODO: Check rights.
-            match cap.object.invoke(CapabilityInvocation {
-                args: [p1, p2, p3, p4],
-            }) {
-                Ok(x) => x,
-                Err(e) => e as i32 as i64,
-            }
+    let cap = {
+        let task = crate::task::get_current_task().unwrap();
+        match task.capabilities.lookup(CapPtr(p0 as u64)) {
+            Ok(x) => x,
+            Err(e) => return e as i32 as i64,
         }
+    };
+    // TODO: Check rights.
+    match cap.object.invoke(CapabilityInvocation {
+        args: [p1, p2, p3, p4],
+    }) {
+        Ok(x) => x,
+        Err(e) => e as i32 as i64,
     }
-    //with_serial_port(|p| writeln!(p, "Syscall nr={}, params=[{}, {}, {}, {}, {}, {}]", nr, p0, p1, p2, p3, p4, p5).unwrap());
 }
 
 #[naked]
@@ -108,9 +92,8 @@ unsafe extern "C" fn lowlevel_syscall_entry() {
         push %r15
 
         subq $$16, %rsp
-        mov %rax, (%rsp) // nr
         leaq 16(%rsp), %rax
-        mov %rax, 8(%rsp) // saved registers
+        mov %rax, 0(%rsp) // saved registers
         mov %r10, %rcx
         call syscall_entry
         addq $$16, %rsp
