@@ -8,6 +8,7 @@ extern crate lazy_static;
 
 pub mod error;
 pub mod io;
+pub mod ipc;
 pub mod mm;
 pub mod root;
 pub mod syscall;

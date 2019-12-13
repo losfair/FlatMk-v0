@@ -3,13 +3,13 @@ use crate::syscall::{CPtr, Delegation};
 use alloc::boxed::Box;
 use core::convert::TryFrom;
 
-pub struct Vmap {
+pub struct RootPageTable {
     cap: CPtr,
 }
 
-impl Vmap {
-    pub unsafe fn new(cap: CPtr) -> Vmap {
-        Vmap { cap }
+impl RootPageTable {
+    pub unsafe fn new(cap: CPtr) -> RootPageTable {
+        RootPageTable { cap }
     }
 
     pub unsafe fn map_page(&self, vaddr: u64) -> Result<(), i64> {
@@ -18,9 +18,13 @@ impl Vmap {
             let ret = self
                 .cap
                 .call(vaddr as i64, &mut *del as *mut Delegation as i64, 0, 0);
-            if ret <= 0 {
+            if ret < 0 {
                 return Err(ret);
             }
+            if ret == 0 {
+                break;
+            }
+
             Box::leak(del);
             if ret == 1 {
                 break;

@@ -20,6 +20,8 @@ extern "C" {
     fn _do_syscall(p0: i64, p1: i64, p2: i64, p3: i64, p4: i64, p5: i64) -> i64;
 }
 
+pub const INVALID_CAP: u64 = core::u64::MAX;
+
 #[repr(u32)]
 #[derive(Debug, Copy, Clone)]
 pub enum RootTaskCapRequest {
@@ -40,19 +42,16 @@ impl Delegation {
 pub struct CPtr(u64);
 
 impl CPtr {
+    pub const fn make_trivial_twolevel(level0: u8, level1: u8) -> u64 {
+        ((level0 as u64) << 56) | ((level1 as u64) << 48)
+    }
+
     pub const unsafe fn new_twolevel(level0: u8, level1: u8) -> CPtr {
-        CPtr(((level0 as u64) << 56) | ((level1 as u64) << 48))
+        CPtr(Self::make_trivial_twolevel(level0, level1))
     }
 
     pub unsafe fn call(&self, p0: i64, p1: i64, p2: i64, p3: i64) -> i64 {
-        _do_syscall(
-            self.0 as _,
-            p0,
-            p1,
-            p2,
-            p3,
-            0,
-        )
+        _do_syscall(self.0 as _, p0, p1, p2, p3, 0)
     }
 
     pub fn index(&self) -> u64 {
