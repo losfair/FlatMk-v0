@@ -1,5 +1,5 @@
 use crate::serial::with_serial_port;
-use crate::task::{Task, TaskRegisters};
+use crate::task::TaskRegisters;
 use core::fmt::Write;
 use pic8259_simple::ChainedPics;
 use spin::Mutex;
@@ -39,12 +39,6 @@ pub struct Selectors {
     pub user_data_selector: SegmentSelector,
     pub user_code_selector: SegmentSelector,
     pub tss_selector: SegmentSelector,
-}
-
-#[derive(Debug, Clone, Copy)]
-#[repr(u8)]
-pub enum InterruptIndex {
-    Timer = PIC_1_OFFSET,
 }
 
 pub fn get_selectors() -> &'static Selectors {
@@ -294,7 +288,7 @@ interrupt!(
     }
 );
 
-interrupt_with_code!(intr_gpf, __intr_gpf, frame, registers, code, {
+interrupt_with_code!(intr_gpf, __intr_gpf, frame, _registers, code, {
     with_serial_port(|p| {
         writeln!(p, "General protection fault: code = {} {:#?}", code, frame).unwrap();
     });
@@ -308,7 +302,7 @@ interrupt_with_code!(
     intr_page_fault,
     __intr_page_fault,
     frame,
-    registers,
+    _registers,
     code,
     {
         with_serial_port(|p| {
@@ -332,8 +326,8 @@ include!("../generated/interrupts_impl.rs");
 
 fn handle_external_interrupt(
     frame: &mut InterruptStackFrame,
-    registers: &mut TaskRegisters,
-    index: u8,
+    _registers: &mut TaskRegisters,
+    _index: u8,
 ) {
     if !is_user_fault(frame) {
         panic!("External interrupt in kernel mode");

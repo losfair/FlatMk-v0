@@ -1,8 +1,6 @@
 use crate::error::*;
-use crate::task::Task;
-use core::any::{Any, TypeId};
 use core::cell::UnsafeCell;
-use core::ops::{Deref, DerefMut};
+use core::ops::Deref;
 use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::VirtAddr;
 
@@ -11,14 +9,14 @@ const PAGE_SIZE: u64 = 4096;
 pub unsafe trait LikeKernelObject {
     fn inc_ref(&self);
     unsafe fn dec_ref(&self);
-    unsafe fn return_page(&self, addr: VirtAddr);
+    unsafe fn return_user_page(&self, addr: VirtAddr);
 }
 
 pub struct RootKernelObject;
 unsafe impl LikeKernelObject for RootKernelObject {
     fn inc_ref(&self) {}
     unsafe fn dec_ref(&self) {}
-    unsafe fn return_page(&self, _addr: VirtAddr) {}
+    unsafe fn return_user_page(&self, _addr: VirtAddr) {}
 }
 
 pub trait Retype: Sized {
@@ -28,8 +26,8 @@ pub trait Retype: Sized {
 }
 
 pub trait Notify {
-    unsafe fn return_page(&self, _addr: VirtAddr) {}
-    fn will_drop(&mut self, _owner: &LikeKernelObject) {}
+    unsafe fn return_user_page(&self, _addr: VirtAddr) {}
+    fn will_drop(&mut self, _owner: &dyn LikeKernelObject) {}
 }
 
 pub struct LikeKernelObjectRef {
@@ -52,10 +50,6 @@ impl Drop for LikeKernelObjectRef {
 }
 
 impl LikeKernelObjectRef {
-    unsafe fn return_page(&self, addr: VirtAddr) {
-        self.inner.return_page(addr)
-    }
-
     pub fn get(&self) -> &dyn LikeKernelObject {
         self.inner
     }
@@ -109,11 +103,15 @@ impl<T: Retype + Notify + Send + Sync + 'static> Deref for KernelObjectRef<T> {
     }
 }
 
+/// A kernel object.
+///
+/// `value` must be the first element.
 #[repr(C, align(4096))]
 pub struct KernelObject<T: Retype + Notify + Send + Sync + 'static> {
+    value: UnsafeCell<T>,
     owner: &'static dyn LikeKernelObject,
     refcount: AtomicU64,
-    value: UnsafeCell<T>,
+    uaddr: VirtAddr,
 }
 
 /// For all immutable self references, `value` is only used immutably.
@@ -131,8 +129,13 @@ impl<T: Retype + Notify + Send + Sync + 'static> KernelObject<T> {
         }
     }
 
-    /// Takes a newly retyped KernelObject as `self`, validates and initializes it.
-    pub fn init(&mut self, owner: &dyn LikeKernelObject, retype: bool) -> KernelResult<()> {
+    /// Takes a newly retyped KernelObject as `self`, validates and initializes it with the provided retyper.
+    pub unsafe fn init_with<F: FnOnce(&mut T) -> KernelResult<()>>(
+        &mut self,
+        owner: &dyn LikeKernelObject,
+        uaddr: VirtAddr,
+        retyper: F,
+    ) -> KernelResult<()> {
         // Validate address properties.
         if core::mem::size_of::<Self>() > PAGE_SIZE as usize
             || !VirtAddr::new(self as *mut _ as u64).is_aligned(PAGE_SIZE)
@@ -140,23 +143,35 @@ impl<T: Retype + Notify + Send + Sync + 'static> KernelObject<T> {
             return Err(KernelError::InvalidDelegation);
         }
 
-        if retype {
-            // Retype value.
-            unsafe {
-                (*self.value.get()).retype_in_place()?;
-            }
-        }
+        // Retype value.
+        retyper(&mut *self.value.get())?;
 
         // Increment refcount of our owner.
         owner.inc_ref();
 
         // Initialize fields. Dynamic shared ownership to `owner` is guaranteed by reference counting.
-        self.owner = unsafe {
-            core::mem::transmute::<&dyn LikeKernelObject, &'static dyn LikeKernelObject>(owner)
-        };
+        self.owner =
+            core::mem::transmute::<&dyn LikeKernelObject, &'static dyn LikeKernelObject>(owner);
         self.refcount = AtomicU64::new(0);
+        self.uaddr = uaddr;
 
         Ok(())
+    }
+
+    /// Takes a newly retyped KernelObject as `self`, validates and initializes it.
+    pub fn init(
+        &mut self,
+        owner: &dyn LikeKernelObject,
+        uaddr: VirtAddr,
+        retype: bool,
+    ) -> KernelResult<()> {
+        unsafe {
+            if retype {
+                self.init_with(owner, uaddr, |x| x.retype_in_place())
+            } else {
+                self.init_with(owner, uaddr, |_| Ok(()))
+            }
+        }
     }
 
     /// Returns the owner of the kernel object.
@@ -180,26 +195,24 @@ impl<T: Retype + Notify + Send + Sync + 'static> KernelObject<T> {
         }
     }
 
-    /// Ensure object tree properties before drop.
-    unsafe fn tree_drop(&self) {
+    /// Drop.
+    unsafe fn do_drop(&self) {
         let value = &mut *self.value.get();
         value.will_drop(self.owner);
-        self.owner
-            .return_page(VirtAddr::new(self as *const _ as u64));
-        self.owner.dec_ref();
+        core::ptr::drop_in_place(value);
+
+        // `self` becomes invalid after returning to user.
+        let owner = self.owner;
+
+        owner.return_user_page(self.uaddr);
+        owner.dec_ref();
     }
 }
 
 /// This drop implementation usually won't be called. dec_ref() handles cleanup instead.
 impl<T: Retype + Notify + Send + Sync + 'static> Drop for KernelObject<T> {
     fn drop(&mut self) {
-        if self.refcount.load(Ordering::SeqCst) != 0 {
-            panic!("Attempting to call drop() on a KernelObject with alive references");
-        }
-        unsafe {
-            self.tree_drop();
-        }
-        // self.value is automatically dropped.
+        panic!("Attempting to call drop() on a KernelObject");
     }
 }
 
@@ -211,14 +224,13 @@ unsafe impl<T: Retype + Notify + Send + Sync + 'static> LikeKernelObject for Ker
     unsafe fn dec_ref(&self) {
         let old_count = self.refcount.fetch_sub(1, Ordering::SeqCst);
         if old_count == 1 {
-            self.tree_drop();
-            core::ptr::drop_in_place(self.value.get());
+            self.do_drop();
         } else if old_count == 0 {
             panic!("dec_ref(): refcount underflow");
         }
     }
 
-    unsafe fn return_page(&self, addr: VirtAddr) {
-        self.value().return_page(addr);
+    unsafe fn return_user_page(&self, addr: VirtAddr) {
+        self.value().return_user_page(addr);
     }
 }

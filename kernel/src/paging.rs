@@ -1,9 +1,6 @@
 use crate::error::*;
 use crate::kobj::*;
-use crate::serial::with_serial_port;
 use bootloader::BootInfo;
-use core::cell::UnsafeCell;
-use core::fmt::Write;
 use core::ops::{Deref, DerefMut};
 use spin::Mutex;
 use x86_64::{
@@ -48,7 +45,13 @@ pub struct PageTableObject {
 }
 
 impl Retype for PageTableObject {}
-impl Notify for PageTableObject {}
+impl Notify for PageTableObject {
+    unsafe fn return_user_page(&self, addr: VirtAddr) {
+        self.with(|pt| {
+            drop(put_to_user(pt, addr));
+        })
+    }
+}
 
 impl PageTableObject {
     /// Creates a PageTableObject from a page-sized PageTable.
@@ -60,21 +63,13 @@ impl PageTableObject {
     }
 
     pub fn with<T, F: FnOnce(&mut RootPageTable) -> T>(&self, cb: F) -> T {
-        let mut lg = self.inner.lock();
+        let lg = self.inner.lock();
         let inner: &mut RootPageTable = unsafe { core::ptr::read(&*lg) };
         cb(inner)
     }
 }
 
-pub enum PageFaultState {
-    NoPageFault,
-    Permission,
-    NotPresent,
-}
-
 pub unsafe fn init() {
-    let (l4pt, _) = Cr3::read();
-
     PHYSICAL_OFFSET = VirtAddr::new(crate::boot::boot_info().physical_memory_offset);
     let l4_table = active_level_4_table();
 
@@ -134,7 +129,7 @@ pub unsafe fn put_to_user(current: &mut RootPageTable, addr: VirtAddr) -> Kernel
         return Err(KernelError::InvalidAddress);
     }
 
-    let mut table = unsafe { OffsetPageTable::new(&mut **current, PHYSICAL_OFFSET) };
+    let mut table = OffsetPageTable::new(&mut **current, PHYSICAL_OFFSET);
     let page = match Page::<Size4KiB>::from_start_address(addr) {
         Ok(x) => x,
         _ => return Err(KernelError::InvalidAddress),

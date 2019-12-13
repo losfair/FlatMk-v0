@@ -11,9 +11,6 @@
 )]
 
 #[macro_use]
-extern crate bitflags;
-
-#[macro_use]
 extern crate lazy_static;
 
 mod boot;
@@ -35,13 +32,11 @@ use bootloader::BootInfo;
 use capability::{
     CapabilityEndpointObject, CapabilityObject, CapabilitySet, LockedCapabilityObject,
 };
-use core::cell::UnsafeCell;
 use core::fmt::Write;
 use core::mem::MaybeUninit;
-use core::ptr::NonNull;
 use kobj::KernelObject;
 use serial::with_serial_port;
-use task::{Task, TaskRegisters};
+use task::Task;
 use x86_64::{structures::paging::PageTable, VirtAddr};
 
 lazy_static! {
@@ -51,7 +46,7 @@ lazy_static! {
         static mut KOBJ: MaybeUninit<KernelObject<CapabilitySet>> = MaybeUninit::uninit();
         let kobj = unsafe {
             (*KOBJ.as_mut_ptr()).write(CapabilitySet::default());
-            (*KOBJ.as_mut_ptr()).init(&*ROOT_KOBJ, false).unwrap();
+            (*KOBJ.as_mut_ptr()).init(&*ROOT_KOBJ, VirtAddr::new(0), false).unwrap();
             &*KOBJ.as_ptr()
         };
         kobj.get_ref()
@@ -66,7 +61,7 @@ lazy_static! {
         static mut KOBJ: MaybeUninit<KernelObject<PageTableObject>> = MaybeUninit::uninit();
         let kobj = unsafe {
             (*KOBJ.as_mut_ptr()).write(PageTableObject::new(pt));
-            (*KOBJ.as_mut_ptr()).init(&*ROOT_KOBJ, false).unwrap();
+            (*KOBJ.as_mut_ptr()).init(&*ROOT_KOBJ, VirtAddr::new(0), false).unwrap();
             &*KOBJ.as_ptr()
         };
         kobj.get_ref()
@@ -74,8 +69,8 @@ lazy_static! {
     static ref ROOT_TASK: KernelObjectRef<Task> = {
         static mut TASK: MaybeUninit<KernelObject<Task>> = MaybeUninit::uninit();
         let task = unsafe {
-            (*TASK.as_mut_ptr()).write(Task::new(VirtAddr::new(exception::KERNEL_STACK_END), ROOT_PT_OBJECT.clone(), ROOT_CAPSET.clone()));
-            (*TASK.as_mut_ptr()).init(&*ROOT_KOBJ, false).unwrap();
+            (*TASK.as_mut_ptr()).write(Task::new_initial(VirtAddr::new(exception::KERNEL_STACK_END), ROOT_PT_OBJECT.clone(), ROOT_CAPSET.clone()));
+            (*TASK.as_mut_ptr()).init(&*ROOT_KOBJ, VirtAddr::new(0), false).unwrap();
             &*TASK.as_ptr()
         };
         task.get_ref()
@@ -84,7 +79,7 @@ lazy_static! {
         static mut KOBJ: MaybeUninit<KernelObject<LockedCapabilityObject>> = MaybeUninit::uninit();
         let kobj = unsafe {
             (*KOBJ.as_mut_ptr()).write(LockedCapabilityObject::new(CapabilityObject::new_empty_endpoints()));
-            (*KOBJ.as_mut_ptr()).init(&*ROOT_KOBJ, false).unwrap();
+            (*KOBJ.as_mut_ptr()).init(&*ROOT_KOBJ, VirtAddr::new(0), false).unwrap();
             &*KOBJ.as_ptr()
         };
         kobj.get_ref()

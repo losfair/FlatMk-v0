@@ -16,7 +16,7 @@ impl ReadRaw for [u8] {
     }
 }
 
-pub fn load(mut image: &[u8], out: &mut [u8], out_base: u64) -> Option<u64> {
+pub fn load(image: &[u8], out: &mut [u8], out_base: u64) -> Option<u64> {
     let header: Header = unsafe {
         if let Some(x) = image.read_raw() {
             x

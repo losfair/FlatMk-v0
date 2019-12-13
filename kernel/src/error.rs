@@ -1,3 +1,5 @@
+use num_enum::{TryFromPrimitive, TryFromPrimitiveError};
+
 #[repr(i32)]
 #[derive(Copy, Clone, Debug)]
 pub enum KernelError {
@@ -6,11 +8,11 @@ pub enum KernelError {
     /// Invalid memory delegation.
     InvalidDelegation = -2,
     /// Invalid object type. Usually indicates a failure during retyping.
-    InvalidType = -3,
+    //InvalidType = -3,
     /// Not implemented.
     NotImplemented = -4,
     /// The type for a kernel object has a size larger than one page.
-    KernelObjectTooLarge = -5,
+    //KernelObjectTooLarge = -5,
     /// Some state is invalid for the requested operation.
     InvalidState = -6,
     /// Invalid memory address.
@@ -23,9 +25,8 @@ pub enum KernelError {
 
 pub type KernelResult<T> = Result<T, KernelError>;
 
-pub fn into_error_code(result: KernelResult<()>) -> i32 {
-    match result {
-        Ok(()) => 0,
-        Err(e) => e as i32,
+impl<T: TryFromPrimitive> From<TryFromPrimitiveError<T>> for KernelError {
+    fn from(_: TryFromPrimitiveError<T>) -> KernelError {
+        KernelError::InvalidArgument
     }
 }

@@ -1,17 +1,10 @@
 use crate::capability::{CapPtr, CapabilityInvocation};
-use crate::error::*;
-use crate::kobj::*;
 use crate::serial::with_serial_port;
 use crate::task::TaskRegisters;
-use core::convert::TryFrom;
 use core::fmt::Write;
-use num_enum::TryFromPrimitive;
-use x86_64::{
-    registers::{
-        model_specific::{Efer, EferFlags, Msr},
-        rflags::RFlags,
-    },
-    VirtAddr,
+use x86_64::registers::{
+    model_specific::{Efer, EferFlags, Msr},
+    rflags::RFlags,
 };
 
 static mut IA32_FMASK: Msr = Msr::new(0xc0000084);
@@ -45,7 +38,7 @@ extern "C" fn syscall_entry(
     p2: i64,
     p3: i64,
     p4: i64,
-    p5: i64,
+    _p5: i64,
     registers: &TaskRegisters,
 ) -> i64 {
     let cap = {
@@ -55,9 +48,9 @@ extern "C" fn syscall_entry(
             Err(e) => return e as i32 as i64,
         }
     };
-    // TODO: Check rights.
-    match cap.object.invoke(CapabilityInvocation {
+    match cap.object.invoke(&CapabilityInvocation {
         args: [p1, p2, p3, p4],
+        registers: Some(registers),
     }) {
         Ok(x) => x,
         Err(e) => e as i32 as i64,
@@ -69,8 +62,8 @@ extern "C" fn syscall_entry(
 unsafe extern "C" fn lowlevel_syscall_entry() {
     asm!(r#"
         swapgs
-        mov %rsp, %gs:32
-        mov %gs:24, %rsp
+        mov %rsp, %gs:8
+        mov %gs:0, %rsp
 
         push %r11 // rflags
         push %rcx // rip
@@ -117,7 +110,7 @@ unsafe extern "C" fn lowlevel_syscall_entry() {
         pop %rcx
         pop %r11
 
-        mov %gs:32, %rsp
+        mov %gs:8, %rsp
         swapgs
         sysretq
     "# :::: "volatile");
