@@ -1,5 +1,5 @@
 use crate::serial::with_serial_port;
-use crate::task::TaskRegisters;
+use crate::task::{Task, TaskFaultState, TaskRegisters};
 use core::fmt::Write;
 use pic8259_simple::ChainedPics;
 use spin::Mutex;
@@ -269,7 +269,9 @@ interrupt!(intr_divide_error, __intr_divide_error, frame, _registers, {
     if !is_user_fault(frame) {
         panic!("Kernel divide error");
     }
-    panic!("Unable to handle user divide error");
+    Task::current()
+        .unwrap()
+        .raise_fault(TaskFaultState::IntegerDivision);
 });
 
 interrupt!(
@@ -284,7 +286,9 @@ interrupt!(
         if !is_user_fault(frame) {
             panic!("Kernel invalid opcode");
         }
-        panic!("Unable to handle user invalid opcode");
+        Task::current()
+            .unwrap()
+            .raise_fault(TaskFaultState::IllegalInstruction);
     }
 );
 
@@ -295,7 +299,9 @@ interrupt_with_code!(intr_gpf, __intr_gpf, frame, _registers, code, {
     if !is_user_fault(frame) {
         panic!("Kernel GPF");
     }
-    panic!("Unable to handle user GPF");
+    Task::current()
+        .unwrap()
+        .raise_fault(TaskFaultState::GeneralProtection);
 });
 
 interrupt_with_code!(
@@ -318,7 +324,9 @@ interrupt_with_code!(
         if !is_user_fault(frame) {
             panic!("Kernel page fault");
         }
-        panic!("Unable to handle user page fault");
+        Task::current()
+            .unwrap()
+            .raise_fault(TaskFaultState::PageFault);
     }
 );
 

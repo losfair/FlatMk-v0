@@ -120,15 +120,11 @@ pub extern "C" fn kstart(boot_info: &'static BootInfo) -> ! {
 
     task::switch_to(ROOT_TASK.clone());
     let initial_ip = ROOT_TASK.load_root_image();
-    unsafe {
-        (*ROOT_TASK.local_state.unsafe_deref().registers.get()).rip = initial_ip;
-    }
+    ROOT_TASK.registers.lock().rip = initial_ip;
     with_serial_port(|p| {
         writeln!(p, "Dropping to user mode at {:p}.", initial_ip as *mut u8).unwrap();
     });
-    unsafe {
-        task::enter_user_mode();
-    }
+    task::enter_user_mode();
 }
 
 #[panic_handler]

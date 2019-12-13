@@ -19,8 +19,10 @@ pub enum KernelError {
     InvalidAddress = -7,
     /// The provided capability slot is empty.
     EmptyCapability = -8,
-    /// An address provided is not aligned to page boundary.
+    /// An address provided is not aligned to a required boundary.
     NotAligned = -9,
+    /// An IPC operation would block, but non-blocking mode is requested.
+    WouldBlock = -10,
 }
 
 pub type KernelResult<T> = Result<T, KernelError>;

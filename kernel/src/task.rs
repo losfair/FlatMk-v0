@@ -1,12 +1,12 @@
 use crate::capability::{CapabilityEndpoint, CapabilitySet};
 use crate::error::*;
 use crate::kobj::*;
-use crate::kobj::{KernelObject, LikeKernelObject, LikeKernelObjectRef, Retype};
 use crate::paging::{PageTableObject, RootPageTable};
 use crate::serial::with_serial_port;
 use bootloader::bootinfo::MemoryRegionType;
 use core::cell::{Cell, UnsafeCell};
 use core::fmt::Write;
+use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 use x86_64::{
     registers::{
@@ -28,10 +28,25 @@ pub const PAGE_SIZE: u64 = 4096;
 static ROOT_IMAGE: &'static [u8] =
     include_bytes!("../../user/init/target/x86_64-flatmk/release/init");
 
-#[derive(Copy, Clone, Debug)]
+#[naked]
+#[inline(never)]
+unsafe extern "C" fn enable_sse() {
+    asm!(r#"
+        mov %cr4, %rax
+        or $$0x600, %rax // CR4.OSFXSR + CR4.OSXMMEXCPT
+        mov %rax, %cr4
+        retq
+    "# :::: "volatile");
+}
+
+#[derive(Clone, Debug)]
 pub enum TaskFaultState {
     NoFault,
     PageFault,
+    IpcBlocked,
+    GeneralProtection,
+    IllegalInstruction,
+    IntegerDivision,
 }
 
 /// LocalState is NOT thread safe and should only be accessed on the task's
@@ -43,12 +58,6 @@ pub struct LocalState {
 
     /// Saved address of the user stack.
     pub user_stack: Cell<VirtAddr>,
-
-    /// Is there a pending page fault on this task?
-    pub pending_fault: Cell<TaskFaultState>,
-
-    /// Saved registers when scheduled out.
-    pub registers: UnsafeCell<TaskRegisters>,
 }
 
 impl LocalState {
@@ -61,8 +70,6 @@ impl LocalState {
                     .get(),
             ),
             user_stack: Cell::new(VirtAddr::new(0)),
-            pending_fault: Cell::new(TaskFaultState::NoFault),
-            registers: UnsafeCell::new(TaskRegisters::new()),
         }
     }
 }
@@ -100,16 +107,13 @@ pub struct UserPageSet {
 
 impl Retype for UserPageSet {}
 impl Notify for UserPageSet {
-    fn will_drop(&mut self, owner: &dyn LikeKernelObject) {
-        assert_eq!(
-            owner as *const _ as *const PageTableObject,
-            &*self.owning_rpt as *const PageTableObject
-        );
-
+    fn will_drop(&mut self, _owner: &dyn LikeKernelObject) {
         for i in 0..self.n_backings {
             unsafe {
                 // Already checked in retype().
-                owner.return_user_page(VirtAddr::new_unchecked(self.backing_user[i as usize]));
+                // `owner` can be different from `owning_rpt`.
+                self.owning_rpt
+                    .return_user_page(VirtAddr::new_unchecked(self.backing_user[i as usize]));
             }
         }
     }
@@ -149,13 +153,22 @@ pub struct Task {
     pub local_state: LocalStateWrapper,
 
     /// Page table of this task.
-    pub page_table_root: KernelObjectRef<PageTableObject>,
+    pub page_table_root: AtomicKernelObjectRef<PageTableObject>,
 
     /// Root capability set.
-    pub capabilities: KernelObjectRef<CapabilitySet>,
+    pub capabilities: AtomicKernelObjectRef<CapabilitySet>,
 
     /// IPC capabilities.
     pub ipc_caps: Mutex<[CapabilityEndpoint; 4]>,
+
+    /// Indicates whether or not IPC is being blocked.
+    pub ipc_blocked: AtomicBool,
+
+    /// Pending fault.
+    pub pending_fault: Mutex<TaskFaultState>,
+
+    /// Saved registers when scheduled out.
+    pub registers: Mutex<TaskRegisters>,
 }
 
 #[repr(C)]
@@ -227,6 +240,7 @@ pub fn set_current_task(t: Option<KernelObjectRef<Task>>) {
 
 pub unsafe fn init() {
     GsBase::write(VirtAddr::new(0));
+    enable_sse();
 }
 
 impl TaskRegisters {
@@ -339,7 +353,7 @@ impl Retype for Task {
 
 impl Notify for Task {
     unsafe fn return_user_page(&self, addr: VirtAddr) {
-        self.page_table_root.return_user_page(addr);
+        self.page_table_root.get().return_user_page(addr);
     }
 }
 
@@ -355,12 +369,13 @@ impl Task {
             local_state: LocalStateWrapper(UnsafeCell::new(LocalState {
                 kernel_stack: Cell::new(kernel_stack),
                 user_stack: Cell::new(VirtAddr::new(0)),
-                pending_fault: Cell::new(TaskFaultState::NoFault),
-                registers: UnsafeCell::new(TaskRegisters::new()),
             })),
-            page_table_root: page_table_root,
-            capabilities: cap_root,
+            page_table_root: AtomicKernelObjectRef::new(page_table_root),
+            capabilities: AtomicKernelObjectRef::new(cap_root),
             ipc_caps: Mutex::new(empty_ipc_caps()),
+            ipc_blocked: AtomicBool::new(false),
+            pending_fault: Mutex::new(TaskFaultState::NoFault),
+            registers: Mutex::new(TaskRegisters::new()),
         }
     }
 
@@ -369,7 +384,7 @@ impl Task {
         let num_pages_mapped = {
             let phys_mappings = &crate::boot::boot_info().memory_map;
 
-            self.page_table_root.with(|pt_root| {
+            self.page_table_root.get().with(|pt_root| {
                 let phys_iterator = phys_mappings
                     .iter()
                     .filter_map(|x| match x.region_type {
@@ -408,6 +423,23 @@ impl Task {
     }
     pub fn current() -> Option<KernelObjectRef<Task>> {
         get_current_task()
+    }
+
+    pub fn deep_clone(&self) -> Task {
+        Task {
+            local_state: LocalStateWrapper::new(LocalState::new()),
+            page_table_root: AtomicKernelObjectRef::new(self.page_table_root.get()),
+            capabilities: AtomicKernelObjectRef::new(self.capabilities.get()),
+            ipc_caps: Mutex::new(empty_ipc_caps()),
+            ipc_blocked: AtomicBool::new(false),
+            pending_fault: Mutex::new(TaskFaultState::NoFault),
+            registers: Mutex::new(TaskRegisters::new()),
+        }
+    }
+
+    pub fn raise_fault(&self, fault: TaskFaultState) -> ! {
+        *self.pending_fault.lock() = fault;
+        panic!("fault not handled");
     }
 }
 
@@ -545,7 +577,7 @@ pub fn retype_page_table_from_user(
 }
 
 pub fn switch_to(task: KernelObjectRef<Task>) {
-    let pt_root: *const PageTable = task.page_table_root.with(|x| x as *mut _ as *const _);
+    let pt_root: *const PageTable = task.page_table_root.get().with(|x| x as *mut _ as *const _);
 
     set_current_task(Some(task));
     unsafe {
@@ -564,8 +596,7 @@ pub fn switch_to(task: KernelObjectRef<Task>) {
 }
 
 /// Switches out of kernel mode and enters user mode.
-/// Unsafe because the kernel stack is immediately invalidated after entering user mode.
-pub unsafe fn enter_user_mode() -> ! {
+pub fn enter_user_mode() -> ! {
     #[naked]
     #[inline(never)]
     unsafe extern "C" fn __enter_user_mode(
@@ -608,16 +639,23 @@ pub unsafe fn enter_user_mode() -> ! {
     let selectors = crate::exception::get_selectors();
 
     let task = get_current_task().expect("enter_user_mode: no current task");
-    let registers: *const TaskRegisters = task.local_state.unsafe_deref().registers.get();
-    // Here we won't get a dangling `registers` pointer after drop because we know that
-    // `GsBase` won't be dropped now.
-    drop(task);
 
-    __enter_user_mode(
-        0,
-        registers,
-        selectors.user_code_selector.0 as u32,
-        selectors.user_data_selector.0 as u32,
-    );
+    unsafe {
+        let registers: *const TaskRegisters = {
+            let registers = task.registers.lock();
+            &*registers as *const _
+        };
+        // Here we won't get a dangling `registers` pointer after drop because we know that
+        // `GsBase` won't be dropped now.
+        drop(task);
+
+        __enter_user_mode(
+            0,
+            registers,
+            selectors.user_code_selector.0 as u32,
+            selectors.user_data_selector.0 as u32,
+        );
+    }
+
     loop {}
 }

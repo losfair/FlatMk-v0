@@ -1,4 +1,5 @@
-use crate::capability::{CapPtr, CapabilityInvocation};
+use crate::capability::{CapPtr, CapabilityInvocation, INVALID_CAP};
+use crate::error::*;
 use crate::serial::with_serial_port;
 use crate::task::TaskRegisters;
 use core::fmt::Write;
@@ -41,9 +42,13 @@ extern "C" fn syscall_entry(
     _p5: i64,
     registers: &TaskRegisters,
 ) -> i64 {
+    if p0 as u64 == INVALID_CAP {
+        return KernelError::InvalidArgument as i32 as i64;
+    }
+
     let cap = {
         let task = crate::task::get_current_task().unwrap();
-        match task.capabilities.lookup(CapPtr(p0 as u64)) {
+        match task.capabilities.get().lookup(CapPtr(p0 as u64)) {
             Ok(x) => x,
             Err(e) => return e as i32 as i64,
         }
@@ -68,7 +73,7 @@ unsafe extern "C" fn lowlevel_syscall_entry() {
         push %r11 // rflags
         push %rcx // rip
         push %rbp // rbp
-        push %gs:32 // rsp
+        push %gs:8 // rsp
         push %rdi
         push %rsi
         push %rdx

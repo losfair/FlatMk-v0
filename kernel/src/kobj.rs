@@ -1,7 +1,7 @@
 use crate::error::*;
 use core::cell::UnsafeCell;
 use core::ops::Deref;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use x86_64::VirtAddr;
 
 const PAGE_SIZE: u64 = 4096;
@@ -60,6 +60,46 @@ impl<T: Retype + Notify + Send + Sync + 'static> From<KernelObjectRef<T>> for Li
         let result = LikeKernelObjectRef { inner: other.inner };
         core::mem::forget(other);
         result
+    }
+}
+
+#[repr(transparent)]
+pub struct AtomicKernelObjectRef<T: Retype + Notify + Send + Sync + 'static> {
+    inner: UnsafeCell<KernelObjectRef<T>>,
+}
+
+unsafe impl<T: Retype + Notify + Send + Sync + 'static> Send for AtomicKernelObjectRef<T> {}
+unsafe impl<T: Retype + Notify + Send + Sync + 'static> Sync for AtomicKernelObjectRef<T> {}
+
+impl<T: Retype + Notify + Send + Sync + 'static> AtomicKernelObjectRef<T> {
+    pub fn new(inner: KernelObjectRef<T>) -> AtomicKernelObjectRef<T> {
+        AtomicKernelObjectRef {
+            inner: UnsafeCell::new(inner),
+        }
+    }
+
+    pub fn get(&self) -> KernelObjectRef<T> {
+        let obj = KernelObjectRef {
+            inner: unsafe {
+                &*(*(self.inner.get() as *mut AtomicPtr<KernelObject<T>>)).load(Ordering::SeqCst)
+            },
+        };
+        obj.inner.inc_ref();
+        obj
+    }
+
+    pub fn swap(&self, other: KernelObjectRef<T>) -> KernelObjectRef<T> {
+        let old = KernelObjectRef {
+            inner: unsafe {
+                &*(*(self.inner.get() as *mut AtomicPtr<KernelObject<T>>)).swap(
+                    other.inner as *const KernelObject<T> as *mut KernelObject<T>,
+                    Ordering::SeqCst,
+                )
+            },
+        };
+        // Prevent Drop from decrementing refcount.
+        core::mem::forget(other);
+        old
     }
 }
 
