@@ -1,7 +1,7 @@
 use crate::capability::{CapPtr, CapabilityInvocation, INVALID_CAP};
 use crate::error::*;
 use crate::serial::with_serial_port;
-use crate::task::TaskRegisters;
+use crate::task::{Task, TaskRegisters};
 use core::fmt::Write;
 use x86_64::registers::{
     model_specific::{Efer, EferFlags, Msr},
@@ -47,7 +47,7 @@ extern "C" fn syscall_entry(
     }
 
     let cap = {
-        let task = crate::task::get_current_task().unwrap();
+        let task = Task::current();
         match task.capabilities.get().lookup(CapPtr(p0 as u64)) {
             Ok(x) => x,
             Err(e) => return e as i32 as i64,

@@ -62,7 +62,7 @@ pub struct LocalState {
 
 impl LocalState {
     pub fn new() -> LocalState {
-        let current = Task::current().unwrap();
+        let current = Task::current();
         LocalState {
             kernel_stack: Cell::new(
                 unsafe { current.local_state.unsafe_deref() }
@@ -203,21 +203,18 @@ pub fn empty_ipc_caps() -> [CapabilityEndpoint; 4] {
     ]
 }
 
-pub fn get_current_task() -> Option<KernelObjectRef<Task>> {
+#[inline]
+fn get_current_task() -> KernelObjectRef<Task> {
     // Clone the current reference, if any.
     let ptr = GsBase::read().as_ptr::<KernelObject<Task>>();
-    if ptr.is_null() {
-        None
-    } else {
-        let obj = unsafe { KernelObjectRef::from_raw(ptr) };
-        let ret = obj.clone();
-        // We should not drop the old reference here.
-        KernelObjectRef::into_raw(obj);
-        Some(ret)
-    }
+    let obj = unsafe { KernelObjectRef::from_raw(ptr) };
+    let ret = obj.clone();
+    // We should not drop the old reference here.
+    KernelObjectRef::into_raw(obj);
+    ret
 }
 
-pub fn set_current_task(t: Option<KernelObjectRef<Task>>) {
+fn set_current_task(t: KernelObjectRef<Task>) {
     // Drop the old reference.
     let old = GsBase::read().as_ptr::<KernelObject<Task>>();
     if !old.is_null() {
@@ -227,15 +224,8 @@ pub fn set_current_task(t: Option<KernelObjectRef<Task>>) {
     }
 
     // Write the new reference.
-    match t {
-        Some(x) => {
-            let raw = KernelObjectRef::into_raw(x);
-            GsBase::write(VirtAddr::new(raw as u64));
-        }
-        None => {
-            GsBase::write(VirtAddr::new(0));
-        }
-    }
+    let raw = KernelObjectRef::into_raw(t);
+    GsBase::write(VirtAddr::new(raw as u64));
 }
 
 pub unsafe fn init() {
@@ -421,7 +411,9 @@ impl Task {
             }
         }
     }
-    pub fn current() -> Option<KernelObjectRef<Task>> {
+
+    #[inline]
+    pub fn current() -> KernelObjectRef<Task> {
         get_current_task()
     }
 
@@ -440,6 +432,22 @@ impl Task {
     pub fn raise_fault(&self, fault: TaskFaultState) -> ! {
         *self.pending_fault.lock() = fault;
         panic!("fault not handled");
+    }
+
+    pub fn unblock_ipc(&self) -> KernelResult<()> {
+        let mut caps = self.ipc_caps.lock();
+        for cap in caps.iter_mut() {
+            *cap = CapabilityEndpoint::default();
+        }
+        if self
+            .ipc_blocked
+            .compare_and_swap(true, false, Ordering::SeqCst)
+            != true
+        {
+            Err(KernelError::InvalidState)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -579,7 +587,7 @@ pub fn retype_page_table_from_user(
 pub fn switch_to(task: KernelObjectRef<Task>) {
     let pt_root: *const PageTable = task.page_table_root.get().with(|x| x as *mut _ as *const _);
 
-    set_current_task(Some(task));
+    set_current_task(task);
     unsafe {
         Cr3::write(
             PhysFrame::from_start_address(
@@ -638,7 +646,7 @@ pub fn enter_user_mode() -> ! {
     assert_eq!(core::mem::size_of::<TaskRegisters>(), 144);
     let selectors = crate::exception::get_selectors();
 
-    let task = get_current_task().expect("enter_user_mode: no current task");
+    let task = Task::current();
 
     unsafe {
         let registers: *const TaskRegisters = {

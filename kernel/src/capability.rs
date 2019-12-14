@@ -230,7 +230,7 @@ fn invoke_cap_basic_task(
     invocation: &CapabilityInvocation,
     task: &KernelObjectRef<Task>,
 ) -> KernelResult<i64> {
-    let current = Task::current().unwrap();
+    let current = Task::current();
 
     let req = BasicTaskRequest::try_from(invocation.args[0] as u32)?;
     match req {
@@ -403,15 +403,8 @@ fn invoke_cap_basic_task(
             Ok(0)
         }
         BasicTaskRequest::UnblockIpc => {
-            if task
-                .ipc_blocked
-                .compare_and_swap(true, false, Ordering::SeqCst)
-                != true
-            {
-                Err(KernelError::InvalidState)
-            } else {
-                Ok(0)
-            }
+            task.unblock_ipc()?;
+            Ok(0)
         }
         BasicTaskRequest::FetchIpcCap => {
             let cptr = CapPtr(invocation.args[1] as u64);
@@ -466,7 +459,7 @@ fn invoke_cap_root_task(invocation: &CapabilityInvocation) -> KernelResult<i64> 
         Mmio = 1,
     }
 
-    let current = Task::current().unwrap();
+    let current = Task::current();
 
     let requested_cap = RootTaskCapRequest::try_from(invocation.args[0] as u32)?;
     match requested_cap {
@@ -572,7 +565,7 @@ fn invoke_cap_user_page_set(
         Map = 0,
     }
 
-    //let current = Task::current().unwrap();
+    //let current = Task::current();
     let req = UserPageSetCapRequest::try_from(invocation.args[0] as u32)?;
 
     match req {
@@ -581,10 +574,13 @@ fn invoke_cap_user_page_set(
 }
 
 #[repr(u32)]
+#[allow(non_camel_case_types)]
 #[derive(Debug, Copy, Clone, TryFromPrimitive)]
 enum IpcRequest {
     SwitchToBlocking = 0,
     SwitchToNonblocking = 1,
+    SwitchToBlocking_UnblockLocalIpc = 2,
+    SwitchToNonblocking_UnblockLocalIpc = 3,
 }
 
 fn invoke_cap_ipc_endpoint(
@@ -593,7 +589,17 @@ fn invoke_cap_ipc_endpoint(
 ) -> KernelResult<i64> {
     let req = IpcRequest::try_from(invocation.args[0] as u32)?;
     match req {
-        IpcRequest::SwitchToBlocking | IpcRequest::SwitchToNonblocking => {
+        IpcRequest::SwitchToBlocking
+        | IpcRequest::SwitchToNonblocking
+        | IpcRequest::SwitchToBlocking_UnblockLocalIpc
+        | IpcRequest::SwitchToNonblocking_UnblockLocalIpc => {
+            match req {
+                IpcRequest::SwitchToBlocking_UnblockLocalIpc
+                | IpcRequest::SwitchToNonblocking_UnblockLocalIpc => {
+                    Task::current().unblock_ipc()?;
+                }
+                _ => {}
+            }
             if endpoint
                 .task
                 .ipc_blocked
@@ -601,17 +607,18 @@ fn invoke_cap_ipc_endpoint(
                 != false
             {
                 match req {
-                    IpcRequest::SwitchToBlocking => {
+                    IpcRequest::SwitchToBlocking | IpcRequest::SwitchToBlocking_UnblockLocalIpc => {
                         endpoint.task.raise_fault(TaskFaultState::IpcBlocked);
                     }
-                    IpcRequest::SwitchToNonblocking => {
+                    IpcRequest::SwitchToNonblocking
+                    | IpcRequest::SwitchToNonblocking_UnblockLocalIpc => {
                         return Err(KernelError::WouldBlock);
                     }
                 }
             } else {
                 // From here on we should not return or fault.
                 {
-                    let current = Task::current().unwrap();
+                    let current = Task::current();
                     let mut ipc_caps = endpoint.task.ipc_caps.lock();
 
                     ipc_caps[0] = CapabilityEndpoint {
@@ -633,9 +640,7 @@ fn invoke_cap_ipc_endpoint(
                                     ipc_caps[i] = x;
                                 }
                                 Err(_) => {
-                                    ipc_caps[i] = CapabilityEndpoint {
-                                        object: CapabilityEndpointObject::Empty,
-                                    };
+                                    ipc_caps[i] = CapabilityEndpoint::default();
                                 }
                             }
                         }

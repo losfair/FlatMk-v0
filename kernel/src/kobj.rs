@@ -78,6 +78,7 @@ impl<T: Retype + Notify + Send + Sync + 'static> AtomicKernelObjectRef<T> {
         }
     }
 
+    #[inline]
     pub fn get(&self) -> KernelObjectRef<T> {
         let obj = KernelObjectRef {
             inner: unsafe {
@@ -88,6 +89,7 @@ impl<T: Retype + Notify + Send + Sync + 'static> AtomicKernelObjectRef<T> {
         obj
     }
 
+    #[inline]
     pub fn swap(&self, other: KernelObjectRef<T>) -> KernelObjectRef<T> {
         let old = KernelObjectRef {
             inner: unsafe {
@@ -109,18 +111,21 @@ pub struct KernelObjectRef<T: Retype + Notify + Send + Sync + 'static> {
 }
 
 impl<T: Retype + Notify + Send + Sync + 'static> KernelObjectRef<T> {
+    #[inline]
     pub fn into_raw(self) -> *const KernelObject<T> {
         let ret = self.inner as *const _;
         core::mem::forget(self);
         ret
     }
 
+    #[inline]
     pub unsafe fn from_raw(raw: *const KernelObject<T>) -> KernelObjectRef<T> {
         KernelObjectRef { inner: &*raw }
     }
 }
 
 impl<T: Retype + Notify + Send + Sync + 'static> Clone for KernelObjectRef<T> {
+    #[inline]
     fn clone(&self) -> Self {
         self.inner.inc_ref();
         KernelObjectRef { inner: self.inner }
@@ -128,6 +133,7 @@ impl<T: Retype + Notify + Send + Sync + 'static> Clone for KernelObjectRef<T> {
 }
 
 impl<T: Retype + Notify + Send + Sync + 'static> Drop for KernelObjectRef<T> {
+    #[inline]
     fn drop(&mut self) {
         unsafe {
             self.inner.dec_ref();
@@ -138,6 +144,7 @@ impl<T: Retype + Notify + Send + Sync + 'static> Drop for KernelObjectRef<T> {
 impl<T: Retype + Notify + Send + Sync + 'static> Deref for KernelObjectRef<T> {
     type Target = T;
 
+    #[inline]
     fn deref(&self) -> &T {
         self.inner.value()
     }
@@ -221,11 +228,13 @@ impl<T: Retype + Notify + Send + Sync + 'static> KernelObject<T> {
 
     /// Dereferences into the inner value.
     /// Only immutable dereferencing is allowed.
+    #[inline]
     pub fn value(&self) -> &T {
         unsafe { &*(self.value.get()) }
     }
 
     /// Returns a new dynamic reference to this kernel object.
+    #[inline]
     pub fn get_ref(&self) -> KernelObjectRef<T> {
         self.inc_ref();
         unsafe {
@@ -257,10 +266,12 @@ impl<T: Retype + Notify + Send + Sync + 'static> Drop for KernelObject<T> {
 }
 
 unsafe impl<T: Retype + Notify + Send + Sync + 'static> LikeKernelObject for KernelObject<T> {
+    #[inline]
     fn inc_ref(&self) {
         self.refcount.fetch_add(1, Ordering::SeqCst);
     }
 
+    #[inline]
     unsafe fn dec_ref(&self) {
         let old_count = self.refcount.fetch_sub(1, Ordering::SeqCst);
         if old_count == 1 {
