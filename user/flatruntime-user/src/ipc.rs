@@ -57,6 +57,8 @@ pub struct FastIpcPayload(pub [u64; 8]);
 enum IpcRequest {
     SwitchToBlocking = 0,
     SwitchToNonblocking = 1,
+    SwitchToBlocking_UnblockLocalIpc = 2,
+    SwitchToNonblocking_UnblockLocalIpc = 3,
 }
 
 pub struct IpcEndpoint {
@@ -96,7 +98,6 @@ impl IpcEndpoint {
 pub fn wait_ipc() {
     loop {
         let peer_endpoint = THIS_TASK.fetch_ipc_cap(0).unwrap();
-        THIS_TASK.unblock_ipc().unwrap();
         unsafe {
             let mut payload = FastIpcPayload::default();
             _fastipc_read(&mut payload);
@@ -105,7 +106,7 @@ pub fn wait_ipc() {
         }
         match unsafe {
             peer_endpoint.call(
-                IpcRequest::SwitchToBlocking as u32 as i64,
+                IpcRequest::SwitchToBlocking_UnblockLocalIpc as u32 as i64,
                 INVALID_CAP as _,
                 INVALID_CAP as _,
                 INVALID_CAP as _,
