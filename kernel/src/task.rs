@@ -6,7 +6,7 @@ use crate::serial::with_serial_port;
 use bootloader::bootinfo::MemoryRegionType;
 use core::cell::{Cell, UnsafeCell};
 use core::fmt::Write;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 use x86_64::{
     registers::{
@@ -169,6 +169,9 @@ pub struct Task {
 
     /// Saved registers when scheduled out.
     pub registers: Mutex<TaskRegisters>,
+
+    /// Fault handler table.
+    pub fault_handlers: Mutex<FaultHandlerTable>,
 }
 
 #[repr(C)]
@@ -192,6 +195,51 @@ pub struct TaskRegisters {
     pub rbp: u64,
     pub rip: u64,
     pub rflags: u64,
+    pub gs_base: u64,
+    pub fs_base: u64,
+}
+
+#[derive(Default, Clone)]
+pub struct FaultHandlerTable {
+    pub ipc_blocked: Option<FaultHandler>,
+    pub page_fault: Option<FaultHandler>,
+}
+
+#[derive(Clone)]
+pub struct FaultHandler {
+    pub task: KernelObjectRef<Task>,
+    pub entry: IpcEntry,
+}
+
+pub struct IpcEntry {
+    /// Instruction pointer.
+    pub pc: u64,
+
+    /// Stack pointer.
+    pub sp: u64,
+
+    /// Context provided by the user.
+    /// Can only be modified when equals to zero.
+    pub user_context: AtomicU64,
+}
+
+impl IpcEntry {
+    pub fn set_user_context(&self, ctx: u64) -> KernelResult<()> {
+        self.user_context
+            .compare_exchange(0, ctx, Ordering::SeqCst, Ordering::SeqCst)
+            .map(|_| ())
+            .map_err(|_| KernelError::InvalidState)
+    }
+}
+
+impl Clone for IpcEntry {
+    fn clone(&self) -> IpcEntry {
+        IpcEntry {
+            pc: self.pc,
+            sp: self.sp,
+            user_context: AtomicU64::new(self.user_context.load(Ordering::SeqCst)),
+        }
+    }
 }
 
 pub fn empty_ipc_caps() -> [CapabilityEndpoint; 4] {
@@ -254,9 +302,12 @@ impl TaskRegisters {
             rbp: 0,
             rip: 0,
             rflags: RFlags::INTERRUPT_FLAG.bits(),
+            gs_base: 0,
+            fs_base: 0,
         }
     }
 
+    #[inline]
     pub fn field_mut(&mut self, idx: usize) -> KernelResult<&mut u64> {
         Ok(match idx {
             0 => &mut self.rax,
@@ -278,6 +329,34 @@ impl TaskRegisters {
             16 => &mut self.rip,
             _ => return Err(KernelError::InvalidArgument),
         })
+    }
+
+    #[inline]
+    pub fn return_value_mut(&mut self) -> &mut u64 {
+        &mut self.rax
+    }
+
+    #[inline]
+    pub fn syscall_arg(&self, n: usize) -> KernelResult<u64> {
+        Ok(match n {
+            0 => self.rdi,
+            1 => self.rsi,
+            2 => self.rdx,
+            3 => self.r10,
+            4 => self.r8,
+            5 => self.r9,
+            _ => return Err(KernelError::InvalidArgument),
+        })
+    }
+
+    #[inline]
+    pub fn pc_mut(&mut self) -> &mut u64 {
+        &mut self.rip
+    }
+
+    #[inline]
+    pub fn sp_mut(&mut self) -> &mut u64 {
+        &mut self.rsp
     }
 }
 
@@ -363,9 +442,10 @@ impl Task {
             page_table_root: AtomicKernelObjectRef::new(page_table_root),
             capabilities: AtomicKernelObjectRef::new(cap_root),
             ipc_caps: Mutex::new(empty_ipc_caps()),
-            ipc_blocked: AtomicBool::new(false),
+            ipc_blocked: AtomicBool::new(true),
             pending_fault: Mutex::new(TaskFaultState::NoFault),
             registers: Mutex::new(TaskRegisters::new()),
+            fault_handlers: Mutex::new(FaultHandlerTable::default()),
         }
     }
 
@@ -423,15 +503,16 @@ impl Task {
             page_table_root: AtomicKernelObjectRef::new(self.page_table_root.get()),
             capabilities: AtomicKernelObjectRef::new(self.capabilities.get()),
             ipc_caps: Mutex::new(empty_ipc_caps()),
-            ipc_blocked: AtomicBool::new(false),
+            ipc_blocked: AtomicBool::new(true),
             pending_fault: Mutex::new(TaskFaultState::NoFault),
             registers: Mutex::new(TaskRegisters::new()),
+            fault_handlers: Mutex::new(self.fault_handlers.lock().clone()),
         }
     }
 
     pub fn raise_fault(&self, fault: TaskFaultState) -> ! {
+        panic!("fault not handled: {:?}", fault);
         *self.pending_fault.lock() = fault;
-        panic!("fault not handled");
     }
 
     pub fn unblock_ipc(&self) -> KernelResult<()> {
@@ -441,13 +522,37 @@ impl Task {
         }
         if self
             .ipc_blocked
-            .compare_and_swap(true, false, Ordering::SeqCst)
-            != true
+            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
         {
             Err(KernelError::InvalidState)
         } else {
             Ok(())
         }
+    }
+
+    pub fn block_ipc(&self) -> KernelResult<()> {
+        if self
+            .ipc_blocked
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            Err(KernelError::InvalidState)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn invoke_ipc(task: KernelObjectRef<Task>, entry: IpcEntry) -> ! {
+        {
+            // TODO: Save old PC/SP and pass user context.
+            let mut target_regs = task.registers.lock();
+            *target_regs.pc_mut() = entry.pc;
+            *target_regs.sp_mut() = entry.sp;
+        }
+
+        crate::task::switch_to(task);
+        crate::task::enter_user_mode();
     }
 }
 
@@ -643,7 +748,7 @@ pub fn enter_user_mode() -> ! {
             "# :::: "volatile"
         );
     }
-    assert_eq!(core::mem::size_of::<TaskRegisters>(), 144);
+    assert_eq!(core::mem::size_of::<TaskRegisters>(), 160);
     let selectors = crate::exception::get_selectors();
 
     let task = Task::current();

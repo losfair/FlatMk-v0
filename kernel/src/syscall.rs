@@ -1,7 +1,7 @@
-use crate::capability::{CapPtr, CapabilityInvocation, INVALID_CAP};
+use crate::capability::{CapabilityInvocation, INVALID_CAP};
 use crate::error::*;
 use crate::serial::with_serial_port;
-use crate::task::{Task, TaskRegisters};
+use crate::task::Task;
 use core::fmt::Write;
 use x86_64::registers::{
     model_specific::{Efer, EferFlags, Msr},
@@ -33,30 +33,20 @@ pub unsafe fn init() {
 
 #[inline(never)]
 #[no_mangle]
-extern "C" fn syscall_entry(
-    p0: i64,
-    p1: i64,
-    p2: i64,
-    p3: i64,
-    p4: i64,
-    _p5: i64,
-    registers: &TaskRegisters,
-) -> i64 {
-    if p0 as u64 == INVALID_CAP {
+extern "C" fn syscall_entry(invocation: &mut CapabilityInvocation) -> i64 {
+    let cptr = invocation.cptr();
+    if cptr.0 == INVALID_CAP {
         return KernelError::InvalidArgument as i32 as i64;
     }
 
     let cap = {
         let task = Task::current();
-        match task.capabilities.get().lookup(CapPtr(p0 as u64)) {
+        match task.capabilities.get().lookup(cptr) {
             Ok(x) => x,
             Err(e) => return e as i32 as i64,
         }
     };
-    match cap.object.invoke(&CapabilityInvocation {
-        args: [p1, p2, p3, p4],
-        registers: Some(registers),
-    }) {
+    match cap.object.invoke(invocation) {
         Ok(x) => x,
         Err(e) => e as i32 as i64,
     }
@@ -89,12 +79,8 @@ unsafe extern "C" fn lowlevel_syscall_entry() {
         push %r14
         push %r15
 
-        subq $$16, %rsp
-        leaq 16(%rsp), %rax
-        mov %rax, 0(%rsp) // saved registers
-        mov %r10, %rcx
+        mov %rsp, %rdi
         call syscall_entry
-        addq $$16, %rsp
 
         pop %r15
         pop %r14

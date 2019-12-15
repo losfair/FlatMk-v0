@@ -2,12 +2,13 @@ use crate::error::*;
 use crate::kobj::*;
 use crate::paging::{phys_to_virt, virt_to_phys, PageTableObject};
 use crate::task::{
-    retype_user, retype_user_with, Task, TaskFaultState, TaskRegisters, UserPageSet, PAGE_SIZE,
+    retype_user, retype_user_with, IpcEntry, Task, TaskFaultState, TaskRegisters, UserPageSet,
+    PAGE_SIZE,
 };
 use core::convert::TryFrom;
 use core::mem::MaybeUninit;
 use core::ops::Deref;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU64, Ordering};
 use num_enum::TryFromPrimitive;
 use spin::Mutex;
 use x86_64::{instructions::tlb, structures::paging::PageTableFlags, PhysAddr, VirtAddr};
@@ -20,9 +21,23 @@ pub const INVALID_CAP: u64 = core::u64::MAX;
 #[repr(transparent)]
 pub struct CapPtr(pub u64);
 
-pub struct CapabilityInvocation<'a> {
-    pub args: [i64; 4],
-    pub registers: Option<&'a TaskRegisters>,
+#[repr(C)]
+pub struct CapabilityInvocation {
+    pub registers: TaskRegisters,
+}
+
+impl CapabilityInvocation {
+    #[inline]
+    pub fn cptr(&self) -> CapPtr {
+        CapPtr(self.registers.syscall_arg(0).expect(
+            "The platform system call convention should always have at least one argument.",
+        ))
+    }
+
+    #[inline]
+    pub fn arg(&self, n: usize) -> KernelResult<u64> {
+        self.registers.syscall_arg(n + 1)
+    }
 }
 
 #[derive(Clone)]
@@ -101,9 +116,42 @@ pub enum CapabilityEndpointObject {
     IpcEndpoint(CapIpcEndpoint),
 }
 
-#[derive(Clone)]
 pub struct CapIpcEndpoint {
-    pub task: KernelObjectRef<Task>,
+    /// Task object to send IPC messages to.
+    pub task: Option<KernelObjectRef<Task>>,
+
+    /// Entry point information.
+    pub entry: IpcEntry,
+
+    /// Whether this endpoint is a reply endpoint.
+    ///
+    /// A reply endpoint has the following properties:
+    ///
+    /// - Can only be used once.
+    /// - Will not create another reply endpoint in the target task.
+    pub reply: bool,
+}
+
+impl Clone for CapIpcEndpoint {
+    fn clone(&self) -> CapIpcEndpoint {
+        if self.reply {
+            CapIpcEndpoint {
+                task: None,
+                entry: IpcEntry {
+                    pc: 0,
+                    sp: 0,
+                    user_context: AtomicU64::new(core::u64::MAX),
+                },
+                reply: true,
+            }
+        } else {
+            CapIpcEndpoint {
+                task: self.task.clone(),
+                entry: self.entry.clone(),
+                reply: self.reply,
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -170,28 +218,36 @@ impl CapabilitySet {
             }
         }
     }
+
+    #[inline]
     pub fn lookup(&self, cptr: CapPtr) -> KernelResult<CapabilityEndpoint> {
         self.entry_endpoint(cptr, |x| x.clone())
+    }
+
+    #[inline]
+    pub fn lookup_take(&self, cptr: CapPtr) -> KernelResult<CapabilityEndpoint> {
+        self.entry_endpoint(cptr, |x| {
+            core::mem::replace(x, CapabilityEndpoint::default())
+        })
     }
 }
 
 impl CapabilityEndpointObject {
-    pub fn invoke(&self, invocation: &CapabilityInvocation) -> KernelResult<i64> {
-        match *self {
+    /// invoke() takes self so that it can be dropped properly when this function does not return.
+    pub fn invoke(self, invocation: &mut CapabilityInvocation) -> KernelResult<i64> {
+        match self {
             CapabilityEndpointObject::Empty => Err(KernelError::EmptyCapability),
-            CapabilityEndpointObject::BasicTask(ref task) => {
-                invoke_cap_basic_task(invocation, task)
-            }
+            CapabilityEndpointObject::BasicTask(task) => invoke_cap_basic_task(invocation, task),
             CapabilityEndpointObject::RootTask => invoke_cap_root_task(invocation),
             CapabilityEndpointObject::X86IoPort(index) => invoke_cap_x86_io_port(invocation, index),
-            CapabilityEndpointObject::Mmio(ref mmio) => invoke_cap_mmio(invocation, mmio),
-            CapabilityEndpointObject::RootPageTable(ref pt) => {
+            CapabilityEndpointObject::Mmio(mmio) => invoke_cap_mmio(invocation, mmio),
+            CapabilityEndpointObject::RootPageTable(pt) => {
                 invoke_cap_root_page_table(invocation, pt)
             }
-            CapabilityEndpointObject::UserPageSet(ref buffer) => {
+            CapabilityEndpointObject::UserPageSet(buffer) => {
                 invoke_cap_user_page_set(invocation, buffer)
             }
-            CapabilityEndpointObject::IpcEndpoint(ref endpoint) => {
+            CapabilityEndpointObject::IpcEndpoint(endpoint) => {
                 invoke_cap_ipc_endpoint(invocation, endpoint)
             }
         }
@@ -227,16 +283,16 @@ enum BasicTaskRequest {
 }
 
 fn invoke_cap_basic_task(
-    invocation: &CapabilityInvocation,
-    task: &KernelObjectRef<Task>,
+    invocation: &mut CapabilityInvocation,
+    task: KernelObjectRef<Task>,
 ) -> KernelResult<i64> {
     let current = Task::current();
 
-    let req = BasicTaskRequest::try_from(invocation.args[0] as u32)?;
+    let req = BasicTaskRequest::try_from(invocation.arg(0)? as u32)?;
     match req {
         BasicTaskRequest::CloneCap => {
-            let src = CapPtr(invocation.args[1] as u64);
-            let dst = CapPtr(invocation.args[2] as u64);
+            let src = CapPtr(invocation.arg(1)? as u64);
+            let dst = CapPtr(invocation.arg(2)? as u64);
             let caps = task.capabilities.get();
             let cap = caps.entry_endpoint(src, |endpoint| endpoint.object.clone())?;
             caps.entry_endpoint(dst, |endpoint| {
@@ -245,15 +301,15 @@ fn invoke_cap_basic_task(
             Ok(0)
         }
         BasicTaskRequest::DropCap => {
-            let cptr = CapPtr(invocation.args[1] as u64);
+            let cptr = CapPtr(invocation.arg(1)? as u64);
             task.capabilities.get().entry_endpoint(cptr, |endpoint| {
                 endpoint.object = CapabilityEndpointObject::Empty;
             })?;
             Ok(0)
         }
         BasicTaskRequest::FetchCap => {
-            let src = CapPtr(invocation.args[1] as u64);
-            let dst = CapPtr(invocation.args[2] as u64);
+            let src = CapPtr(invocation.arg(1)? as u64);
+            let dst = CapPtr(invocation.arg(2)? as u64);
             let cap = task
                 .capabilities
                 .get()
@@ -264,8 +320,8 @@ fn invoke_cap_basic_task(
             Ok(0)
         }
         BasicTaskRequest::PutCap => {
-            let src = CapPtr(invocation.args[1] as u64);
-            let dst = CapPtr(invocation.args[2] as u64);
+            let src = CapPtr(invocation.arg(1)? as u64);
+            let dst = CapPtr(invocation.arg(2)? as u64);
             let cap = current
                 .capabilities
                 .get()
@@ -276,23 +332,20 @@ fn invoke_cap_basic_task(
             Ok(0)
         }
         BasicTaskRequest::SwitchTo => {
-            if let Some(registers) = invocation.registers {
-                let mut registers = registers.clone();
-                registers.rax = 0;
-                *current.registers.lock() = registers;
-            }
+            *invocation.registers.return_value_mut() = 0;
+            *current.registers.lock() = invocation.registers.clone();
             drop(current);
             crate::task::switch_to(task.clone());
             crate::task::enter_user_mode();
         }
         BasicTaskRequest::FetchDeepClone => {
-            let cptr = CapPtr(invocation.args[1] as u64);
+            let cptr = CapPtr(invocation.arg(1)? as u64);
             let delegation: KernelObjectRef<Task> = unsafe {
                 let current_root = current.page_table_root.get();
                 retype_user_with(
                     &current_root,
                     current_root.clone(),
-                    VirtAddr::try_new(invocation.args[2] as u64)
+                    VirtAddr::try_new(invocation.arg(2)? as u64)
                         .map_err(|_| KernelError::InvalidAddress)?,
                     Some(|new_task: &mut Task| {
                         core::ptr::write(new_task, task.deep_clone());
@@ -311,7 +364,7 @@ fn invoke_cap_basic_task(
         BasicTaskRequest::MakeFirstLevelEndpoint => {
             let caps = task.capabilities.get();
             let mut caps = caps.capabilities.lock();
-            let target_first_level_index = invocation.args[1] as usize;
+            let target_first_level_index = invocation.arg(1)? as usize;
             if target_first_level_index >= caps.len() {
                 return Err(KernelError::InvalidArgument);
             }
@@ -321,7 +374,7 @@ fn invoke_cap_basic_task(
             let delegation: KernelObjectRef<LockedCapabilityObject> = retype_user(
                 &current_root,
                 current_root.clone(),
-                VirtAddr::try_new(invocation.args[2] as u64)
+                VirtAddr::try_new(invocation.arg(2)? as u64)
                     .map_err(|_| KernelError::InvalidAddress)?,
             )?;
             *delegation.lock() = CapabilityObject::new_empty_endpoints();
@@ -329,7 +382,7 @@ fn invoke_cap_basic_task(
             Ok(0)
         }
         BasicTaskRequest::FetchRootPageTable => {
-            let cptr = CapPtr(invocation.args[1] as u64);
+            let cptr = CapPtr(invocation.arg(1)? as u64);
             current
                 .capabilities
                 .get()
@@ -340,8 +393,8 @@ fn invoke_cap_basic_task(
             Ok(0)
         }
         BasicTaskRequest::GetRegister => {
-            let field_index = invocation.args[1] as usize;
-            let return_uvaddr = VirtAddr::try_new(invocation.args[2] as u64)
+            let field_index = invocation.arg(1)? as usize;
+            let return_uvaddr = VirtAddr::try_new(invocation.arg(2)? as u64)
                 .map_err(|_| KernelError::InvalidAddress)?;
 
             // Here we may read a "partial" value, but anyway it's memory safe,
@@ -362,14 +415,14 @@ fn invoke_cap_basic_task(
             Ok(0)
         }
         BasicTaskRequest::SetRegister => {
-            let field_index = invocation.args[1] as usize;
-            let new_value = invocation.args[2] as u64;
+            let field_index = invocation.arg(1)? as usize;
+            let new_value = invocation.arg(2)? as u64;
             *task.registers.lock().field_mut(field_index)? = new_value;
             Ok(0)
         }
         BasicTaskRequest::FetchNewUserPageSet => {
-            let cptr = CapPtr(invocation.args[1] as u64);
-            let buf_object = VirtAddr::try_new(invocation.args[2] as u64)
+            let cptr = CapPtr(invocation.arg(1)? as u64);
+            let buf_object = VirtAddr::try_new(invocation.arg(2)? as u64)
                 .map_err(|_| KernelError::InvalidAddress)?;
             let current_root = current.page_table_root.get();
             let delegation: KernelObjectRef<UserPageSet> = unsafe {
@@ -391,13 +444,21 @@ fn invoke_cap_basic_task(
             Ok(0)
         }
         BasicTaskRequest::FetchIpcEndpoint => {
-            let cptr = CapPtr(invocation.args[1] as u64);
+            let cptr = CapPtr(invocation.arg(1)? as u64);
+            let entry_pc = invocation.arg(2)? as u64;
+            let entry_sp = invocation.arg(3)? as u64;
             current
                 .capabilities
                 .get()
                 .entry_endpoint(cptr, |endpoint| {
                     endpoint.object = CapabilityEndpointObject::IpcEndpoint(CapIpcEndpoint {
-                        task: task.clone(),
+                        task: Some(task.clone()),
+                        entry: IpcEntry {
+                            pc: entry_pc,
+                            sp: entry_sp,
+                            user_context: AtomicU64::new(0),
+                        },
+                        reply: false,
                     });
                 })?;
             Ok(0)
@@ -407,8 +468,8 @@ fn invoke_cap_basic_task(
             Ok(0)
         }
         BasicTaskRequest::FetchIpcCap => {
-            let cptr = CapPtr(invocation.args[1] as u64);
-            let index = invocation.args[2] as usize;
+            let cptr = CapPtr(invocation.arg(1)? as u64);
+            let index = invocation.arg(2)? as usize;
 
             let mut caps = task.ipc_caps.lock();
             if index >= caps.len() {
@@ -435,7 +496,7 @@ fn invoke_cap_basic_task(
             let delegation: KernelObjectRef<CapabilitySet> = retype_user(
                 &current_root,
                 current_root.clone(),
-                VirtAddr::try_new(invocation.args[1] as u64)
+                VirtAddr::try_new(invocation.arg(1)? as u64)
                     .map_err(|_| KernelError::InvalidAddress)?,
             )?;
             task.capabilities.swap(delegation);
@@ -461,11 +522,11 @@ fn invoke_cap_root_task(invocation: &CapabilityInvocation) -> KernelResult<i64> 
 
     let current = Task::current();
 
-    let requested_cap = RootTaskCapRequest::try_from(invocation.args[0] as u32)?;
+    let requested_cap = RootTaskCapRequest::try_from(invocation.arg(0)? as u32)?;
     match requested_cap {
         RootTaskCapRequest::X86IoPort => {
-            let cptr = CapPtr(invocation.args[1] as u64);
-            let port = invocation.args[2] as u16;
+            let cptr = CapPtr(invocation.arg(1)? as u64);
+            let port = invocation.arg(2)? as u16;
             current
                 .capabilities
                 .get()
@@ -475,8 +536,8 @@ fn invoke_cap_root_task(invocation: &CapabilityInvocation) -> KernelResult<i64> 
             Ok(0)
         }
         RootTaskCapRequest::Mmio => {
-            let cptr = CapPtr(invocation.args[1] as u64);
-            let phys_addr = PhysAddr::new(invocation.args[2] as u64);
+            let cptr = CapPtr(invocation.arg(1)? as u64);
+            let phys_addr = PhysAddr::new(invocation.arg(2)? as u64);
 
             if !phys_addr.is_aligned(PAGE_SIZE) {
                 return Err(KernelError::NotAligned);
@@ -499,20 +560,20 @@ fn invoke_cap_root_task(invocation: &CapabilityInvocation) -> KernelResult<i64> 
 fn invoke_cap_x86_io_port(invocation: &CapabilityInvocation, port: u16) -> KernelResult<i64> {
     use x86::io;
     unsafe {
-        if invocation.args[0] == 0 {
+        if invocation.arg(0)? == 0 {
             // read
-            Ok(match invocation.args[1] {
+            Ok(match invocation.arg(1)? {
                 1 => io::inb(port) as i64,
                 2 => io::inw(port) as i64,
                 4 => io::inl(port) as i64,
                 _ => return Err(KernelError::InvalidArgument),
             })
-        } else if invocation.args[0] == 1 {
+        } else if invocation.arg(0)? == 1 {
             // write
-            match invocation.args[1] {
-                1 => io::outb(port, invocation.args[2] as u8),
-                2 => io::outw(port, invocation.args[2] as u16),
-                4 => io::outl(port, invocation.args[2] as u32),
+            match invocation.arg(1)? {
+                1 => io::outb(port, invocation.arg(2)? as u8),
+                2 => io::outw(port, invocation.arg(2)? as u16),
+                4 => io::outl(port, invocation.arg(2)? as u32),
                 _ => return Err(KernelError::InvalidArgument),
             }
             Ok(0)
@@ -524,20 +585,20 @@ fn invoke_cap_x86_io_port(invocation: &CapabilityInvocation, port: u16) -> Kerne
 
 fn invoke_cap_root_page_table(
     invocation: &CapabilityInvocation,
-    pt: &KernelObjectRef<PageTableObject>,
+    pt: KernelObjectRef<PageTableObject>,
 ) -> KernelResult<i64> {
     let target_vaddr =
-        VirtAddr::try_new(invocation.args[0] as u64).map_err(|_| KernelError::InvalidAddress)?;
+        VirtAddr::try_new(invocation.arg(0)? as u64).map_err(|_| KernelError::InvalidAddress)?;
     let user_page =
-        VirtAddr::try_new(invocation.args[1] as u64).map_err(|_| KernelError::InvalidAddress)?;
+        VirtAddr::try_new(invocation.arg(1)? as u64).map_err(|_| KernelError::InvalidAddress)?;
 
     pt.with(|pt| crate::task::retype_page_table_from_user(pt, target_vaddr, user_page))
         .map(|x| x as i64)
 }
 
-fn invoke_cap_mmio(invocation: &CapabilityInvocation, mmio: &CapMmio) -> KernelResult<i64> {
+fn invoke_cap_mmio(invocation: &CapabilityInvocation, mmio: CapMmio) -> KernelResult<i64> {
     let target_vaddr =
-        VirtAddr::try_new(invocation.args[0] as u64).map_err(|_| KernelError::InvalidAddress)?;
+        VirtAddr::try_new(invocation.arg(0)? as u64).map_err(|_| KernelError::InvalidAddress)?;
 
     mmio.page_table.with(|pt| unsafe {
         crate::task::map_physical_page_into_user(
@@ -557,7 +618,7 @@ fn invoke_cap_mmio(invocation: &CapabilityInvocation, mmio: &CapMmio) -> KernelR
 
 fn invoke_cap_user_page_set(
     invocation: &CapabilityInvocation,
-    _buffer: &KernelObjectRef<UserPageSet>,
+    _buffer: KernelObjectRef<UserPageSet>,
 ) -> KernelResult<i64> {
     #[repr(u32)]
     #[derive(Debug, Copy, Clone, TryFromPrimitive)]
@@ -566,7 +627,7 @@ fn invoke_cap_user_page_set(
     }
 
     //let current = Task::current();
-    let req = UserPageSetCapRequest::try_from(invocation.args[0] as u32)?;
+    let req = UserPageSetCapRequest::try_from(invocation.arg(0)? as u32)?;
 
     match req {
         UserPageSetCapRequest::Map => Err(KernelError::NotImplemented),
@@ -581,13 +642,38 @@ enum IpcRequest {
     SwitchToNonblocking = 1,
     SwitchToBlocking_UnblockLocalIpc = 2,
     SwitchToNonblocking_UnblockLocalIpc = 3,
+    SetUserContext = 4,
 }
 
 fn invoke_cap_ipc_endpoint(
-    invocation: &CapabilityInvocation,
-    endpoint: &CapIpcEndpoint,
+    invocation: &mut CapabilityInvocation,
+    endpoint: CapIpcEndpoint,
 ) -> KernelResult<i64> {
-    let req = IpcRequest::try_from(invocation.args[0] as u32)?;
+    let current = Task::current();
+    let endpoint = if endpoint.reply {
+        // The `endpoint` we received as an argument is cloned.
+        // The `Clone` implementation should not produce a valid clone of reply endpoints.
+        assert!(endpoint.task.is_none());
+        drop(endpoint);
+        match current
+            .capabilities
+            .get()
+            .lookup_take(invocation.cptr())?
+            .object
+        {
+            CapabilityEndpointObject::IpcEndpoint(x) => x,
+            _ => return Err(KernelError::InvalidState),
+        }
+    } else {
+        endpoint
+    };
+
+    let req = IpcRequest::try_from(invocation.arg(0)? as u32)?;
+    let task: &KernelObjectRef<Task> = match endpoint.task {
+        Some(ref t) => t,
+        None => return Err(KernelError::InvalidArgument),
+    };
+
     match req {
         IpcRequest::SwitchToBlocking
         | IpcRequest::SwitchToNonblocking
@@ -600,41 +686,49 @@ fn invoke_cap_ipc_endpoint(
                 }
                 _ => {}
             }
-            if endpoint
-                .task
-                .ipc_blocked
-                .compare_and_swap(false, true, Ordering::SeqCst)
-                != false
-            {
+            if task.block_ipc().is_err() {
                 match req {
                     IpcRequest::SwitchToBlocking | IpcRequest::SwitchToBlocking_UnblockLocalIpc => {
-                        endpoint.task.raise_fault(TaskFaultState::IpcBlocked);
+                        task.raise_fault(TaskFaultState::IpcBlocked);
                     }
                     IpcRequest::SwitchToNonblocking
                     | IpcRequest::SwitchToNonblocking_UnblockLocalIpc => {
                         return Err(KernelError::WouldBlock);
                     }
+                    _ => unreachable!(),
                 }
             } else {
                 // From here on we should not return or fault.
                 {
-                    let current = Task::current();
-                    let mut ipc_caps = endpoint.task.ipc_caps.lock();
+                    let mut ipc_caps = task.ipc_caps.lock();
 
-                    ipc_caps[0] = CapabilityEndpoint {
-                        object: CapabilityEndpointObject::IpcEndpoint(CapIpcEndpoint {
-                            task: current.clone(),
-                        }),
-                    };
+                    if !endpoint.reply {
+                        ipc_caps[0] = CapabilityEndpoint {
+                            object: CapabilityEndpointObject::IpcEndpoint(CapIpcEndpoint {
+                                task: Some(current.clone()),
+                                entry: IpcEntry {
+                                    pc: *invocation.registers.pc_mut(),
+                                    sp: *invocation.registers.sp_mut(),
+                                    user_context: AtomicU64::new(core::u64::MAX),
+                                },
+                                reply: true,
+                            }),
+                        };
+                    }
+
                     for i in 1.. {
-                        if i >= invocation.args.len() || i >= ipc_caps.len() {
+                        if i >= ipc_caps.len() {
                             break;
                         }
-                        if invocation.args[i] as u64 != INVALID_CAP {
+                        let arg = match invocation.arg(i) {
+                            Ok(x) => x,
+                            Err(_) => break,
+                        };
+                        if arg != INVALID_CAP {
                             match current
                                 .capabilities
                                 .get()
-                                .entry_endpoint(CapPtr(invocation.args[i] as u64), |x| x.clone())
+                                .entry_endpoint(CapPtr(arg), |x| x.clone())
                             {
                                 Ok(x) => {
                                     ipc_caps[i] = x;
@@ -646,16 +740,23 @@ fn invoke_cap_ipc_endpoint(
                         }
                     }
 
-                    if let Some(registers) = invocation.registers {
-                        let mut registers = registers.clone();
-                        registers.rax = 0;
-                        *current.registers.lock() = registers;
-                    }
+                    *invocation.registers.return_value_mut() = 0;
+                    *current.registers.lock() = invocation.registers.clone();
                 }
 
-                crate::task::switch_to(endpoint.task.clone());
-                crate::task::enter_user_mode();
+                let task = task.clone();
+                let entry = endpoint.entry.clone();
+
+                drop(current);
+                drop(endpoint);
+
+                Task::invoke_ipc(task, entry);
             }
+        }
+        IpcRequest::SetUserContext => {
+            let new_context_value = invocation.arg(1)? as u64;
+            endpoint.entry.set_user_context(new_context_value)?;
+            Ok(0)
         }
     }
 }
