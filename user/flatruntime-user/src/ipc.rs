@@ -77,7 +77,7 @@ impl IpcEndpoint {
 
         match unsafe {
             self.cap.call(
-                IpcRequest::SwitchToBlocking as u32 as i64,
+                IpcRequest::SwitchToBlocking_UnblockLocalIpc as u32 as i64,
                 INVALID_CAP as _,
                 INVALID_CAP as _,
                 INVALID_CAP as _,
@@ -85,7 +85,6 @@ impl IpcEndpoint {
         } {
             x if x < 0 => Err(KernelError::try_from(x as i32).unwrap()),
             _ => {
-                THIS_TASK.unblock_ipc().unwrap();
                 unsafe {
                     _fastipc_read(payload);
                 }
@@ -95,25 +94,26 @@ impl IpcEndpoint {
     }
 }
 
-pub fn wait_ipc() {
-    loop {
-        let peer_endpoint = THIS_TASK.fetch_ipc_cap(0).unwrap();
-        unsafe {
-            let mut payload = FastIpcPayload::default();
-            _fastipc_read(&mut payload);
-            payload.0[0] = payload.0[0] + payload.0[1];
-            _fastipc_write(&mut payload);
-        }
-        match unsafe {
-            peer_endpoint.call(
-                IpcRequest::SwitchToBlocking_UnblockLocalIpc as u32 as i64,
-                INVALID_CAP as _,
-                INVALID_CAP as _,
-                INVALID_CAP as _,
-            )
-        } {
-            x if x < 0 => panic!("unable to switch to peer endpoint: {}", x),
-            _ => {}
+pub fn handle_ipc() -> ! {
+    let peer_endpoint = THIS_TASK.fetch_ipc_cap(0).unwrap();
+    unsafe {
+        let mut payload = FastIpcPayload::default();
+        _fastipc_read(&mut payload);
+        payload.0[0] = payload.0[0] + payload.0[1];
+        _fastipc_write(&mut payload);
+    }
+
+    match unsafe {
+        peer_endpoint.drop_and_call(
+            IpcRequest::SwitchToBlocking_UnblockLocalIpc as u32 as i64,
+            INVALID_CAP as _,
+            INVALID_CAP as _,
+            INVALID_CAP as _,
+        )
+    } {
+        x if x < 0 => panic!("handle_ipc: {:?}", KernelError::try_from(x as i32).unwrap()),
+        _ => {
+            unreachable!();
         }
     }
 }

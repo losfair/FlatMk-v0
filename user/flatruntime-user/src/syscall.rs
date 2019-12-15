@@ -1,5 +1,6 @@
 use alloc::boxed::Box;
 use core::intrinsics::abort;
+use core::mem::MaybeUninit;
 
 mod syscall_impl {
     #[naked]
@@ -37,6 +38,11 @@ impl Delegation {
     pub const fn new() -> Delegation {
         Delegation([0; 4096])
     }
+
+    pub unsafe fn new_uninitialized() -> Delegation {
+        let ret = MaybeUninit::uninit();
+        ret.assume_init()
+    }
 }
 
 pub struct CPtr(u64);
@@ -52,6 +58,15 @@ impl CPtr {
 
     pub unsafe fn call(&self, p0: i64, p1: i64, p2: i64, p3: i64) -> i64 {
         _do_syscall(self.0 as _, p0, p1, p2, p3, 0)
+    }
+
+    #[inline]
+    pub unsafe fn drop_and_call(mut self, p0: i64, p1: i64, p2: i64, p3: i64) -> i64 {
+        // FIXME: Race condition between drop and call.
+        let raw = self.0;
+        crate::task::release_cptr_no_dropcap(&mut self);
+        core::mem::forget(self);
+        _do_syscall(raw as _, p0, p1, p2, p3, 0)
     }
 
     pub fn index(&self) -> u64 {

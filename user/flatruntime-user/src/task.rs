@@ -19,12 +19,6 @@ pub struct Task {
     backing: Option<Box<Delegation>>,
 }
 
-impl Drop for Task {
-    fn drop(&mut self) {
-        core::mem::forget(self.backing.take()); // TODO: fix this
-    }
-}
-
 #[repr(u32)]
 #[derive(Debug, Copy, Clone)]
 enum BasicTaskRequest {
@@ -134,7 +128,7 @@ impl Task {
     }
 
     pub fn deep_clone(&self) -> KernelResult<Task> {
-        let mut backing = Box::new(Delegation::new());
+        let mut backing = Box::new(unsafe { Delegation::new_uninitialized() });
         let backing_ptr: *mut Delegation = &mut *backing;
 
         let (cptr, _) = allocate_cptr(|cptr| {
@@ -173,14 +167,14 @@ impl Task {
         Ok(cptr)
     }
 
-    pub fn fetch_ipc_endpoint(&self) -> KernelResult<CPtr> {
+    pub fn fetch_ipc_endpoint(&self, pc: u64, sp: u64) -> KernelResult<CPtr> {
         let (cptr, _) = allocate_cptr(|cptr| {
             match unsafe {
                 self.cap.call(
                     BasicTaskRequest::FetchIpcEndpoint as u32 as i64,
                     cptr.index() as _,
-                    0,
-                    0,
+                    pc as _,
+                    sp as _,
                 )
             } {
                 x if x < 0 => Err(KernelError::try_from(x as i32).unwrap()),
@@ -299,6 +293,7 @@ impl Task {
     }
 }
 
+#[inline]
 pub fn allocate_cptr<T, F: FnOnce(&CPtr) -> KernelResult<T>>(
     initializer: F,
 ) -> KernelResult<(CPtr, T)> {
@@ -345,6 +340,7 @@ pub fn allocate_cptr<T, F: FnOnce(&CPtr) -> KernelResult<T>>(
 }
 
 /// Called by the Drop implementation for CPtr.
+#[inline]
 pub(crate) unsafe fn release_cptr(cptr: &mut CPtr) {
     let mut state = CAP_ALLOC_STATE.lock();
     if THIS_TASK.cap.call(
@@ -359,6 +355,13 @@ pub(crate) unsafe fn release_cptr(cptr: &mut CPtr) {
     push_release_pool(&mut state, cptr);
 }
 
+#[inline]
+pub(crate) unsafe fn release_cptr_no_dropcap(cptr: &mut CPtr) {
+    let mut state = CAP_ALLOC_STATE.lock();
+    push_release_pool(&mut state, cptr);
+}
+
+#[inline]
 fn push_release_pool(state: &mut CapAllocState, cptr: &CPtr) {
     state
         .release_pool

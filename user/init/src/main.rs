@@ -59,10 +59,9 @@ pub unsafe extern "C" fn user_start() -> ! {
     resource_init();
     println!("init: FlatMK init task started.");
 
-    let perf = benchmark(1000000, || {
+    benchmark(1000000, "simple capability invocation", || {
         flatruntime_user::task::THIS_TASK.call_invalid();
     });
-    println!("init: {} cycles per simple capability invocation.", perf);
 
     let cloned = flatruntime_user::task::THIS_TASK.deep_clone().unwrap();
     println!("init: Cloned task.");
@@ -74,52 +73,63 @@ pub unsafe extern "C" fn user_start() -> ! {
             .unwrap();
         cloned.put_cap(cloned.get_cptr(), 0).unwrap();
     }
-    println!("init: Resetted capabilities on clone.");
+    println!("init: Initialized capabilities on clone.");
+    cloned.unblock_ipc().unwrap();
 
     cloned
-        .set_register(7, unsafe {
-            let stack_begin = STACK_AFTER_SWITCH.0.as_mut_ptr();
-            stack_begin.offset(STACK_AFTER_SWITCH.0.len() as isize) as u64
-        })
-        .unwrap();
-    cloned
-        .set_register(16, after_switch as usize as u64)
+        .set_register(16, 0)
         .unwrap();
 
-    let perf = benchmark(1000000, || {
+    benchmark(1000000, "complex capability invocation", || {
         assert_eq!(
             cloned.get_register(16).unwrap(),
-            after_switch as usize as u64
+            0
         );
     });
-    println!("init: {} cycles per complex capability invocation.", perf);
 
-    let cloned_endpoint = unsafe { IpcEndpoint::new(cloned.fetch_ipc_endpoint().unwrap()) };
+    let cloned_endpoint = unsafe { IpcEndpoint::new(cloned.fetch_ipc_endpoint(
+        after_switch as _,
+        unsafe {
+            let stack_begin = STACK_AFTER_SWITCH.0.as_mut_ptr();
+            stack_begin.offset(STACK_AFTER_SWITCH.0.len() as isize) as u64
+        }
+    ).unwrap()) };
+
     let mut payload = FastIpcPayload::default();
 
-    let perf = benchmark(1000000, || {
+    benchmark(1000000, "IPC call", || {
         payload.0[0] = 1;
         payload.0[1] = 2;
         cloned_endpoint.call(&mut payload).unwrap();
         assert_eq!(payload.0[0], 3);
     });
-    println!("init: {} cycles per IPC call.", perf);
+
+    cloned.reset_caps(Box::new(Delegation::new())).unwrap();
+
+    drop(cloned_endpoint);
+    drop(cloned);
+
+    println!("init: Dropped clone.");
+
+    benchmark(1000000, "task deep clone", || {
+        flatruntime_user::task::THIS_TASK.deep_clone().unwrap();
+    });
 
     loop {}
 }
 
-fn benchmark<F: FnMut()>(n: usize, mut f: F) -> usize {
+fn benchmark<F: FnMut()>(n: usize, msg: &str, mut f: F) {
     let begin = unsafe { _rdtsc() } as usize;
     for _ in 0..n {
         f();
     }
     let end = unsafe { _rdtsc() } as usize;
-    return (end - begin) / n;
+    let result = (end - begin) / n;
+    println!("init: benchmark: {} cycles per {}.", result, msg);
 }
 
-extern "C" fn after_switch() {
-    flatruntime_user::ipc::wait_ipc();
-    loop {}
+extern "C" fn after_switch() -> ! {
+    flatruntime_user::ipc::handle_ipc();
 }
 
 #[panic_handler]
