@@ -1,5 +1,5 @@
 #![no_std]
-#![feature(asm, naked_functions, lang_items, core_intrinsics, alloc_error_handler)]
+#![feature(asm, naked_functions, lang_items, core_intrinsics, alloc_error_handler, new_uninit)]
 
 extern crate alloc;
 

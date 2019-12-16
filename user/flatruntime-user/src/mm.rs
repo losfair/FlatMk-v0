@@ -14,7 +14,7 @@ impl RootPageTable {
 
     pub unsafe fn map_page(&self, vaddr: u64) -> Result<(), i64> {
         loop {
-            let mut del = Box::new(Delegation::new());
+            let mut del = Delegation::new_uninitialized_boxed();
             let ret = self
                 .cap
                 .call(vaddr as i64, &mut *del as *mut Delegation as i64, 0, 0);

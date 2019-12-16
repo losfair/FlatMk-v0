@@ -39,9 +39,8 @@ impl Delegation {
         Delegation([0; 4096])
     }
 
-    pub unsafe fn new_uninitialized() -> Delegation {
-        let ret = MaybeUninit::uninit();
-        ret.assume_init()
+    pub unsafe fn new_uninitialized_boxed() -> Box<Delegation> {
+        Box::new_uninit().assume_init()
     }
 }
 

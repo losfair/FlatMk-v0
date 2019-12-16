@@ -128,7 +128,7 @@ impl Task {
     }
 
     pub fn deep_clone(&self) -> KernelResult<Task> {
-        let mut backing = Box::new(unsafe { Delegation::new_uninitialized() });
+        let mut backing = unsafe { Delegation::new_uninitialized_boxed() };
         let backing_ptr: *mut Delegation = &mut *backing;
 
         let (cptr, _) = allocate_cptr(|cptr| {
@@ -307,7 +307,7 @@ pub fn allocate_cptr<T, F: FnOnce(&CPtr) -> KernelResult<T>>(
         }
 
         if state.current_level1 == MAX_LEVEL1 {
-            let delegation = Box::into_raw(Box::new(Delegation::new()));
+            let delegation = Box::into_raw(unsafe { Delegation::new_uninitialized_boxed() });
             let ret = unsafe {
                 THIS_TASK.cap.call(
                     BasicTaskRequest::MakeFirstLevelEndpoint as u32 as i64,

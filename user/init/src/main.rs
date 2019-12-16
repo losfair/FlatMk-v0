@@ -66,10 +66,12 @@ pub unsafe extern "C" fn user_start() -> ! {
     let cloned = flatruntime_user::task::THIS_TASK.deep_clone().unwrap();
     println!("init: Cloned task.");
 
-    cloned.reset_caps(Box::new(Delegation::new())).unwrap();
+    cloned.reset_caps(unsafe {
+        Delegation::new_uninitialized_boxed()
+    }).unwrap();
     unsafe {
         cloned
-            .make_first_level_endpoint(0, Box::new(Delegation::new()))
+            .make_first_level_endpoint(0, Delegation::new_uninitialized_boxed())
             .unwrap();
         cloned.put_cap(cloned.get_cptr(), 0).unwrap();
     }
@@ -104,7 +106,7 @@ pub unsafe extern "C" fn user_start() -> ! {
         assert_eq!(payload.0[0], 3);
     });
 
-    cloned.reset_caps(Box::new(Delegation::new())).unwrap();
+    cloned.reset_caps(Delegation::new_uninitialized_boxed()).unwrap();
 
     drop(cloned_endpoint);
     drop(cloned);
