@@ -7,9 +7,17 @@ use x86_64::VirtAddr;
 const PAGE_SIZE: u64 = 4096;
 
 pub unsafe trait LikeKernelObject {
+    /// Increments refcount by one.
     fn inc_ref(&self);
+
+    /// Decrements refcount by one.
     unsafe fn dec_ref(&self);
+
+    /// Releases a page taken from userspace, recursively.
     unsafe fn return_user_page(&self, addr: VirtAddr);
+
+    /// Returns number of references to this kernel object.
+    fn count_ref(&self) -> usize;
 }
 
 pub struct RootKernelObject;
@@ -17,6 +25,9 @@ unsafe impl LikeKernelObject for RootKernelObject {
     fn inc_ref(&self) {}
     unsafe fn dec_ref(&self) {}
     unsafe fn return_user_page(&self, _addr: VirtAddr) {}
+    fn count_ref(&self) -> usize {
+        1
+    }
 }
 
 pub trait Retype: Sized {
@@ -50,12 +61,14 @@ impl Drop for LikeKernelObjectRef {
 }
 
 impl LikeKernelObjectRef {
+    #[inline]
     pub fn get(&self) -> &dyn LikeKernelObject {
         self.inner
     }
 }
 
 impl<T: Retype + Notify + Send + Sync + 'static> From<KernelObjectRef<T>> for LikeKernelObjectRef {
+    #[inline]
     fn from(other: KernelObjectRef<T>) -> LikeKernelObjectRef {
         let result = LikeKernelObjectRef { inner: other.inner };
         core::mem::forget(other);
@@ -283,5 +296,9 @@ unsafe impl<T: Retype + Notify + Send + Sync + 'static> LikeKernelObject for Ker
 
     unsafe fn return_user_page(&self, addr: VirtAddr) {
         self.value().return_user_page(addr);
+    }
+
+    fn count_ref(&self) -> usize {
+        self.refcount.load(Ordering::SeqCst) as usize
     }
 }

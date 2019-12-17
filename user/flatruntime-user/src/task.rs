@@ -5,18 +5,43 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use core::convert::TryFrom;
 use spin::Mutex;
+use core::mem::ManuallyDrop;
 
 lazy_static! {
     pub static ref THIS_TASK: Task = Task {
-        cap: unsafe { CPtr::new_twolevel(0, 0) },
+        cap: ManuallyDrop::new(unsafe { CPtr::new_twolevel(0, 0) }),
         backing: None,
     };
     static ref CAP_ALLOC_STATE: Mutex<CapAllocState> = Mutex::new(CapAllocState::new());
 }
 
 pub struct Task {
-    cap: CPtr,
+    cap: ManuallyDrop<CPtr>,
     backing: Option<Box<Delegation>>,
+}
+
+impl Drop for Task {
+    fn drop(&mut self) {
+        let is_unique = match unsafe {
+            self.cap.call(
+                BasicTaskRequest::IsUnique as u32 as i64,
+                0,
+                0,
+                0,
+            )
+        } {
+            x if x < 0 => panic!("Error calling IsUnique on task: {:?}", KernelError::try_from(x as i32).unwrap()),
+            0 => false,
+            1 => true,
+            _ => panic!("Unexpected result from IsUnique"),
+        };
+        unsafe {
+            ManuallyDrop::drop(&mut self.cap);
+        }
+        if !is_unique {
+            core::mem::forget(self.backing.take());
+        }
+    }
 }
 
 #[repr(u32)]
@@ -38,6 +63,7 @@ enum BasicTaskRequest {
     FetchIpcCap = 13,
     ResetCaps = 14,
     IpcIsBlocked = 15,
+    IsUnique = 16,
 }
 
 struct CapAllocState {
@@ -145,7 +171,7 @@ impl Task {
             }
         })?;
         Ok(Task {
-            cap: cptr,
+            cap: ManuallyDrop::new(cptr),
             backing: Some(backing),
         })
     }

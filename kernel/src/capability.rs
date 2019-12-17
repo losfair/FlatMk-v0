@@ -280,6 +280,7 @@ enum BasicTaskRequest {
     FetchIpcCap = 13,
     ResetCaps = 14,
     IpcIsBlocked = 15,
+    IsUnique = 16,
 }
 
 fn invoke_cap_basic_task(
@@ -504,6 +505,16 @@ fn invoke_cap_basic_task(
         }
         BasicTaskRequest::IpcIsBlocked => {
             if task.ipc_blocked.load(Ordering::SeqCst) {
+                Ok(1)
+            } else {
+                Ok(0)
+            }
+        }
+        BasicTaskRequest::IsUnique => {
+            let task = LikeKernelObjectRef::from(task);
+
+            // Capabilities are cloned for invocation.
+            if task.get().count_ref() == 2 {
                 Ok(1)
             } else {
                 Ok(0)
