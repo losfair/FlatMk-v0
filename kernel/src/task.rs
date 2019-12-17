@@ -107,14 +107,12 @@ pub struct UserPageSet {
 
 impl Retype for UserPageSet {}
 impl Notify for UserPageSet {
-    fn will_drop(&mut self, _owner: &dyn LikeKernelObject) {
+    unsafe fn will_drop(&mut self, _owner: &dyn LikeKernelObject) {
         for i in 0..self.n_backings {
-            unsafe {
-                // Already checked in retype().
-                // `owner` can be different from `owning_rpt`.
-                self.owning_rpt
-                    .return_user_page(VirtAddr::new_unchecked(self.backing_user[i as usize]));
-            }
+            // Already checked in retype().
+            // `owner` can be different from `owning_rpt`.
+            self.owning_rpt
+                .return_user_page(VirtAddr::new_unchecked(self.backing_user[i as usize]));
         }
     }
 }

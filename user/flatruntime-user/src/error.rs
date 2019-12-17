@@ -18,7 +18,7 @@ pub enum KernelError {
     /// Invalid memory address.
     InvalidAddress = -7,
     /// The provided capability slot is empty.
-    EmptyCapability = -8,
+    EmptyObject = -8,
     /// An address provided is not aligned to page boundary.
     NotAligned = -9,
 }

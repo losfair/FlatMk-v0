@@ -7,12 +7,18 @@
     abi_x86_interrupt,
     core_intrinsics,
     const_fn,
-    maybe_uninit_extra
+    maybe_uninit_extra,
+    const_generics,
+    untagged_unions,
+    const_if_match,
+    const_panic,
+    try_trait
 )]
 
 #[macro_use]
 extern crate lazy_static;
 
+mod arch;
 mod boot;
 mod capability;
 mod debug;
@@ -20,6 +26,7 @@ mod elf;
 mod error;
 mod exception;
 mod kobj;
+mod multilevel;
 mod paging;
 mod serial;
 mod syscall;

@@ -38,7 +38,7 @@ pub trait Retype: Sized {
 
 pub trait Notify {
     unsafe fn return_user_page(&self, _addr: VirtAddr) {}
-    fn will_drop(&mut self, _owner: &dyn LikeKernelObject) {}
+    unsafe fn will_drop(&mut self, _owner: &dyn LikeKernelObject) {}
 }
 
 pub struct LikeKernelObjectRef {

@@ -1,5 +1,6 @@
 use crate::error::*;
 use crate::kobj::*;
+use crate::multilevel::*;
 use crate::paging::{phys_to_virt, virt_to_phys, PageTableObject};
 use crate::task::{
     retype_user, retype_user_with, IpcEntry, Task, TaskFaultState, TaskRegisters, UserPageSet,
@@ -8,6 +9,7 @@ use crate::task::{
 use core::convert::TryFrom;
 use core::mem::MaybeUninit;
 use core::ops::Deref;
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU64, Ordering};
 use num_enum::TryFromPrimitive;
 use spin::Mutex;
@@ -49,6 +51,25 @@ pub struct Capability {
     pub object: Option<KernelObjectRef<LockedCapabilityObject>>,
 }
 
+#[repr(C)]
+pub struct CapabilityTableNode {
+    pub next: Option<NonNull<Level<LockedCapabilityEndpointSet, CapabilityTableNode, 256>>>,
+    pub uaddr: u64,
+}
+
+pub type CapabilitySetObject =
+    MultilevelTableObject<LockedCapabilityEndpointSet, CapabilityTableNode, 8, 4, 31, 256>;
+impl AsLevel<LockedCapabilityEndpointSet, 256> for CapabilityTableNode {
+    fn as_level(
+        &mut self,
+    ) -> Option<NonNull<Level<LockedCapabilityEndpointSet, CapabilityTableNode, 256>>> {
+        self.next
+    }
+    fn user_address(&self) -> Option<u64> {
+        Some(self.uaddr)
+    }
+}
+
 pub struct LockedCapabilityObject(Mutex<CapabilityObject>);
 
 impl LockedCapabilityObject {
@@ -70,6 +91,31 @@ impl Retype for LockedCapabilityObject {
     }
 }
 impl Notify for LockedCapabilityObject {}
+
+pub struct LockedCapabilityEndpointSet {
+    pub endpoints: Mutex<[CapabilityEndpoint; N_ENDPOINT_SLOTS]>,
+}
+
+impl Retype for LockedCapabilityEndpointSet {
+    unsafe fn retype_in_place(&mut self) -> KernelResult<()> {
+        let mut endpoints: MaybeUninit<[CapabilityEndpoint; N_ENDPOINT_SLOTS]> =
+            MaybeUninit::uninit();
+        unsafe {
+            let inner = &mut *endpoints.as_mut_ptr();
+            for elem in inner.iter_mut() {
+                core::ptr::write(elem, CapabilityEndpoint::default());
+            }
+        }
+        core::ptr::write(
+            self,
+            LockedCapabilityEndpointSet {
+                endpoints: Mutex::new(endpoints.assume_init()),
+            },
+        );
+        Ok(())
+    }
+}
+impl Notify for LockedCapabilityEndpointSet {}
 
 pub enum CapabilityObject {
     Empty,
@@ -196,25 +242,25 @@ impl CapabilitySet {
 
         let caps = self.capabilities.lock();
         if index >= caps.len() {
-            Err(KernelError::EmptyCapability)
+            Err(KernelError::EmptyObject)
         } else {
             if let Some(ref obj) = caps[index].object {
                 let mut obj = obj.lock();
                 match *obj {
-                    CapabilityObject::Empty => Err(KernelError::EmptyCapability),
+                    CapabilityObject::Empty => Err(KernelError::EmptyObject),
                     CapabilityObject::Nested(ref inner) => inner.entry_endpoint(cptr, f),
                     CapabilityObject::Endpoint(ref mut inner) => {
                         let index = (cptr.0 >> 56) as usize;
                         cptr.0 <<= 8;
                         if index >= inner.len() {
-                            Err(KernelError::EmptyCapability)
+                            Err(KernelError::EmptyObject)
                         } else {
                             Ok(f(&mut inner[index]))
                         }
                     }
                 }
             } else {
-                Err(KernelError::EmptyCapability)
+                Err(KernelError::EmptyObject)
             }
         }
     }
@@ -236,7 +282,7 @@ impl CapabilityEndpointObject {
     /// invoke() takes self so that it can be dropped properly when this function does not return.
     pub fn invoke(self, invocation: &mut CapabilityInvocation) -> KernelResult<i64> {
         match self {
-            CapabilityEndpointObject::Empty => Err(KernelError::EmptyCapability),
+            CapabilityEndpointObject::Empty => Err(KernelError::EmptyObject),
             CapabilityEndpointObject::BasicTask(task) => invoke_cap_basic_task(invocation, task),
             CapabilityEndpointObject::RootTask => invoke_cap_root_task(invocation),
             CapabilityEndpointObject::X86IoPort(index) => invoke_cap_x86_io_port(invocation, index),
