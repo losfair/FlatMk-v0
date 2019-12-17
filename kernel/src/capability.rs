@@ -335,7 +335,7 @@ fn invoke_cap_basic_task(
             *invocation.registers.return_value_mut() = 0;
             *current.registers.lock() = invocation.registers.clone();
             drop(current);
-            crate::task::switch_to(task.clone());
+            crate::task::switch_to(task)?;
             crate::task::enter_user_mode();
         }
         BasicTaskRequest::FetchDeepClone => {
@@ -750,7 +750,9 @@ fn invoke_cap_ipc_endpoint(
                 drop(current);
                 drop(endpoint);
 
-                Task::invoke_ipc(task, entry);
+                let (e, task) = Task::invoke_ipc(task, entry);
+                drop(task.unblock_ipc());
+                return Err(e);
             }
         }
         IpcRequest::SetUserContext => {

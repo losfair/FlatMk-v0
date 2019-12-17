@@ -149,7 +149,7 @@ unsafe impl Sync for UserPageSet {}
 
 #[repr(C)]
 pub struct Task {
-    /// Thread-unsafe local state.
+    /// Thread-unsafe local state. Used in assembly and must be the first field.
     pub local_state: LocalStateWrapper,
 
     /// Page table of this task.
@@ -161,9 +161,6 @@ pub struct Task {
     /// IPC capabilities.
     pub ipc_caps: Mutex<[CapabilityEndpoint; 4]>,
 
-    /// Indicates whether or not IPC is being blocked.
-    pub ipc_blocked: AtomicBool,
-
     /// Pending fault.
     pub pending_fault: Mutex<TaskFaultState>,
 
@@ -172,6 +169,12 @@ pub struct Task {
 
     /// Fault handler table.
     pub fault_handlers: Mutex<FaultHandlerTable>,
+
+    /// Indicates whether or not IPC is being blocked.
+    pub ipc_blocked: AtomicBool,
+
+    /// Indicates whether this task is currently running (being the current task for any CPU).
+    pub running: AtomicBool,
 }
 
 #[repr(C)]
@@ -266,9 +269,13 @@ fn set_current_task(t: KernelObjectRef<Task>) {
     // Drop the old reference.
     let old = GsBase::read().as_ptr::<KernelObject<Task>>();
     if !old.is_null() {
-        unsafe {
-            KernelObjectRef::from_raw(old);
-        }
+        let old_obj = unsafe { KernelObjectRef::from_raw(old) };
+        old_obj
+            .running
+            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+            .expect(
+                "set_current_task: Expecting the previous current task to be in 'running' state.",
+            );
     }
 
     // Write the new reference.
@@ -442,10 +449,11 @@ impl Task {
             page_table_root: AtomicKernelObjectRef::new(page_table_root),
             capabilities: AtomicKernelObjectRef::new(cap_root),
             ipc_caps: Mutex::new(empty_ipc_caps()),
-            ipc_blocked: AtomicBool::new(true),
             pending_fault: Mutex::new(TaskFaultState::NoFault),
             registers: Mutex::new(TaskRegisters::new()),
             fault_handlers: Mutex::new(FaultHandlerTable::default()),
+            ipc_blocked: AtomicBool::new(true),
+            running: AtomicBool::new(false),
         }
     }
 
@@ -503,10 +511,11 @@ impl Task {
             page_table_root: AtomicKernelObjectRef::new(self.page_table_root.get()),
             capabilities: AtomicKernelObjectRef::new(self.capabilities.get()),
             ipc_caps: Mutex::new(empty_ipc_caps()),
-            ipc_blocked: AtomicBool::new(true),
             pending_fault: Mutex::new(TaskFaultState::NoFault),
             registers: Mutex::new(TaskRegisters::new()),
             fault_handlers: Mutex::new(self.fault_handlers.lock().clone()),
+            ipc_blocked: AtomicBool::new(true),
+            running: AtomicBool::new(false),
         }
     }
 
@@ -543,7 +552,13 @@ impl Task {
         }
     }
 
-    pub fn invoke_ipc(task: KernelObjectRef<Task>, entry: IpcEntry) -> ! {
+    /// Invokes IPC on this task. The caller should ensure ipc_blocked is true.
+    ///
+    /// This function never returns if succeeded.
+    pub fn invoke_ipc(
+        task: KernelObjectRef<Task>,
+        entry: IpcEntry,
+    ) -> (KernelError, KernelObjectRef<Task>) {
         {
             // TODO: Save old PC/SP and pass user context.
             let mut target_regs = task.registers.lock();
@@ -551,7 +566,14 @@ impl Task {
             *target_regs.sp_mut() = entry.sp;
         }
 
-        crate::task::switch_to(task);
+        match crate::task::switch_to(task.clone()) {
+            Ok(()) => {
+                drop(task);
+            }
+            Err(e) => {
+                return (e, task);
+            }
+        }
         crate::task::enter_user_mode();
     }
 }
@@ -689,9 +711,12 @@ pub fn retype_page_table_from_user(
     Ok(0)
 }
 
-pub fn switch_to(task: KernelObjectRef<Task>) {
+pub fn switch_to(task: KernelObjectRef<Task>) -> KernelResult<()> {
     let pt_root: *const PageTable = task.page_table_root.get().with(|x| x as *mut _ as *const _);
 
+    task.running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .map_err(|_| KernelError::InvalidState)?;
     set_current_task(task);
     unsafe {
         Cr3::write(
@@ -706,6 +731,8 @@ pub fn switch_to(task: KernelObjectRef<Task>) {
             Cr3Flags::empty(),
         )
     };
+
+    Ok(())
 }
 
 /// Switches out of kernel mode and enters user mode.

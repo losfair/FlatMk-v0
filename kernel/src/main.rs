@@ -118,7 +118,7 @@ pub extern "C" fn kstart(boot_info: &'static BootInfo) -> ! {
     }
     ROOT_CAPSET.capabilities.lock()[0].object = Some(ROOT_INITIAL_CAPS.clone());
 
-    task::switch_to(ROOT_TASK.clone());
+    task::switch_to(ROOT_TASK.clone()).unwrap();
     let initial_ip = ROOT_TASK.load_root_image();
     ROOT_TASK.registers.lock().rip = initial_ip;
     with_serial_port(|p| {
