@@ -1,3 +1,5 @@
+//! Paging-related types and methods.
+
 use crate::error::*;
 use crate::kobj::*;
 use bootloader::BootInfo;

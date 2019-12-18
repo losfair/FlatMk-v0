@@ -1,3 +1,5 @@
+//! Reference-counted kernel objects.
+
 use crate::error::*;
 use core::cell::UnsafeCell;
 use core::ops::Deref;
@@ -232,11 +234,6 @@ impl<T: Retype + Notify + Send + Sync + 'static> KernelObject<T> {
                 self.init_with(owner, uaddr, |_| Ok(()))
             }
         }
-    }
-
-    /// Returns the owner of the kernel object.
-    pub fn owner(&self) -> &dyn LikeKernelObject {
-        self.owner
     }
 
     /// Dereferences into the inner value.

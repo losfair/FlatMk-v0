@@ -8,14 +8,12 @@ use crate::task::{
 };
 use core::convert::TryFrom;
 use core::mem::MaybeUninit;
-use core::ops::Deref;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU64, Ordering};
 use num_enum::TryFromPrimitive;
 use spin::Mutex;
 use x86_64::{instructions::tlb, structures::paging::PageTableFlags, PhysAddr, VirtAddr};
 
-pub const N_CAPSET_SLOTS: usize = 128;
 pub const N_ENDPOINT_SLOTS: usize = 32;
 pub const INVALID_CAP: u64 = core::u64::MAX;
 

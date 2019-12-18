@@ -1,3 +1,5 @@
+//! Multilevel table objects.
+
 use crate::arch;
 use crate::error::*;
 use crate::kobj::*;
@@ -152,7 +154,7 @@ impl<
         &self,
         mut cb: F,
     ) -> KernelResult<()> {
-        let mut root = self.root.lock();
+        let root = self.root.lock();
         unsafe { Self::inner_foreach(*root, &mut cb, 0) }
     }
 
@@ -160,7 +162,7 @@ impl<
     ///
     /// O(LEVELS).
     pub fn lookup_entry<F: FnOnce(u8, &mut P) -> R, R>(&self, ptr: u64, cb: F) -> R {
-        let mut root = self.root.lock();
+        let root = self.root.lock();
         let mut current = *root;
 
         for i in 0..LEVELS {
