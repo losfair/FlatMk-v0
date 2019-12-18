@@ -46,6 +46,9 @@ unsafe impl<
 {
 }
 
+/// A level in an multilevel table.
+///
+/// Leaf levels are always of the variant `value`, and other levels are always of the variant `table`.
 pub union Level<T: Send, P: AsLevel<T, TABLE_SIZE> + Send, const TABLE_SIZE: usize> {
     pub table: ManuallyDrop<[P; TABLE_SIZE]>,
     pub value: ManuallyDrop<T>,
@@ -192,6 +195,84 @@ impl<
             } else {
                 None
             }
+        })
+    }
+}
+
+/// Default value for a MTO entry that has its managed memory taken from userspace.
+pub trait DefaultUser<T: Send, P: AsLevel<T, TABLE_SIZE> + Send, const TABLE_SIZE: usize>:
+    Sized
+{
+    unsafe fn default_user(
+        kref: NonNull<Level<T, P, TABLE_SIZE>>,
+        leaf: bool,
+        owner: KernelObjectRef<crate::paging::PageTableObject>,
+        uaddr: VirtAddr,
+    ) -> KernelResult<Self>;
+}
+
+impl<
+        T: Send,
+        P: AsLevel<T, TABLE_SIZE> + Default + Send,
+        const BITS: u8,
+        const LEVELS: u8,
+        const START_BIT: u8,
+        const TABLE_SIZE: usize,
+    > MultilevelTableObject<T, P, BITS, LEVELS, START_BIT, TABLE_SIZE>
+{
+    /// Creates a MTO with root taken from userspace.
+    pub fn new_from_user(
+        owner: &KernelObjectRef<crate::paging::PageTableObject>,
+        uaddr: VirtAddr,
+    ) -> KernelResult<Self> {
+        let page = owner.with(|pt| crate::paging::take_from_user(pt, uaddr))?;
+        let raw = NonNull::new(page.as_mut_ptr::<Level<T, P, TABLE_SIZE>>()).unwrap();
+        unsafe {
+            for entry in (*raw.as_ptr()).table.iter_mut() {
+                core::ptr::write(entry, P::default());
+            }
+            Ok(Self::new(raw, uaddr))
+        }
+    }
+}
+
+impl<
+        T: Send,
+        P: AsLevel<T, TABLE_SIZE> + DefaultUser<T, P, TABLE_SIZE> + Send,
+        const BITS: u8,
+        const LEVELS: u8,
+        const START_BIT: u8,
+        const TABLE_SIZE: usize,
+    > MultilevelTableObject<T, P, BITS, LEVELS, START_BIT, TABLE_SIZE>
+{
+    /// Builds either a leaf or an intermediate level in an MTO, with memory taken from userspace.
+    ///
+    /// `owner` here can be different from owner of the current MTO.
+    pub fn build_from_user(
+        &self,
+        ptr: u64,
+        owner: KernelObjectRef<crate::paging::PageTableObject>,
+        uaddr: VirtAddr,
+    ) -> KernelResult<bool> {
+        self.lookup_entry(ptr, |depth, entry| {
+            let leaf = if depth == LEVELS - 1 { true } else { false };
+            if uaddr.as_u64() == 0 {
+                return Ok(leaf);
+            }
+
+            let page = owner.with(|pt| crate::paging::take_from_user(pt, uaddr))?;
+            let raw = NonNull::new(page.as_mut_ptr::<Level<T, P, TABLE_SIZE>>()).unwrap();
+            let new_entry = match unsafe { P::default_user(raw, leaf, owner.clone(), uaddr) } {
+                Ok(x) => x,
+                Err(e) => {
+                    owner.with(|pt| {
+                        drop(unsafe { crate::paging::put_to_user(pt, uaddr) });
+                    });
+                    return Err(e);
+                }
+            };
+            *entry = new_entry;
+            Ok(leaf)
         })
     }
 }

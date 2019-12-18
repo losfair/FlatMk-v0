@@ -3,10 +3,10 @@ use crate::kobj::*;
 use crate::multilevel::*;
 use crate::paging::{phys_to_virt, virt_to_phys, PageTableObject};
 use crate::task::{
-    retype_user, retype_user_with, IpcEntry, Task, TaskFaultState, TaskRegisters, UserPageSet,
-    PAGE_SIZE,
+    retype_user_with, IpcEntry, Task, TaskFaultState, TaskRegisters, UserPageSet, PAGE_SIZE,
 };
 use core::convert::TryFrom;
+use core::mem::ManuallyDrop;
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -70,6 +70,25 @@ impl AsLevel<LockedCapabilityEndpointSet, 128> for CapabilityTableNode {
         &mut self,
     ) -> Option<NonNull<Level<LockedCapabilityEndpointSet, CapabilityTableNode, 128>>> {
         self.next
+    }
+}
+impl DefaultUser<LockedCapabilityEndpointSet, CapabilityTableNode, 128> for CapabilityTableNode {
+    unsafe fn default_user(
+        mut kref: NonNull<Level<LockedCapabilityEndpointSet, CapabilityTableNode, 128>>,
+        leaf: bool,
+        owner: KernelObjectRef<crate::paging::PageTableObject>,
+        uaddr: VirtAddr,
+    ) -> KernelResult<Self> {
+        if leaf {
+            kref.as_mut().value = ManuallyDrop::new(LockedCapabilityEndpointSet::new());
+        } else {
+            kref.as_mut().table = ManuallyDrop::new(Self::new_table());
+        }
+        Ok(CapabilityTableNode {
+            next: Some(kref),
+            owner: Some(owner),
+            uaddr: uaddr.as_u64(),
+        })
     }
 }
 
@@ -353,7 +372,17 @@ fn invoke_cap_basic_task(
                 })?;
             Ok(0)
         }
-        BasicTaskRequest::MapCapabilityTable => Err(KernelError::NotImplemented),
+        BasicTaskRequest::MapCapabilityTable => {
+            let ptr = invocation.arg(1)? as u64;
+            let uaddr = VirtAddr::try_new(invocation.arg(2)? as u64)
+                .map_err(|_| KernelError::InvalidAddress)?;
+            let leaf = task.capabilities.get().0.build_from_user(
+                ptr,
+                current.page_table_root.get(),
+                uaddr,
+            )?;
+            Ok(if leaf { 1 } else { 0 })
+        }
         BasicTaskRequest::FetchRootPageTable => {
             let cptr = CapPtr(invocation.arg(1)? as u64);
             current
@@ -466,12 +495,27 @@ fn invoke_cap_basic_task(
         }
         BasicTaskRequest::ResetCaps => {
             let current_root = current.page_table_root.get();
-            let delegation: KernelObjectRef<CapabilitySet> = retype_user(
-                &current_root,
-                current_root.clone(),
-                VirtAddr::try_new(invocation.arg(1)? as u64)
-                    .map_err(|_| KernelError::InvalidAddress)?,
-            )?;
+            let obj_delegation = VirtAddr::try_new(invocation.arg(1)? as u64)
+                .map_err(|_| KernelError::InvalidAddress)?;
+            let root_delegation = VirtAddr::try_new(invocation.arg(2)? as u64)
+                .map_err(|_| KernelError::InvalidAddress)?;
+            let delegation: KernelObjectRef<CapabilitySet> = unsafe {
+                retype_user_with(
+                    &current_root,
+                    current_root.clone(),
+                    obj_delegation,
+                    Some(|new_set: &mut CapabilitySet| {
+                        core::ptr::write(
+                            new_set,
+                            CapabilitySet(CapabilityTable::new_from_user(
+                                &current_root,
+                                root_delegation,
+                            )?),
+                        );
+                        Ok(())
+                    }),
+                )?
+            };
             task.capabilities.swap(delegation);
             Ok(0)
         }
