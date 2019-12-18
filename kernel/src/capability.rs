@@ -15,7 +15,7 @@ use num_enum::TryFromPrimitive;
 use spin::Mutex;
 use x86_64::{instructions::tlb, structures::paging::PageTableFlags, PhysAddr, VirtAddr};
 
-pub const N_CAPSET_SLOTS: usize = 256;
+pub const N_CAPSET_SLOTS: usize = 128;
 pub const N_ENDPOINT_SLOTS: usize = 32;
 pub const INVALID_CAP: u64 = core::u64::MAX;
 
@@ -42,62 +42,61 @@ impl CapabilityInvocation {
     }
 }
 
-#[derive(Clone)]
-pub struct Capability {
-    /// The object behind this capability.
-    ///
-    /// Option can be used here because KernelObjectRef is a transparent,
-    /// non-null reference.
-    pub object: Option<KernelObjectRef<LockedCapabilityObject>>,
-}
-
 #[repr(C)]
+#[derive(Clone, Default)]
 pub struct CapabilityTableNode {
-    pub next: Option<NonNull<Level<LockedCapabilityEndpointSet, CapabilityTableNode, 256>>>,
+    pub next: Option<NonNull<Level<LockedCapabilityEndpointSet, CapabilityTableNode, 128>>>,
+    pub owner: Option<KernelObjectRef<PageTableObject>>,
     pub uaddr: u64,
 }
 
-pub type CapabilitySetObject =
-    MultilevelTableObject<LockedCapabilityEndpointSet, CapabilityTableNode, 8, 4, 31, 256>;
-impl AsLevel<LockedCapabilityEndpointSet, 256> for CapabilityTableNode {
+unsafe impl Send for CapabilityTableNode {}
+
+pub struct CapabilitySet(pub CapabilityTable);
+pub type CapabilityTable =
+    MultilevelTableObject<LockedCapabilityEndpointSet, CapabilityTableNode, 7, 4, 35, 128>;
+
+impl CapabilityTableNode {
+    pub fn new_table() -> [CapabilityTableNode; 128] {
+        unsafe {
+            let mut nodes: MaybeUninit<[CapabilityTableNode; 128]> = MaybeUninit::uninit();
+            for entry in (*nodes.as_mut_ptr()).iter_mut() {
+                core::ptr::write(entry, CapabilityTableNode::default());
+            }
+            nodes.assume_init()
+        }
+    }
+}
+impl AsLevel<LockedCapabilityEndpointSet, 128> for CapabilityTableNode {
     fn as_level(
         &mut self,
-    ) -> Option<NonNull<Level<LockedCapabilityEndpointSet, CapabilityTableNode, 256>>> {
+    ) -> Option<NonNull<Level<LockedCapabilityEndpointSet, CapabilityTableNode, 128>>> {
         self.next
     }
-    fn user_address(&self) -> Option<u64> {
-        Some(self.uaddr)
-    }
 }
 
-pub struct LockedCapabilityObject(Mutex<CapabilityObject>);
-
-impl LockedCapabilityObject {
-    pub fn new(inner: CapabilityObject) -> LockedCapabilityObject {
-        LockedCapabilityObject(Mutex::new(inner))
+impl Drop for CapabilityTableNode {
+    fn drop(&mut self) {
+        if let Some(owner) = self.owner.take() {
+            if self.uaddr != 0 {
+                if let Ok(uaddr) = VirtAddr::try_new(self.uaddr) {
+                    unsafe {
+                        LikeKernelObjectRef::from(owner)
+                            .get()
+                            .return_user_page(uaddr);
+                    }
+                }
+            }
+        }
     }
 }
-
-impl Deref for LockedCapabilityObject {
-    type Target = Mutex<CapabilityObject>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-impl Retype for LockedCapabilityObject {
-    unsafe fn retype_in_place(&mut self) -> KernelResult<()> {
-        core::ptr::write(self, LockedCapabilityObject::new(CapabilityObject::Empty));
-        Ok(())
-    }
-}
-impl Notify for LockedCapabilityObject {}
 
 pub struct LockedCapabilityEndpointSet {
     pub endpoints: Mutex<[CapabilityEndpoint; N_ENDPOINT_SLOTS]>,
 }
 
-impl Retype for LockedCapabilityEndpointSet {
-    unsafe fn retype_in_place(&mut self) -> KernelResult<()> {
+impl LockedCapabilityEndpointSet {
+    pub fn new() -> LockedCapabilityEndpointSet {
         let mut endpoints: MaybeUninit<[CapabilityEndpoint; N_ENDPOINT_SLOTS]> =
             MaybeUninit::uninit();
         unsafe {
@@ -106,36 +105,19 @@ impl Retype for LockedCapabilityEndpointSet {
                 core::ptr::write(elem, CapabilityEndpoint::default());
             }
         }
-        core::ptr::write(
-            self,
-            LockedCapabilityEndpointSet {
-                endpoints: Mutex::new(endpoints.assume_init()),
-            },
-        );
+        LockedCapabilityEndpointSet {
+            endpoints: Mutex::new(unsafe { endpoints.assume_init() }),
+        }
+    }
+}
+
+impl Retype for LockedCapabilityEndpointSet {
+    unsafe fn retype_in_place(&mut self) -> KernelResult<()> {
+        core::ptr::write(self, Self::new());
         Ok(())
     }
 }
 impl Notify for LockedCapabilityEndpointSet {}
-
-pub enum CapabilityObject {
-    Empty,
-    Nested(CapabilitySet),
-    Endpoint([CapabilityEndpoint; N_ENDPOINT_SLOTS]),
-}
-
-impl CapabilityObject {
-    pub fn new_empty_endpoints() -> CapabilityObject {
-        let mut endpoints: MaybeUninit<[CapabilityEndpoint; N_ENDPOINT_SLOTS]> =
-            MaybeUninit::uninit();
-        unsafe {
-            let inner = &mut *endpoints.as_mut_ptr();
-            for elem in inner.iter_mut() {
-                core::ptr::write(elem, CapabilityEndpoint::default());
-            }
-        }
-        CapabilityObject::Endpoint(unsafe { endpoints.assume_init() })
-    }
-}
 
 #[derive(Clone)]
 pub struct CapabilityEndpoint {
@@ -206,72 +188,37 @@ pub struct CapMmio {
     pub page_addr: PhysAddr,
 }
 
-pub struct CapabilitySet {
-    pub capabilities: Mutex<[Capability; N_CAPSET_SLOTS]>,
-}
-
-impl Retype for CapabilitySet {
-    unsafe fn retype_in_place(&mut self) -> KernelResult<()> {
-        core::ptr::write(self, CapabilitySet::default());
-        Ok(())
-    }
-}
-impl Notify for CapabilitySet {}
-
-impl Default for CapabilitySet {
-    fn default() -> CapabilitySet {
-        assert_eq!(
-            core::mem::size_of::<Capability>(),
-            core::mem::size_of::<usize>()
-        );
-
-        CapabilitySet {
-            capabilities: Mutex::new(unsafe { core::mem::zeroed() }),
-        }
+impl Retype for CapabilitySet {}
+impl Notify for CapabilitySet {
+    unsafe fn will_drop(&mut self, owner: &dyn LikeKernelObject) {
+        self.0.will_drop(owner);
     }
 }
 
 impl CapabilitySet {
     pub fn entry_endpoint<T, F: FnOnce(&mut CapabilityEndpoint) -> T>(
         &self,
-        mut cptr: CapPtr,
+        cptr: CapPtr,
         f: F,
     ) -> KernelResult<T> {
-        let index = (cptr.0 >> 56) as usize;
-        cptr.0 <<= 8;
-
-        let caps = self.capabilities.lock();
-        if index >= caps.len() {
-            Err(KernelError::EmptyObject)
-        } else {
-            if let Some(ref obj) = caps[index].object {
-                let mut obj = obj.lock();
-                match *obj {
-                    CapabilityObject::Empty => Err(KernelError::EmptyObject),
-                    CapabilityObject::Nested(ref inner) => inner.entry_endpoint(cptr, f),
-                    CapabilityObject::Endpoint(ref mut inner) => {
-                        let index = (cptr.0 >> 56) as usize;
-                        cptr.0 <<= 8;
-                        if index >= inner.len() {
-                            Err(KernelError::EmptyObject)
-                        } else {
-                            Ok(f(&mut inner[index]))
-                        }
-                    }
-                }
+        Ok(self.0.lookup(cptr.0, |set| {
+            let mut set = set.endpoints.lock();
+            let subindex = (cptr.0 & 0xff) as usize;
+            if subindex >= set.len() {
+                Err(KernelError::InvalidArgument)
             } else {
-                Err(KernelError::EmptyObject)
+                Ok(f(&mut set[subindex]))
             }
-        }
+        })??)
     }
 
     #[inline]
-    pub fn lookup(&self, cptr: CapPtr) -> KernelResult<CapabilityEndpoint> {
+    pub fn lookup_cptr(&self, cptr: CapPtr) -> KernelResult<CapabilityEndpoint> {
         self.entry_endpoint(cptr, |x| x.clone())
     }
 
     #[inline]
-    pub fn lookup_take(&self, cptr: CapPtr) -> KernelResult<CapabilityEndpoint> {
+    pub fn lookup_cptr_take(&self, cptr: CapPtr) -> KernelResult<CapabilityEndpoint> {
         self.entry_endpoint(cptr, |x| {
             core::mem::replace(x, CapabilityEndpoint::default())
         })
@@ -316,7 +263,7 @@ enum BasicTaskRequest {
     PutCap = 3,
     SwitchTo = 4,
     FetchDeepClone = 5,
-    MakeFirstLevelEndpoint = 6,
+    MapCapabilityTable = 6,
     FetchRootPageTable = 7,
     GetRegister = 8,
     SetRegister = 9,
@@ -408,26 +355,7 @@ fn invoke_cap_basic_task(
                 })?;
             Ok(0)
         }
-        BasicTaskRequest::MakeFirstLevelEndpoint => {
-            let caps = task.capabilities.get();
-            let mut caps = caps.capabilities.lock();
-            let target_first_level_index = invocation.arg(1)? as usize;
-            if target_first_level_index >= caps.len() {
-                return Err(KernelError::InvalidArgument);
-            }
-
-            let current_root = current.page_table_root.get();
-
-            let delegation: KernelObjectRef<LockedCapabilityObject> = retype_user(
-                &current_root,
-                current_root.clone(),
-                VirtAddr::try_new(invocation.arg(2)? as u64)
-                    .map_err(|_| KernelError::InvalidAddress)?,
-            )?;
-            *delegation.lock() = CapabilityObject::new_empty_endpoints();
-            caps[target_first_level_index].object = Some(delegation);
-            Ok(0)
-        }
+        BasicTaskRequest::MapCapabilityTable => Err(KernelError::NotImplemented),
         BasicTaskRequest::FetchRootPageTable => {
             let cptr = CapPtr(invocation.arg(1)? as u64);
             current
@@ -715,7 +643,7 @@ fn invoke_cap_ipc_endpoint(
         match current
             .capabilities
             .get()
-            .lookup_take(invocation.cptr())?
+            .lookup_cptr_take(invocation.cptr())?
             .object
         {
             CapabilityEndpointObject::IpcEndpoint(x) => x,

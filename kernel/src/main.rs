@@ -34,13 +34,16 @@ mod task;
 mod user;
 
 use crate::kobj::*;
+use crate::multilevel::*;
 use crate::paging::{PageTableObject, RootPageTable};
 use bootloader::BootInfo;
 use capability::{
-    CapabilityEndpointObject, CapabilityObject, CapabilitySet, LockedCapabilityObject,
+    CapabilityEndpointObject, CapabilitySet, CapabilityTable, CapabilityTableNode,
+    LockedCapabilityEndpointSet,
 };
 use core::fmt::Write;
-use core::mem::MaybeUninit;
+use core::mem::{ManuallyDrop, MaybeUninit};
+use core::ptr::NonNull;
 use kobj::KernelObject;
 use serial::with_serial_port;
 use task::Task;
@@ -51,8 +54,14 @@ lazy_static! {
     static ref ROOT_KOBJ: RootKernelObject = RootKernelObject;
     static ref ROOT_CAPSET: KernelObjectRef<CapabilitySet> = {
         static mut KOBJ: MaybeUninit<KernelObject<CapabilitySet>> = MaybeUninit::uninit();
+        static mut CAP_ROOT: MaybeUninit<Level<LockedCapabilityEndpointSet, CapabilityTableNode, 128>> = MaybeUninit::uninit();
+
         let kobj = unsafe {
-            (*KOBJ.as_mut_ptr()).write(CapabilitySet::default());
+            CAP_ROOT.write(Level {
+                table: ManuallyDrop::new(CapabilityTableNode::new_table()),
+            });
+            let cap_table = CapabilityTable::new(NonNull::new(CAP_ROOT.as_mut_ptr()).unwrap(), VirtAddr::new(0));
+            (*KOBJ.as_mut_ptr()).write(CapabilitySet(cap_table));
             (*KOBJ.as_mut_ptr()).init(&*ROOT_KOBJ, VirtAddr::new(0), false).unwrap();
             &*KOBJ.as_ptr()
         };
@@ -82,15 +91,6 @@ lazy_static! {
         };
         task.get_ref()
     };
-    static ref ROOT_INITIAL_CAPS: KernelObjectRef<LockedCapabilityObject> = {
-        static mut KOBJ: MaybeUninit<KernelObject<LockedCapabilityObject>> = MaybeUninit::uninit();
-        let kobj = unsafe {
-            (*KOBJ.as_mut_ptr()).write(LockedCapabilityObject::new(CapabilityObject::new_empty_endpoints()));
-            (*KOBJ.as_mut_ptr()).init(&*ROOT_KOBJ, VirtAddr::new(0), false).unwrap();
-            &*KOBJ.as_ptr()
-        };
-        kobj.get_ref()
-    };
 }
 
 #[no_mangle]
@@ -114,16 +114,9 @@ pub extern "C" fn kstart(boot_info: &'static BootInfo) -> ! {
         crate::paging::make_root_page_table(unsafe { crate::paging::active_level_4_table() }, x);
     });
 
-    {
-        let mut caps = ROOT_INITIAL_CAPS.lock();
-        if let CapabilityObject::Endpoint(ref mut endpoints) = *caps {
-            endpoints[0].object = CapabilityEndpointObject::BasicTask(ROOT_TASK.clone());
-            endpoints[1].object = CapabilityEndpointObject::RootTask;
-        } else {
-            panic!("expecting endpoints");
-        }
+    unsafe {
+        setup_initial_caps();
     }
-    ROOT_CAPSET.capabilities.lock()[0].object = Some(ROOT_INITIAL_CAPS.clone());
 
     task::switch_to(ROOT_TASK.clone()).unwrap();
     let initial_ip = ROOT_TASK.load_root_image();
@@ -134,6 +127,48 @@ pub extern "C" fn kstart(boot_info: &'static BootInfo) -> ! {
     task::enter_user_mode();
 }
 
+unsafe fn setup_initial_caps() {
+    static mut INITIAL_CAP_TABLE_NODES: MaybeUninit<
+        [Level<LockedCapabilityEndpointSet, CapabilityTableNode, 128>; 4],
+    > = MaybeUninit::uninit();
+    INITIAL_CAP_TABLE_NODES.write([
+        Level {
+            table: ManuallyDrop::new(CapabilityTableNode::new_table()),
+        },
+        Level {
+            table: ManuallyDrop::new(CapabilityTableNode::new_table()),
+        },
+        Level {
+            table: ManuallyDrop::new(CapabilityTableNode::new_table()),
+        },
+        Level {
+            table: ManuallyDrop::new(CapabilityTableNode::new_table()),
+        },
+    ]);
+
+    let mut expected: u8 = 0;
+    while ROOT_CAPSET.0.lookup_entry(0, |level, entry| {
+        let nodes = &mut *INITIAL_CAP_TABLE_NODES.as_mut_ptr();
+        entry.next = Some(NonNull::from(&mut nodes[level as usize]));
+        assert_eq!(level, expected);
+        expected += 1;
+        if level == 3 {
+            let mut entry = entry.as_level().unwrap();
+            let entry = entry.as_mut();
+            let set = LockedCapabilityEndpointSet::new();
+            {
+                let mut endpoints = set.endpoints.lock();
+                endpoints[0].object = CapabilityEndpointObject::BasicTask(ROOT_TASK.clone());
+                endpoints[1].object = CapabilityEndpointObject::RootTask;
+            }
+            entry.value = ManuallyDrop::new(set);
+            return true;
+        }
+
+        false
+    }) != true
+    {}
+}
 #[panic_handler]
 fn on_panic(info: &core::panic::PanicInfo) -> ! {
     use x86_64::instructions::interrupts;

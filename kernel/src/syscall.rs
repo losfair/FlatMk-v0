@@ -41,7 +41,7 @@ extern "C" fn syscall_entry(invocation: &mut CapabilityInvocation) -> i64 {
 
     let cap = {
         let task = Task::current();
-        match task.capabilities.get().lookup(cptr) {
+        match task.capabilities.get().lookup_cptr(cptr) {
             Ok(x) => x,
             Err(e) => return e as i32 as i64,
         }
