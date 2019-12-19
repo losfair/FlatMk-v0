@@ -24,6 +24,8 @@ pub enum KernelError {
     NotAligned = -9,
     /// An IPC operation would block, but non-blocking mode is requested.
     WouldBlock = -10,
+    /// An empty capability is invoked.
+    EmptyCapability = -11,
 }
 
 pub type KernelResult<T> = Result<T, KernelError>;

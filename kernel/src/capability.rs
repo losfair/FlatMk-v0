@@ -159,6 +159,7 @@ pub enum CapabilityEndpointObject {
     RootPageTable(KernelObjectRef<PageTableObject>),
     UserPageSet(KernelObjectRef<UserPageSet>),
     IpcEndpoint(CapIpcEndpoint),
+    CapabilitySet(KernelObjectRef<CapabilitySet>),
 }
 
 pub struct CapIpcEndpoint {
@@ -246,7 +247,7 @@ impl CapabilityEndpointObject {
     /// invoke() takes self so that it can be dropped properly when this function does not return.
     pub fn invoke(self, invocation: &mut CapabilityInvocation) -> KernelResult<i64> {
         match self {
-            CapabilityEndpointObject::Empty => Err(KernelError::EmptyObject),
+            CapabilityEndpointObject::Empty => Err(KernelError::EmptyCapability),
             CapabilityEndpointObject::BasicTask(task) => invoke_cap_basic_task(invocation, task),
             CapabilityEndpointObject::RootTask => invoke_cap_root_task(invocation),
             CapabilityEndpointObject::X86IoPort(index) => invoke_cap_x86_io_port(invocation, index),
@@ -260,6 +261,9 @@ impl CapabilityEndpointObject {
             CapabilityEndpointObject::IpcEndpoint(endpoint) => {
                 invoke_cap_ipc_endpoint(invocation, endpoint)
             }
+            CapabilityEndpointObject::CapabilitySet(set) => {
+                invoke_cap_capability_set(invocation, set)
+            }
         }
     }
 }
@@ -271,26 +275,25 @@ impl CapabilityEndpointObject {
 ///
 /// Variants prefixed with `Put` uses resources in the current task to create a new capability
 /// in the associated task's capability space.
+///
+/// Other variants only use and generate resources in the associated task.
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, TryFromPrimitive)]
 enum BasicTaskRequest {
-    CloneCap = 0,
-    DropCap = 1,
-    FetchCap = 2,
-    PutCap = 3,
-    SwitchTo = 4,
-    FetchDeepClone = 5,
-    MapCapabilityTable = 6,
-    FetchRootPageTable = 7,
-    GetRegister = 8,
-    SetRegister = 9,
-    FetchNewUserPageSet = 10,
-    FetchIpcEndpoint = 11,
-    UnblockIpc = 12,
-    FetchIpcCap = 13,
-    ResetCaps = 14,
-    IpcIsBlocked = 15,
-    IsUnique = 16,
+    SwitchTo = 0,
+    FetchDeepClone = 1,
+    FetchCapSet = 2,
+    FetchRootPageTable = 3,
+    GetRegister = 4,
+    SetRegister = 5,
+    FetchNewUserPageSet = 6,
+    FetchIpcEndpoint = 7,
+    UnblockIpc = 8,
+    FetchIpcCap = 9,
+    PutCapSet = 10,
+    IpcIsBlocked = 11,
+    IsUnique = 12,
+    MakeCapSet = 13,
 }
 
 fn invoke_cap_basic_task(
@@ -301,47 +304,6 @@ fn invoke_cap_basic_task(
 
     let req = BasicTaskRequest::try_from(invocation.arg(0)? as u32)?;
     match req {
-        BasicTaskRequest::CloneCap => {
-            let src = CapPtr(invocation.arg(1)? as u64);
-            let dst = CapPtr(invocation.arg(2)? as u64);
-            let caps = task.capabilities.get();
-            let cap = caps.entry_endpoint(src, |endpoint| endpoint.object.clone())?;
-            caps.entry_endpoint(dst, |endpoint| {
-                endpoint.object = cap;
-            })?;
-            Ok(0)
-        }
-        BasicTaskRequest::DropCap => {
-            let cptr = CapPtr(invocation.arg(1)? as u64);
-            task.capabilities.get().entry_endpoint(cptr, |endpoint| {
-                endpoint.object = CapabilityEndpointObject::Empty;
-            })?;
-            Ok(0)
-        }
-        BasicTaskRequest::FetchCap => {
-            let src = CapPtr(invocation.arg(1)? as u64);
-            let dst = CapPtr(invocation.arg(2)? as u64);
-            let cap = task
-                .capabilities
-                .get()
-                .entry_endpoint(src, |endpoint| endpoint.object.clone())?;
-            current.capabilities.get().entry_endpoint(dst, |endpoint| {
-                endpoint.object = cap;
-            })?;
-            Ok(0)
-        }
-        BasicTaskRequest::PutCap => {
-            let src = CapPtr(invocation.arg(1)? as u64);
-            let dst = CapPtr(invocation.arg(2)? as u64);
-            let cap = current
-                .capabilities
-                .get()
-                .entry_endpoint(src, |endpoint| endpoint.object.clone())?;
-            task.capabilities.get().entry_endpoint(dst, |endpoint| {
-                endpoint.object = cap;
-            })?;
-            Ok(0)
-        }
         BasicTaskRequest::SwitchTo => {
             *invocation.registers.return_value_mut() = 0;
             *current.registers.lock() = invocation.registers.clone();
@@ -372,16 +334,12 @@ fn invoke_cap_basic_task(
                 })?;
             Ok(0)
         }
-        BasicTaskRequest::MapCapabilityTable => {
-            let ptr = invocation.arg(1)? as u64;
-            let uaddr = VirtAddr::try_new(invocation.arg(2)? as u64)
-                .map_err(|_| KernelError::InvalidAddress)?;
-            let leaf = task.capabilities.get().0.build_from_user(
-                ptr,
-                current.page_table_root.get(),
-                uaddr,
-            )?;
-            Ok(if leaf { 1 } else { 0 })
+        BasicTaskRequest::FetchCapSet => {
+            let dst = CapPtr(invocation.arg(1)? as u64);
+            current.capabilities.get().entry_endpoint(dst, |endpoint| {
+                endpoint.object = CapabilityEndpointObject::CapabilitySet(task.capabilities.get());
+            })?;
+            Ok(0)
         }
         BasicTaskRequest::FetchRootPageTable => {
             let cptr = CapPtr(invocation.arg(1)? as u64);
@@ -493,30 +451,17 @@ fn invoke_cap_basic_task(
 
             Ok(0)
         }
-        BasicTaskRequest::ResetCaps => {
-            let current_root = current.page_table_root.get();
-            let obj_delegation = VirtAddr::try_new(invocation.arg(1)? as u64)
-                .map_err(|_| KernelError::InvalidAddress)?;
-            let root_delegation = VirtAddr::try_new(invocation.arg(2)? as u64)
-                .map_err(|_| KernelError::InvalidAddress)?;
-            let delegation: KernelObjectRef<CapabilitySet> = unsafe {
-                retype_user_with(
-                    &current_root,
-                    current_root.clone(),
-                    obj_delegation,
-                    Some(|new_set: &mut CapabilitySet| {
-                        core::ptr::write(
-                            new_set,
-                            CapabilitySet(CapabilityTable::new_from_user(
-                                &current_root,
-                                root_delegation,
-                            )?),
-                        );
-                        Ok(())
-                    }),
-                )?
-            };
-            task.capabilities.swap(delegation);
+        BasicTaskRequest::PutCapSet => {
+            let cptr = CapPtr(invocation.arg(1)? as u64);
+            let capset =
+                current
+                    .capabilities
+                    .get()
+                    .entry_endpoint(cptr, |endpoint| match endpoint.object {
+                        CapabilityEndpointObject::CapabilitySet(ref set) => Ok(set.clone()),
+                        _ => Err(KernelError::InvalidArgument),
+                    })??;
+            task.capabilities.swap(capset);
             Ok(0)
         }
         BasicTaskRequest::IpcIsBlocked => {
@@ -535,6 +480,35 @@ fn invoke_cap_basic_task(
             } else {
                 Ok(0)
             }
+        }
+        BasicTaskRequest::MakeCapSet => {
+            let current_root = current.page_table_root.get();
+            let cptr = CapPtr(invocation.arg(1)? as u64);
+            let obj_delegation = VirtAddr::try_new(invocation.arg(2)? as u64)
+                .map_err(|_| KernelError::InvalidAddress)?;
+            let root_delegation = VirtAddr::try_new(invocation.arg(3)? as u64)
+                .map_err(|_| KernelError::InvalidAddress)?;
+            let delegation: KernelObjectRef<CapabilitySet> = unsafe {
+                retype_user_with(
+                    &current_root,
+                    current_root.clone(),
+                    obj_delegation,
+                    Some(|new_set: &mut CapabilitySet| {
+                        core::ptr::write(
+                            new_set,
+                            CapabilitySet(CapabilityTable::new_from_user(
+                                &current_root,
+                                root_delegation,
+                            )?),
+                        );
+                        Ok(())
+                    }),
+                )?
+            };
+            task.capabilities.get().entry_endpoint(cptr, |endpoint| {
+                endpoint.object = CapabilityEndpointObject::CapabilitySet(delegation);
+            })?;
+            Ok(0)
         }
     }
 }
@@ -785,6 +759,84 @@ fn invoke_cap_ipc_endpoint(
         IpcRequest::SetUserContext => {
             let new_context_value = invocation.arg(1)? as u64;
             endpoint.entry.set_user_context(new_context_value)?;
+            Ok(0)
+        }
+    }
+}
+
+#[repr(u32)]
+#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+enum CapSetRequest {
+    Map = 0,
+    IsUnique = 1,
+    CloneCap = 2,
+    DropCap = 3,
+    FetchCap = 4,
+    PutCap = 5,
+}
+
+fn invoke_cap_capability_set(
+    invocation: &mut CapabilityInvocation,
+    set: KernelObjectRef<CapabilitySet>,
+) -> KernelResult<i64> {
+    let req = CapSetRequest::try_from(invocation.arg(0)? as u32)?;
+    let current = Task::current();
+
+    match req {
+        CapSetRequest::Map => {
+            let ptr = invocation.arg(1)? as u64;
+            let uaddr = VirtAddr::try_new(invocation.arg(2)? as u64)
+                .map_err(|_| KernelError::InvalidAddress)?;
+            let leaf = set
+                .0
+                .build_from_user(ptr, current.page_table_root.get(), uaddr)?;
+            Ok(if leaf { 1 } else { 0 })
+        }
+        CapSetRequest::IsUnique => {
+            let set = LikeKernelObjectRef::from(set);
+
+            // Capabilities are cloned for invocation.
+            if set.get().count_ref() == 2 {
+                Ok(1)
+            } else {
+                Ok(0)
+            }
+        }
+        CapSetRequest::CloneCap => {
+            let src = CapPtr(invocation.arg(1)? as u64);
+            let dst = CapPtr(invocation.arg(2)? as u64);
+            let cap = set.entry_endpoint(src, |endpoint| endpoint.object.clone())?;
+            set.entry_endpoint(dst, |endpoint| {
+                endpoint.object = cap;
+            })?;
+            Ok(0)
+        }
+        CapSetRequest::DropCap => {
+            let cptr = CapPtr(invocation.arg(1)? as u64);
+            set.entry_endpoint(cptr, |endpoint| {
+                endpoint.object = CapabilityEndpointObject::Empty;
+            })?;
+            Ok(0)
+        }
+        CapSetRequest::FetchCap => {
+            let src = CapPtr(invocation.arg(1)? as u64);
+            let dst = CapPtr(invocation.arg(2)? as u64);
+            let cap = set.entry_endpoint(src, |endpoint| endpoint.object.clone())?;
+            current.capabilities.get().entry_endpoint(dst, |endpoint| {
+                endpoint.object = cap;
+            })?;
+            Ok(0)
+        }
+        CapSetRequest::PutCap => {
+            let src = CapPtr(invocation.arg(1)? as u64);
+            let dst = CapPtr(invocation.arg(2)? as u64);
+            let cap = current
+                .capabilities
+                .get()
+                .entry_endpoint(src, |endpoint| endpoint.object.clone())?;
+            set.entry_endpoint(dst, |endpoint| {
+                endpoint.object = cap;
+            })?;
             Ok(0)
         }
     }

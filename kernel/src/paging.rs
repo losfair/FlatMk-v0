@@ -109,6 +109,7 @@ pub fn take_from_user(current: &mut RootPageTable, addr: VirtAddr) -> KernelResu
         Ok(x) => x,
         _ => return Err(KernelError::InvalidDelegation),
     };
+    // FIXME: Check user_accessible flag.
     match table.update_flags(
         page,
         PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
