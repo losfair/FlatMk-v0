@@ -1,5 +1,12 @@
 use crate::addr::*;
-use crate::arch::{arch_set_current_page_table, tlb, PAGE_SIZE, PAGE_TABLE_LEVELS};
+use crate::arch::{
+    arch_set_current_page_table,
+    task::{
+        arch_enter_user_mode, arch_get_kernel_tls, arch_init_kernel_tls_for_cpu,
+        arch_set_kernel_tls, TaskRegisters, TlsIndirect,
+    },
+    tlb, PAGE_SIZE, PAGE_TABLE_LEVELS,
+};
 use crate::capability::{CapabilityEndpoint, CapabilitySet};
 use crate::error::*;
 use crate::kobj::*;
@@ -10,23 +17,11 @@ use core::cell::{Cell, UnsafeCell};
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
-use x86_64::registers::{model_specific::GsBase, rflags::RFlags};
 
 pub const ROOT_TASK_FULL_MAP_BASE: u64 = 0x20000000u64;
 
 static ROOT_IMAGE: &'static [u8] =
     include_bytes!("../../user/init/target/x86_64-flatmk/release/init");
-
-#[naked]
-#[inline(never)]
-unsafe extern "C" fn enable_sse() {
-    asm!(r#"
-        mov %cr4, %rax
-        or $$0x600, %rax // CR4.OSFXSR + CR4.OSXMMEXCPT
-        mov %rax, %cr4
-        retq
-    "# :::: "volatile");
-}
 
 #[derive(Clone, Debug)]
 pub enum TaskFaultState {
@@ -109,31 +104,6 @@ pub struct Task {
     pub running: AtomicBool,
 }
 
-#[repr(C)]
-#[derive(Clone, Debug)]
-pub struct TaskRegisters {
-    pub r15: u64,
-    pub r14: u64,
-    pub r13: u64,
-    pub r12: u64,
-    pub r11: u64,
-    pub r10: u64,
-    pub r9: u64,
-    pub r8: u64,
-    pub rax: u64,
-    pub rbx: u64,
-    pub rcx: u64,
-    pub rdx: u64,
-    pub rsi: u64,
-    pub rdi: u64,
-    pub rsp: u64,
-    pub rbp: u64,
-    pub rip: u64,
-    pub rflags: u64,
-    pub gs_base: u64,
-    pub fs_base: u64,
-}
-
 #[derive(Default, Clone)]
 pub struct FaultHandlerTable {
     pub ipc_blocked: Option<FaultHandler>,
@@ -189,7 +159,7 @@ pub fn empty_ipc_caps() -> [CapabilityEndpoint; 4] {
 #[inline]
 fn get_current_task() -> KernelObjectRef<Task> {
     // Clone the current reference, if any.
-    let ptr = GsBase::read().as_ptr::<KernelObject<Task>>();
+    let ptr = arch_get_kernel_tls() as *mut KernelObject<Task>;
     let obj = unsafe { KernelObjectRef::from_raw(ptr) };
     let ret = obj.clone();
     // We should not drop the old reference here.
@@ -199,7 +169,7 @@ fn get_current_task() -> KernelObjectRef<Task> {
 
 fn set_current_task(t: KernelObjectRef<Task>) {
     // Drop the old reference.
-    let old = GsBase::read().as_ptr::<KernelObject<Task>>();
+    let old = arch_get_kernel_tls() as *mut KernelObject<Task>;
     if !old.is_null() {
         let old_obj = unsafe { KernelObjectRef::from_raw(old) };
         old_obj
@@ -212,91 +182,14 @@ fn set_current_task(t: KernelObjectRef<Task>) {
 
     // Write the new reference.
     let raw = KernelObjectRef::into_raw(t);
-    GsBase::write(::x86_64::VirtAddr::new(raw as u64));
+    unsafe {
+        arch_set_kernel_tls(raw as u64);
+    }
 }
 
 pub unsafe fn init() {
-    GsBase::write(::x86_64::VirtAddr::new(0));
-    enable_sse();
-}
-
-impl TaskRegisters {
-    pub fn new() -> TaskRegisters {
-        TaskRegisters {
-            r15: 0,
-            r14: 0,
-            r13: 0,
-            r12: 0,
-            r11: 0,
-            r10: 0,
-            r9: 0,
-            r8: 0,
-            rax: 0,
-            rbx: 0,
-            rcx: 0,
-            rdx: 0,
-            rsi: 0,
-            rdi: 0,
-            rsp: 0,
-            rbp: 0,
-            rip: 0,
-            rflags: RFlags::INTERRUPT_FLAG.bits(),
-            gs_base: 0,
-            fs_base: 0,
-        }
-    }
-
-    #[inline]
-    pub fn field_mut(&mut self, idx: usize) -> KernelResult<&mut u64> {
-        Ok(match idx {
-            0 => &mut self.rax,
-            1 => &mut self.rdx,
-            2 => &mut self.rcx,
-            3 => &mut self.rbx,
-            4 => &mut self.rsi,
-            5 => &mut self.rdi,
-            6 => &mut self.rbp,
-            7 => &mut self.rsp,
-            8 => &mut self.r8,
-            9 => &mut self.r9,
-            10 => &mut self.r10,
-            11 => &mut self.r11,
-            12 => &mut self.r12,
-            13 => &mut self.r13,
-            14 => &mut self.r14,
-            15 => &mut self.r15,
-            16 => &mut self.rip,
-            _ => return Err(KernelError::InvalidArgument),
-        })
-    }
-
-    #[inline]
-    pub fn return_value_mut(&mut self) -> &mut u64 {
-        &mut self.rax
-    }
-
-    #[inline]
-    pub fn syscall_arg(&self, n: usize) -> KernelResult<u64> {
-        Ok(match n {
-            0 => self.rdi,
-            1 => self.rsi,
-            2 => self.rdx,
-            3 => self.r10,
-            4 => self.r8,
-            5 => self.r9,
-            _ => return Err(KernelError::InvalidArgument),
-        })
-    }
-
-    #[inline]
-    pub fn pc_mut(&mut self) -> &mut u64 {
-        &mut self.rip
-    }
-
-    #[inline]
-    pub fn sp_mut(&mut self) -> &mut u64 {
-        &mut self.rsp
-    }
+    static mut INIT_TLS: TlsIndirect = TlsIndirect::new(crate::arch::config::KERNEL_STACK_END);
+    arch_init_kernel_tls_for_cpu(&mut INIT_TLS);
 }
 
 /// This function is unsafe because arbitrary physical memory can be mapped.
@@ -456,6 +349,7 @@ impl Task {
     pub fn invoke_ipc(
         task: KernelObjectRef<Task>,
         entry: IpcEntry,
+        old_registers: &TaskRegisters,
     ) -> (KernelError, KernelObjectRef<Task>) {
         {
             // TODO: Save old PC/SP and pass user context.
@@ -464,7 +358,7 @@ impl Task {
             *target_regs.sp_mut() = entry.sp;
         }
 
-        match crate::task::switch_to(task.clone()) {
+        match crate::task::switch_to(task.clone(), Some(old_registers)) {
             Ok(()) => {
                 drop(task);
             }
@@ -504,7 +398,14 @@ pub unsafe fn retype_user_with<
     }
 }
 
-pub fn switch_to(task: KernelObjectRef<Task>) -> KernelResult<()> {
+pub fn switch_to(
+    task: KernelObjectRef<Task>,
+    old_registers: Option<&TaskRegisters>,
+) -> KernelResult<()> {
+    if let Some(regs) = old_registers {
+        Task::current().registers.lock().save_current(regs);
+    }
+
     let root = task.page_table_root.get();
     let root_level: VirtAddr = root
         .0
@@ -523,65 +424,17 @@ pub fn switch_to(task: KernelObjectRef<Task>) -> KernelResult<()> {
 
 /// Switches out of kernel mode and enters user mode.
 pub fn enter_user_mode() -> ! {
-    #[naked]
-    #[inline(never)]
-    unsafe extern "C" fn __enter_user_mode(
-        _unused: u64,
-        _registers: *const TaskRegisters,
-        _user_code_selector: u32,
-        _user_data_selector: u32,
-    ) {
-        asm!(
-            r#"
-                mov %cx, %ds
-                mov %cx, %es
-                pushq %rcx // ds
-                pushq %rcx // ss
-                pushq 112(%rsi) // rsp
-                pushq 136(%rsi) // rflags
-                pushq %rdx
-                pushq 128(%rsi) // rip
-                mov 0(%rsi), %r15
-                mov 8(%rsi), %r14
-                mov 16(%rsi), %r13
-                mov 24(%rsi), %r12
-                mov 32(%rsi), %r11
-                mov 40(%rsi), %r10
-                mov 48(%rsi), %r9
-                mov 56(%rsi), %r8
-                mov 64(%rsi), %rax
-                mov 72(%rsi), %rbx
-                mov 80(%rsi), %rcx
-                mov 88(%rsi), %rdx
-                mov 104(%rsi), %rdi
-                mov 120(%rsi), %rbp
-                mov 96(%rsi), %rsi
-                swapgs
-                iretq
-            "# :::: "volatile"
-        );
-    }
-    assert_eq!(core::mem::size_of::<TaskRegisters>(), 160);
-    let selectors = crate::exception::get_selectors();
-
     let task = Task::current();
 
+    let registers: *const TaskRegisters = {
+        let registers = task.registers.lock();
+        &*registers as *const _
+    };
+    // Here we won't get a dangling `registers` pointer after drop because we know that
+    // the TLS won't be dropped now.
+    drop(task);
+
     unsafe {
-        let registers: *const TaskRegisters = {
-            let registers = task.registers.lock();
-            &*registers as *const _
-        };
-        // Here we won't get a dangling `registers` pointer after drop because we know that
-        // `GsBase` won't be dropped now.
-        drop(task);
-
-        __enter_user_mode(
-            0,
-            registers,
-            selectors.user_code_selector.0 as u32,
-            selectors.user_data_selector.0 as u32,
-        );
+        arch_enter_user_mode(registers);
     }
-
-    loop {}
 }

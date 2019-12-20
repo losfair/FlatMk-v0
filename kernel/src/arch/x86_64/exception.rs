@@ -1,5 +1,7 @@
+use super::config::*;
+use super::task::TaskRegisters;
 use crate::serial::with_serial_port;
-use crate::task::{Task, TaskFaultState, TaskRegisters};
+use crate::task::{Task, TaskFaultState};
 use core::fmt::Write;
 use pic8259_simple::ChainedPics;
 use spin::Mutex;
@@ -15,11 +17,6 @@ use x86_64::{
     PrivilegeLevel,
 };
 
-// XXX: Keep this consistent with Cargo.toml
-pub const KERNEL_STACK_START: u64 = 0xFFFFFF8000000000u64;
-pub const KERNEL_STACK_SIZE: u64 = 4096 * 512;
-pub const KERNEL_STACK_END: u64 = KERNEL_STACK_START + KERNEL_STACK_SIZE;
-
 const PIC_1_OFFSET: u8 = 32;
 const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 static PICS: Mutex<ChainedPics> =
@@ -30,7 +27,7 @@ static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
 static mut TSS: TaskStateSegment = TaskStateSegment::new();
 static mut SELECTORS: Option<Selectors> = None;
 
-pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
+const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
 #[derive(Debug)]
 pub struct Selectors {
@@ -105,7 +102,7 @@ pub unsafe fn init_idt() {
         .set_handler_fn(core::mem::transmute(intr_page_fault as usize));
     IDT.general_protection_fault
         .set_handler_fn(core::mem::transmute(intr_gpf as usize));
-    include!("../generated/interrupts_idt.rs");
+    include!("../../../generated/interrupts_idt.rs");
     IDT.load();
 }
 
@@ -121,7 +118,7 @@ fn is_user_fault(frame: &mut InterruptStackFrame) -> bool {
 macro_rules! interrupt {
     ($name:ident, $internal_name:ident, $arg0:ident, $arg1:ident, $body:block) => {
         #[no_mangle]
-        extern "C" fn $internal_name($arg0: &mut ::x86_64::structures::idt::InterruptStackFrame, $arg1: &mut $crate::task::TaskRegisters) {
+        extern "C" fn $internal_name($arg0: &mut ::x86_64::structures::idt::InterruptStackFrame, $arg1: &mut $crate::arch::task::TaskRegisters) -> ! {
             $body
         }
 
@@ -133,6 +130,8 @@ macro_rules! interrupt {
                 push %rbp
                 mov %rsp, %rbp
 
+                pushq $$0 // fs
+                pushq $$0 // gs
                 push 24(%rbp) // rflags
                 push 8(%rbp) // rip
                 push 0(%rbp) // rbp
@@ -155,26 +154,7 @@ macro_rules! interrupt {
                 leaq 8(%rbp), %rdi
                 mov %rsp, %rsi
                 call "#, stringify!($internal_name), r#"
-
-                pop %r15
-                pop %r14
-                pop %r13
-                pop %r12
-                pop %r11
-                pop %r10
-                pop %r9
-                pop %r8
-                pop %rax
-                pop %rbx
-                pop %rcx
-                pop %rdx
-                pop %rsi
-                pop %rdi
-                add $$32, %rsp
-                pop %rbp
-
-                swapgs
-                iretq
+                ud2
             "#) :::: "volatile");
         }
     };
@@ -183,7 +163,7 @@ macro_rules! interrupt {
 macro_rules! interrupt_with_code {
     ($name:ident, $internal_name:ident, $arg0:ident, $arg1:ident, $arg2:ident, $body:block) => {
         #[no_mangle]
-        extern "C" fn $internal_name($arg0: &mut ::x86_64::structures::idt::InterruptStackFrame, $arg1: &mut $crate::task::TaskRegisters, $arg2: u64) {
+        extern "C" fn $internal_name($arg0: &mut ::x86_64::structures::idt::InterruptStackFrame, $arg1: &mut $crate::arch::task::TaskRegisters, $arg2: u64) -> ! {
             $body
         }
 
@@ -195,6 +175,8 @@ macro_rules! interrupt_with_code {
                 push %rbp
                 mov %rsp, %rbp
 
+                pushq $$0 // fs
+                pushq $$0 // gs
                 push 32(%rbp) // rflags
                 push 16(%rbp) // rip
                 push 0(%rbp) // rbp
@@ -218,28 +200,7 @@ macro_rules! interrupt_with_code {
                 mov %rsp, %rsi
                 mov 8(%rbp), %rdx // error code
                 call "#, stringify!($internal_name), r#"
-
-                pop %r15
-                pop %r14
-                pop %r13
-                pop %r12
-                pop %r11
-                pop %r10
-                pop %r9
-                pop %r8
-                pop %rax
-                pop %rbx
-                pop %rcx
-                pop %rdx
-                pop %rsi
-                pop %rdi
-                add $$32, %rsp
-                pop %rbp
-
-                add $$8, %rsp // error code
-
-                swapgs
-                iretq
+                ud2
             "#) :::: "volatile");
         }
     };
@@ -259,7 +220,9 @@ interrupt_with_code!(
     _frame,
     _registers,
     _code,
-    {}
+    {
+        panic!("breakpoint");
+    }
 );
 
 interrupt!(intr_divide_error, __intr_divide_error, frame, _registers, {
@@ -322,14 +285,18 @@ interrupt_with_code!(
     }
 );
 
-include!("../generated/interrupts_impl.rs");
+include!("../../../generated/interrupts_impl.rs");
 
 fn handle_external_interrupt(
     frame: &mut InterruptStackFrame,
-    _registers: &mut TaskRegisters,
+    registers: &mut TaskRegisters,
     _index: u8,
-) {
+) -> ! {
     if !is_user_fault(frame) {
         panic!("External interrupt in kernel mode");
+    } else {
+        unsafe {
+            super::task::arch_enter_user_mode(registers);
+        }
     }
 }

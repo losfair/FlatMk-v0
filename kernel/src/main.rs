@@ -28,7 +28,6 @@ mod capability;
 mod debug;
 mod elf;
 mod error;
-mod exception;
 mod kobj;
 mod multilevel;
 mod paging;
@@ -38,7 +37,7 @@ mod task;
 mod user;
 
 use crate::addr::*;
-use crate::arch::PageTableEntry;
+use crate::arch::{arch_early_init, arch_late_init, PageTableEntry};
 use crate::kobj::*;
 use crate::multilevel::*;
 use crate::paging::{PageTableLevel, PageTableMto, PageTableObject};
@@ -90,7 +89,7 @@ lazy_static! {
     static ref ROOT_TASK: KernelObjectRef<Task> = {
         static mut TASK: MaybeUninit<KernelObject<Task>> = MaybeUninit::uninit();
         let task = unsafe {
-            (*TASK.as_mut_ptr()).write(Task::new_initial(VirtAddr(exception::KERNEL_STACK_END), ROOT_PT_OBJECT.clone(), ROOT_CAPSET.clone()));
+            (*TASK.as_mut_ptr()).write(Task::new_initial(VirtAddr(crate::arch::config::KERNEL_STACK_END), ROOT_PT_OBJECT.clone(), ROOT_CAPSET.clone()));
             (*TASK.as_mut_ptr()).init(&*ROOT_KOBJ, UserAddr(0), false).unwrap();
             &*TASK.as_ptr()
         };
@@ -107,18 +106,17 @@ pub extern "C" fn kstart(boot_info: &'static BootInfo) -> ! {
     // Early init.
     unsafe {
         boot::set_boot_info(boot_info);
-        exception::init_gdt();
-        exception::init_idt();
+        arch_early_init();
         paging::init();
         task::init();
         syscall::init();
-        exception::init_interrupts();
+        arch_late_init();
 
         ROOT_PT_OBJECT.copy_kernel_range_from_level(&mut *crate::paging::_active_level_4_table());
         setup_initial_caps();
     }
 
-    task::switch_to(ROOT_TASK.clone()).unwrap();
+    task::switch_to(ROOT_TASK.clone(), None).unwrap();
     let initial_ip = ROOT_TASK.load_root_image();
     ROOT_TASK.registers.lock().rip = initial_ip;
     with_serial_port(|p| {

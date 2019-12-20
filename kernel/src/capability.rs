@@ -4,8 +4,8 @@ use crate::kobj::*;
 use crate::multilevel::*;
 use crate::paging::PageTableObject;
 
-use crate::arch::tlb;
-use crate::task::{retype_user_with, IpcEntry, Task, TaskFaultState, TaskRegisters};
+use crate::arch::{task::TaskRegisters, tlb};
+use crate::task::{retype_user_with, IpcEntry, Task, TaskFaultState};
 use core::convert::TryFrom;
 use core::mem::ManuallyDrop;
 use core::mem::MaybeUninit;
@@ -300,9 +300,8 @@ fn invoke_cap_basic_task(
     match req {
         BasicTaskRequest::SwitchTo => {
             *invocation.registers.return_value_mut() = 0;
-            *current.registers.lock() = invocation.registers.clone();
             drop(current);
-            crate::task::switch_to(task)?;
+            crate::task::switch_to(task, Some(&invocation.registers))?;
             crate::task::enter_user_mode();
         }
         BasicTaskRequest::FetchDeepClone => {
@@ -657,7 +656,6 @@ fn invoke_cap_ipc_endpoint(
                     }
 
                     *invocation.registers.return_value_mut() = 0;
-                    *current.registers.lock() = invocation.registers.clone();
                 }
 
                 let task = task.clone();
@@ -666,7 +664,7 @@ fn invoke_cap_ipc_endpoint(
                 drop(current);
                 drop(endpoint);
 
-                let (e, task) = Task::invoke_ipc(task, entry);
+                let (e, task) = Task::invoke_ipc(task, entry, &invocation.registers);
                 drop(task.unblock_ipc());
                 return Err(e);
             }

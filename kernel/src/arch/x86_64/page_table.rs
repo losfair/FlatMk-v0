@@ -18,7 +18,7 @@ pub const PAGE_TABLE_SIZE: usize = 512;
 
 bitflags! {
     /// Taken from https://docs.rs/x86_64/0.8.2/src/x86_64/structures/paging/page_table.rs.html .
-    /// 
+    ///
     /// Possible flags for a page table entry.
     pub struct PageTableFlags: u64 {
         /// Specifies whether the mapped frame or page table is loaded in memory.
@@ -83,7 +83,7 @@ bitflags! {
 }
 
 /// Partially taken from https://docs.rs/x86_64/0.8.2/src/x86_64/structures/paging/page_table.rs.html .
-/// 
+///
 /// A 64-bit page table entry.
 #[derive(Copy, Clone)]
 #[repr(transparent)]

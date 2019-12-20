@@ -6,8 +6,8 @@ use crate::kobj::*;
 use crate::addr::*;
 use crate::arch::tlb;
 use crate::arch::{
-    arch_get_current_page_table, Page, PageTableEntry, PAGE_SIZE, PAGE_TABLE_INDEX_START,
-    PAGE_TABLE_LEVELS, PAGE_TABLE_LEVEL_BITS, PAGE_TABLE_SIZE,
+    arch_get_current_page_table, Page, PageTableEntry, PAGE_TABLE_INDEX_START, PAGE_TABLE_LEVELS,
+    PAGE_TABLE_LEVEL_BITS, PAGE_TABLE_SIZE,
 };
 use crate::multilevel::*;
 
