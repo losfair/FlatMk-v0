@@ -18,6 +18,10 @@
 #[macro_use]
 extern crate lazy_static;
 
+#[macro_use]
+extern crate bitflags;
+
+mod addr;
 mod arch;
 mod boot;
 mod capability;
@@ -33,9 +37,11 @@ mod syscall;
 mod task;
 mod user;
 
+use crate::addr::*;
+use crate::arch::PageTableEntry;
 use crate::kobj::*;
 use crate::multilevel::*;
-use crate::paging::{PageTableObject, RootPageTable};
+use crate::paging::{PageTableLevel, PageTableMto, PageTableObject};
 use bootloader::BootInfo;
 use capability::{
     CapabilityEndpointObject, CapabilitySet, CapabilityTable, CapabilityTableNode,
@@ -47,7 +53,6 @@ use core::ptr::NonNull;
 use kobj::KernelObject;
 use serial::with_serial_port;
 use task::Task;
-use x86_64::{structures::paging::PageTable, VirtAddr};
 
 lazy_static! {
     // These values can only be used after paging is initialized.
@@ -60,24 +65,24 @@ lazy_static! {
             CAP_ROOT.write(Level {
                 table: ManuallyDrop::new(CapabilityTableNode::new_table()),
             });
-            let cap_table = CapabilityTable::new(NonNull::new(CAP_ROOT.as_mut_ptr()).unwrap(), VirtAddr::new(0));
+            let cap_table = CapabilityTable::new(NonNull::new(CAP_ROOT.as_mut_ptr()).unwrap(), UserAddr(0));
             (*KOBJ.as_mut_ptr()).write(CapabilitySet(cap_table));
-            (*KOBJ.as_mut_ptr()).init(&*ROOT_KOBJ, VirtAddr::new(0), false).unwrap();
+            (*KOBJ.as_mut_ptr()).init(&*ROOT_KOBJ, UserAddr(0), false).unwrap();
             &*KOBJ.as_ptr()
         };
         kobj.get_ref()
     };
     static ref ROOT_PT_OBJECT: KernelObjectRef<PageTableObject> = {
-        static mut PT: MaybeUninit<RootPageTable> = MaybeUninit::uninit();
-        let pt = unsafe {
-            PT.write(RootPageTable::new(PageTable::new()));
-            &mut *PT.as_mut_ptr()
-        };
-
         static mut KOBJ: MaybeUninit<KernelObject<PageTableObject>> = MaybeUninit::uninit();
+        static mut PT_ROOT: MaybeUninit<PageTableLevel> = MaybeUninit::uninit();
+
         let kobj = unsafe {
-            (*KOBJ.as_mut_ptr()).write(PageTableObject::new(pt));
-            (*KOBJ.as_mut_ptr()).init(&*ROOT_KOBJ, VirtAddr::new(0), false).unwrap();
+            PT_ROOT.write(Level {
+                table: ManuallyDrop::new(PageTableEntry::new_table()),
+            });
+            let pt = PageTableMto::new(NonNull::new(PT_ROOT.as_mut_ptr()).unwrap(), UserAddr(0));
+            (*KOBJ.as_mut_ptr()).write(PageTableObject(pt));
+            (*KOBJ.as_mut_ptr()).init(&*ROOT_KOBJ, UserAddr(0), false).unwrap();
             &*KOBJ.as_ptr()
         };
         kobj.get_ref()
@@ -85,8 +90,8 @@ lazy_static! {
     static ref ROOT_TASK: KernelObjectRef<Task> = {
         static mut TASK: MaybeUninit<KernelObject<Task>> = MaybeUninit::uninit();
         let task = unsafe {
-            (*TASK.as_mut_ptr()).write(Task::new_initial(VirtAddr::new(exception::KERNEL_STACK_END), ROOT_PT_OBJECT.clone(), ROOT_CAPSET.clone()));
-            (*TASK.as_mut_ptr()).init(&*ROOT_KOBJ, VirtAddr::new(0), false).unwrap();
+            (*TASK.as_mut_ptr()).write(Task::new_initial(VirtAddr(exception::KERNEL_STACK_END), ROOT_PT_OBJECT.clone(), ROOT_CAPSET.clone()));
+            (*TASK.as_mut_ptr()).init(&*ROOT_KOBJ, UserAddr(0), false).unwrap();
             &*TASK.as_ptr()
         };
         task.get_ref()
@@ -108,13 +113,8 @@ pub extern "C" fn kstart(boot_info: &'static BootInfo) -> ! {
         task::init();
         syscall::init();
         exception::init_interrupts();
-    }
 
-    ROOT_PT_OBJECT.with(|x| {
-        crate::paging::make_root_page_table(unsafe { crate::paging::active_level_4_table() }, x);
-    });
-
-    unsafe {
+        ROOT_PT_OBJECT.copy_kernel_range_from_level(&mut *crate::paging::_active_level_4_table());
         setup_initial_caps();
     }
 

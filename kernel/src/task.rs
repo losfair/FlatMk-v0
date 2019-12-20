@@ -1,29 +1,18 @@
+use crate::addr::*;
+use crate::arch::{arch_set_current_page_table, tlb, PAGE_SIZE, PAGE_TABLE_LEVELS};
 use crate::capability::{CapabilityEndpoint, CapabilitySet};
 use crate::error::*;
 use crate::kobj::*;
-use crate::paging::{PageTableObject, RootPageTable};
+use crate::paging::{PageTableLevel, PageTableObject};
 use crate::serial::with_serial_port;
 use bootloader::bootinfo::MemoryRegionType;
 use core::cell::{Cell, UnsafeCell};
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
-use x86_64::{
-    registers::{
-        control::{Cr3, Cr3Flags},
-        model_specific::GsBase,
-        rflags::RFlags,
-    },
-    structures::paging::{
-        frame::PhysFrame,
-        page_table::{PageTableEntry, PageTableFlags},
-        PageTable,
-    },
-    PhysAddr, VirtAddr,
-};
+use x86_64::registers::{model_specific::GsBase, rflags::RFlags};
 
 pub const ROOT_TASK_FULL_MAP_BASE: u64 = 0x20000000u64;
-pub const PAGE_SIZE: u64 = 4096;
 
 static ROOT_IMAGE: &'static [u8] =
     include_bytes!("../../user/init/target/x86_64-flatmk/release/init");
@@ -57,7 +46,7 @@ pub struct LocalState {
     pub kernel_stack: Cell<VirtAddr>,
 
     /// Saved address of the user stack.
-    pub user_stack: Cell<VirtAddr>,
+    pub user_stack: Cell<UserAddr>,
 }
 
 impl LocalState {
@@ -69,7 +58,7 @@ impl LocalState {
                     .kernel_stack
                     .get(),
             ),
-            user_stack: Cell::new(VirtAddr::new(0)),
+            user_stack: Cell::new(UserAddr(0)),
         }
     }
 }
@@ -89,61 +78,6 @@ impl LocalStateWrapper {
 
 unsafe impl Send for LocalStateWrapper {}
 unsafe impl Sync for LocalStateWrapper {}
-
-#[repr(C)]
-pub struct UserPageSet {
-    /// The root page table that owns pages in this UserPageSet.
-    owning_rpt: KernelObjectRef<PageTableObject>,
-
-    /// Number of filled elements in `backing_user`.
-    n_backings: u64,
-
-    /// Virtual addresses of the backing pages in owning_rpt.
-    ///
-    /// u64 is used here instead of VirtAddr because these addresses are not necessarily valid before
-    /// retyping.
-    backing_user: [u64; 256],
-}
-
-impl Retype for UserPageSet {}
-impl Notify for UserPageSet {
-    unsafe fn will_drop(&mut self, _owner: &dyn LikeKernelObject) {
-        for i in 0..self.n_backings {
-            // Already checked in retype().
-            // `owner` can be different from `owning_rpt`.
-            self.owning_rpt
-                .return_user_page(VirtAddr::new_unchecked(self.backing_user[i as usize]));
-        }
-    }
-}
-
-impl UserPageSet {
-    pub unsafe fn retype(
-        &mut self,
-        owning_rpt: KernelObjectRef<PageTableObject>,
-    ) -> KernelResult<()> {
-        if self.n_backings > self.backing_user.len() as u64 {
-            return Err(KernelError::InvalidArgument);
-        }
-
-        owning_rpt.with(|pt| -> KernelResult<()> {
-            for i in 0..self.n_backings {
-                crate::paging::take_from_user(
-                    pt,
-                    VirtAddr::try_new(self.backing_user[i as usize])
-                        .map_err(|_| KernelError::InvalidAddress)?,
-                )?;
-            }
-            Ok(())
-        })?;
-
-        core::ptr::write(&mut self.owning_rpt, owning_rpt);
-        Ok(())
-    }
-}
-
-unsafe impl Send for UserPageSet {}
-unsafe impl Sync for UserPageSet {}
 
 #[repr(C)]
 pub struct Task {
@@ -278,11 +212,11 @@ fn set_current_task(t: KernelObjectRef<Task>) {
 
     // Write the new reference.
     let raw = KernelObjectRef::into_raw(t);
-    GsBase::write(VirtAddr::new(raw as u64));
+    GsBase::write(::x86_64::VirtAddr::new(raw as u64));
 }
 
 pub unsafe fn init() {
-    GsBase::write(VirtAddr::new(0));
+    GsBase::write(::x86_64::VirtAddr::new(0));
     enable_sse();
 }
 
@@ -366,70 +300,38 @@ impl TaskRegisters {
 }
 
 /// This function is unsafe because arbitrary physical memory can be mapped.
-unsafe fn make_user_continuous_map<I: Iterator<Item = PhysFrame>>(
+unsafe fn make_user_continuous_map<I: Iterator<Item = PhysAddr>>(
     region: I,
-    mut vaddr: VirtAddr,
-    root: &mut RootPageTable,
+    mut uaddr: UserAddr,
+    root: &PageTableObject,
 ) -> u64 {
     let mut count: u64 = 0;
     for page_phys in region {
-        let page_phys = page_phys.start_address();
-        let page_virt = vaddr;
-
-        // Kernel memory should not be remapped.
-        if u16::from(page_virt.p4_index()) >= 256 {
+        if uaddr.validate().is_err() {
             return count;
         }
 
-        let mut entry = &mut root[u16::from(page_virt.p4_index()) as usize];
-        let mut reached_leaf = false;
-        {
-            if !entry.is_unused() {
-                entry = &mut (*crate::paging::phys_to_virt(entry.addr()).as_mut_ptr::<PageTable>())
-                    [u16::from(page_virt.p3_index()) as usize];
-                if !entry.is_unused() {
-                    entry = &mut (*crate::paging::phys_to_virt(entry.addr())
-                        .as_mut_ptr::<PageTable>())
-                        [u16::from(page_virt.p2_index()) as usize];
-                    if !entry.is_unused() {
-                        entry = &mut (*crate::paging::phys_to_virt(entry.addr())
-                            .as_mut_ptr::<PageTable>())
-                            [u16::from(page_virt.p1_index()) as usize];
-                        reached_leaf = true;
-                    }
-                }
+        let page_virt = VirtAddr::from_phys(page_phys);
+        for b in (*page_virt.as_mut_ptr::<[u8; PAGE_SIZE]>()).iter_mut() {
+            *b = 0;
+        }
+
+        root.0.lookup_entry(uaddr.0, |depth, entry| {
+            entry.set_addr_rw(page_phys);
+            entry.set_user_accessible(true);
+
+            if depth == PAGE_TABLE_LEVELS - 1 {
+                uaddr.0 += PAGE_SIZE as u64;
+                count += 1;
             }
-        }
-        entry.set_addr(
-            page_phys,
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
-        );
-        {
-            let page = &mut *crate::paging::phys_to_virt(page_phys)
-                .as_mut_ptr::<[u8; PAGE_SIZE as usize]>();
-            for b in page.iter_mut() {
-                *b = 0;
-            }
-        }
-        if reached_leaf {
-            vaddr += PAGE_SIZE;
-            count += 1;
-        }
+        });
     }
     count
 }
 
-impl Retype for Task {
-    unsafe fn retype_in_place(&mut self) -> KernelResult<()> {
-        Err(KernelError::NotImplemented)
-    }
-}
+impl Retype for Task {}
 
-impl Notify for Task {
-    unsafe fn return_user_page(&self, addr: VirtAddr) {
-        self.page_table_root.get().return_user_page(addr);
-    }
-}
+impl Notify for Task {}
 
 impl Task {
     /// Creates a new initial task for the current CPU.
@@ -442,7 +344,7 @@ impl Task {
         Task {
             local_state: LocalStateWrapper(UnsafeCell::new(LocalState {
                 kernel_stack: Cell::new(kernel_stack),
-                user_stack: Cell::new(VirtAddr::new(0)),
+                user_stack: Cell::new(UserAddr(0)),
             })),
             page_table_root: AtomicKernelObjectRef::new(page_table_root),
             capabilities: AtomicKernelObjectRef::new(cap_root),
@@ -460,34 +362,32 @@ impl Task {
         let num_pages_mapped = {
             let phys_mappings = &crate::boot::boot_info().memory_map;
 
-            self.page_table_root.get().with(|pt_root| {
-                let phys_iterator = phys_mappings
-                    .iter()
-                    .filter_map(|x| match x.region_type {
-                        MemoryRegionType::Usable | MemoryRegionType::Bootloader => Some(
-                            (x.range.start_addr()..x.range.end_addr())
-                                .step_by(PAGE_SIZE as _)
-                                .map(|x| PhysFrame::from_start_address(PhysAddr::new(x)).unwrap()),
-                        ),
-                        _ => None,
-                    })
-                    .flatten();
-                unsafe {
-                    make_user_continuous_map(
-                        phys_iterator,
-                        VirtAddr::new(ROOT_TASK_FULL_MAP_BASE),
-                        pt_root,
-                    )
-                }
-            })
+            let phys_iterator = phys_mappings
+                .iter()
+                .filter_map(|x| match x.region_type {
+                    MemoryRegionType::Usable | MemoryRegionType::Bootloader => Some(
+                        (x.range.start_addr()..x.range.end_addr())
+                            .step_by(PAGE_SIZE as _)
+                            .map(|x| PhysAddr(x)),
+                    ),
+                    _ => None,
+                })
+                .flatten();
+            unsafe {
+                make_user_continuous_map(
+                    phys_iterator,
+                    UserAddr(ROOT_TASK_FULL_MAP_BASE),
+                    &self.page_table_root.get(),
+                )
+            }
         };
-        x86_64::instructions::tlb::flush_all();
+        tlb::flush_all();
         with_serial_port(|p| writeln!(p, "Mapped {} pages.", num_pages_mapped).unwrap());
 
         let user_view = unsafe {
             core::slice::from_raw_parts_mut(
                 ROOT_TASK_FULL_MAP_BASE as *mut u8,
-                (num_pages_mapped * PAGE_SIZE) as usize,
+                (num_pages_mapped * (PAGE_SIZE as u64)) as usize,
             )
         };
         match crate::elf::load(ROOT_IMAGE, user_view, ROOT_TASK_FULL_MAP_BASE) {
@@ -583,151 +483,39 @@ pub unsafe fn retype_user_with<
 >(
     current: &KernelObjectRef<PageTableObject>,
     owner: K,
-    vaddr: VirtAddr,
+    uaddr: UserAddr,
     retyper: Option<F>,
 ) -> KernelResult<KernelObjectRef<T>> {
-    if !vaddr.is_aligned(PAGE_SIZE) {
-        return Err(KernelError::InvalidDelegation);
-    }
-
-    let kvaddr = current.with(|current| crate::paging::take_from_user(current, vaddr))?;
+    let kvaddr = current.take_from_user(uaddr)?;
     let maybe_value = kvaddr.as_mut_ptr::<KernelObject<T>>();
     let owner = owner.into();
 
     let result = if let Some(retyper) = retyper {
-        (*maybe_value).init_with(owner.get(), vaddr, retyper)
+        (*maybe_value).init_with(owner.get(), uaddr, retyper)
     } else {
-        (*maybe_value).init(owner.get(), vaddr, true)
+        (*maybe_value).init(owner.get(), uaddr, true)
     };
     match result {
         Ok(_) => Ok((*maybe_value).get_ref()),
         Err(e) => {
-            match current.with(|current| crate::paging::put_to_user(current, kvaddr)) {
-                _ => {}
-            }
+            drop(current.put_to_user(uaddr));
             Err(e)
         }
     }
 }
 
-pub fn retype_user<T: Retype + Notify + Send + Sync + 'static, K: Into<LikeKernelObjectRef>>(
-    current: &KernelObjectRef<PageTableObject>,
-    owner: K,
-    vaddr: VirtAddr,
-) -> KernelResult<KernelObjectRef<T>> {
-    unsafe { retype_user_with::<_, _, fn(&mut T) -> KernelResult<()>>(current, owner, vaddr, None) }
-}
-
-impl Retype for PageTable {
-    unsafe fn retype_in_place(&mut self) -> KernelResult<()> {
-        core::ptr::write(self, core::mem::zeroed());
-        Ok(())
-    }
-}
-
-/// This function is unsafe because the caller needs to guarantee that `pt` is an L4 page table.
-unsafe fn lookup_pt_entry<'a, 'b>(
-    mut pt: &'a mut PageTable,
-    vaddr: VirtAddr,
-) -> Option<&'a mut PageTableEntry> {
-    let indexes: [usize; 3] = [
-        u16::from(vaddr.p4_index()) as usize,
-        u16::from(vaddr.p3_index()) as usize,
-        u16::from(vaddr.p2_index()) as usize,
-    ];
-    for &index in indexes.iter() {
-        if pt[index].is_unused() {
-            return None;
-        }
-        let virt = crate::paging::phys_to_virt(pt[index].addr());
-        pt = &mut *virt.as_mut_ptr::<PageTable>();
-    }
-    return Some(&mut pt[u16::from(vaddr.p1_index()) as usize]);
-}
-
-pub unsafe fn map_physical_page_into_user(
-    current_root: &mut PageTable,
-    target_vaddr: VirtAddr,
-    phys: PhysAddr,
-    flags: PageTableFlags,
-) -> KernelResult<()> {
-    if u16::from(target_vaddr.p4_index()) >= 256 || !target_vaddr.is_aligned(PAGE_SIZE) {
-        return Err(KernelError::InvalidArgument);
-    }
-    let entry = if let Some(x) = lookup_pt_entry(current_root, target_vaddr) {
-        x
-    } else {
-        return Err(KernelError::InvalidAddress);
-    };
-    entry.set_addr(phys, flags);
-    Ok(())
-}
-
-/// Takes a page from userspace and uses it as the "next"
-/// level of page table needed for `target_vaddr`.
-pub fn retype_page_table_from_user(
-    current_root: &mut RootPageTable,
-    target_vaddr: VirtAddr,
-    user_page: VirtAddr,
-) -> KernelResult<u8> {
-    if u16::from(target_vaddr.p4_index()) >= 256 || !target_vaddr.is_aligned(PAGE_SIZE) {
-        return Err(KernelError::InvalidArgument);
-    }
-
-    let kvaddr = crate::paging::take_from_user(current_root, user_page)?;
-    let kmap = kvaddr.as_mut_ptr::<[u8; PAGE_SIZE as usize]>();
-    let phys = crate::paging::virt_to_phys(current_root, VirtAddr::new(kvaddr.as_u64()))?;
-
-    let mut pt = &mut **current_root;
-    let indexes: [usize; 3] = [
-        u16::from(target_vaddr.p4_index()) as usize,
-        u16::from(target_vaddr.p3_index()) as usize,
-        u16::from(target_vaddr.p2_index()) as usize,
-    ];
-    for (i, &index) in indexes.iter().enumerate() {
-        if pt[index].is_unused() {
-            unsafe {
-                for b in (*kmap).iter_mut() {
-                    *b = 0;
-                }
-            }
-            pt[index].set_addr(
-                phys,
-                PageTableFlags::PRESENT
-                    | PageTableFlags::WRITABLE
-                    | PageTableFlags::USER_ACCESSIBLE,
-            );
-            return Ok((3 - i) as u8); // in range 1..=3
-        } else {
-            let virt = crate::paging::phys_to_virt(pt[index].addr());
-            pt = unsafe { &mut *virt.as_mut_ptr::<PageTable>() };
-        }
-    }
-    unsafe {
-        crate::paging::put_to_user(current_root, kvaddr)?;
-    }
-    Ok(0)
-}
-
 pub fn switch_to(task: KernelObjectRef<Task>) -> KernelResult<()> {
-    let pt_root: *const PageTable = task.page_table_root.get().with(|x| x as *mut _ as *const _);
+    let root = task.page_table_root.get();
+    let root_level: VirtAddr = root
+        .0
+        .with_root(|x: &mut PageTableLevel| VirtAddr::from_ref(x));
 
     task.running
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .map_err(|_| KernelError::InvalidState)?;
     set_current_task(task);
     unsafe {
-        Cr3::write(
-            PhysFrame::from_start_address(
-                crate::paging::virt_to_phys(
-                    crate::paging::active_level_4_table(),
-                    VirtAddr::new(pt_root as u64),
-                )
-                .unwrap(),
-            )
-            .unwrap(),
-            Cr3Flags::empty(),
-        )
+        arch_set_current_page_table(PhysAddr::from_virt(&*root, root_level).unwrap());
     };
 
     Ok(())

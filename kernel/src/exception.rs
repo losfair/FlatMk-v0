@@ -12,7 +12,7 @@ use x86_64::{
         idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
         tss::TaskStateSegment,
     },
-    PrivilegeLevel, VirtAddr,
+    PrivilegeLevel,
 };
 
 // XXX: Keep this consistent with Cargo.toml
@@ -51,10 +51,10 @@ pub unsafe fn init_gdt() {
     GDT = Some(GlobalDescriptorTable::new());
     let gdt = GDT.as_mut().unwrap();
 
-    TSS.privilege_stack_table[0] = VirtAddr::new(KERNEL_STACK_END);
+    TSS.privilege_stack_table[0] = ::x86_64::VirtAddr::new(KERNEL_STACK_END);
     TSS.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
         static mut STACK: [u8; 65536] = [0; 65536];
-        let stack_start = VirtAddr::from_ptr(&STACK);
+        let stack_start = ::x86_64::VirtAddr::from_ptr(&STACK);
         let stack_end = stack_start + STACK.len();
         stack_end
     };

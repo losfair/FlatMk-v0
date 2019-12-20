@@ -1,10 +1,10 @@
 //! Reference-counted kernel objects.
 
+use crate::addr::*;
 use crate::error::*;
 use core::cell::UnsafeCell;
 use core::ops::Deref;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
-use x86_64::VirtAddr;
 
 const PAGE_SIZE: u64 = 4096;
 
@@ -16,7 +16,7 @@ pub unsafe trait LikeKernelObject {
     unsafe fn dec_ref(&self);
 
     /// Releases a page taken from userspace, recursively.
-    unsafe fn return_user_page(&self, addr: VirtAddr);
+    unsafe fn return_user_page(&self, addr: UserAddr);
 
     /// Returns number of references to this kernel object.
     fn count_ref(&self) -> usize;
@@ -26,7 +26,7 @@ pub struct RootKernelObject;
 unsafe impl LikeKernelObject for RootKernelObject {
     fn inc_ref(&self) {}
     unsafe fn dec_ref(&self) {}
-    unsafe fn return_user_page(&self, _addr: VirtAddr) {}
+    unsafe fn return_user_page(&self, _addr: UserAddr) {}
     fn count_ref(&self) -> usize {
         1
     }
@@ -39,7 +39,7 @@ pub trait Retype: Sized {
 }
 
 pub trait Notify {
-    unsafe fn return_user_page(&self, _addr: VirtAddr) {}
+    unsafe fn return_user_page(&self, _addr: UserAddr) {}
     unsafe fn will_drop(&mut self, _owner: &dyn LikeKernelObject) {}
 }
 
@@ -173,7 +173,7 @@ pub struct KernelObject<T: Retype + Notify + Send + Sync + 'static> {
     value: UnsafeCell<T>,
     owner: &'static dyn LikeKernelObject,
     refcount: AtomicU64,
-    uaddr: VirtAddr,
+    uaddr: UserAddr,
 }
 
 /// For all immutable self references, `value` is only used immutably.
@@ -195,13 +195,11 @@ impl<T: Retype + Notify + Send + Sync + 'static> KernelObject<T> {
     pub unsafe fn init_with<F: FnOnce(&mut T) -> KernelResult<()>>(
         &mut self,
         owner: &dyn LikeKernelObject,
-        uaddr: VirtAddr,
+        uaddr: UserAddr,
         retyper: F,
     ) -> KernelResult<()> {
         // Validate address properties.
-        if core::mem::size_of::<Self>() > PAGE_SIZE as usize
-            || !VirtAddr::new(self as *mut _ as u64).is_aligned(PAGE_SIZE)
-        {
+        if core::mem::size_of::<Self>() > PAGE_SIZE as usize {
             return Err(KernelError::InvalidDelegation);
         }
 
@@ -224,7 +222,7 @@ impl<T: Retype + Notify + Send + Sync + 'static> KernelObject<T> {
     pub fn init(
         &mut self,
         owner: &dyn LikeKernelObject,
-        uaddr: VirtAddr,
+        uaddr: UserAddr,
         retype: bool,
     ) -> KernelResult<()> {
         unsafe {
@@ -291,7 +289,7 @@ unsafe impl<T: Retype + Notify + Send + Sync + 'static> LikeKernelObject for Ker
         }
     }
 
-    unsafe fn return_user_page(&self, addr: VirtAddr) {
+    unsafe fn return_user_page(&self, addr: UserAddr) {
         self.value().return_user_page(addr);
     }
 

@@ -26,6 +26,8 @@ pub enum KernelError {
     WouldBlock = -10,
     /// An empty capability is invoked.
     EmptyCapability = -11,
+    /// A race condition is detected.
+    RaceRetry = -12,
 }
 
 pub type KernelResult<T> = Result<T, KernelError>;

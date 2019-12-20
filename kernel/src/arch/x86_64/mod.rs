@@ -1,1 +1,4 @@
-pub const PAGE_SIZE: usize = 4096;
+mod page_table;
+pub mod tlb;
+
+pub use page_table::*;

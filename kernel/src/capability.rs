@@ -1,10 +1,11 @@
+use crate::addr::*;
 use crate::error::*;
 use crate::kobj::*;
 use crate::multilevel::*;
-use crate::paging::{phys_to_virt, virt_to_phys, PageTableObject};
-use crate::task::{
-    retype_user_with, IpcEntry, Task, TaskFaultState, TaskRegisters, UserPageSet, PAGE_SIZE,
-};
+use crate::paging::PageTableObject;
+
+use crate::arch::tlb;
+use crate::task::{retype_user_with, IpcEntry, Task, TaskFaultState, TaskRegisters};
 use core::convert::TryFrom;
 use core::mem::ManuallyDrop;
 use core::mem::MaybeUninit;
@@ -12,7 +13,6 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU64, Ordering};
 use num_enum::TryFromPrimitive;
 use spin::Mutex;
-use x86_64::{instructions::tlb, structures::paging::PageTableFlags, PhysAddr, VirtAddr};
 
 pub const N_ENDPOINT_SLOTS: usize = 32;
 pub const INVALID_CAP: u64 = core::u64::MAX;
@@ -45,7 +45,7 @@ impl CapabilityInvocation {
 pub struct CapabilityTableNode {
     pub next: Option<NonNull<Level<LockedCapabilityEndpointSet, CapabilityTableNode, 128>>>,
     pub owner: Option<KernelObjectRef<PageTableObject>>,
-    pub uaddr: u64,
+    pub uaddr: UserAddr,
 }
 
 unsafe impl Send for CapabilityTableNode {}
@@ -76,8 +76,8 @@ impl DefaultUser<LockedCapabilityEndpointSet, CapabilityTableNode, 128> for Capa
     unsafe fn default_user(
         mut kref: NonNull<Level<LockedCapabilityEndpointSet, CapabilityTableNode, 128>>,
         leaf: bool,
-        owner: KernelObjectRef<crate::paging::PageTableObject>,
-        uaddr: VirtAddr,
+        owner: KernelObjectRef<PageTableObject>,
+        uaddr: UserAddr,
     ) -> KernelResult<Self> {
         if leaf {
             kref.as_mut().value = ManuallyDrop::new(LockedCapabilityEndpointSet::new());
@@ -87,7 +87,7 @@ impl DefaultUser<LockedCapabilityEndpointSet, CapabilityTableNode, 128> for Capa
         Ok(CapabilityTableNode {
             next: Some(kref),
             owner: Some(owner),
-            uaddr: uaddr.as_u64(),
+            uaddr: uaddr,
         })
     }
 }
@@ -95,13 +95,11 @@ impl DefaultUser<LockedCapabilityEndpointSet, CapabilityTableNode, 128> for Capa
 impl Drop for CapabilityTableNode {
     fn drop(&mut self) {
         if let Some(owner) = self.owner.take() {
-            if self.uaddr != 0 {
-                if let Ok(uaddr) = VirtAddr::try_new(self.uaddr) {
-                    unsafe {
-                        LikeKernelObjectRef::from(owner)
-                            .get()
-                            .return_user_page(uaddr);
-                    }
+            if self.uaddr.0 != 0 {
+                unsafe {
+                    LikeKernelObjectRef::from(owner)
+                        .get()
+                        .return_user_page(self.uaddr);
                 }
             }
         }
@@ -157,7 +155,6 @@ pub enum CapabilityEndpointObject {
     X86IoPort(u16),
     Mmio(CapMmio),
     RootPageTable(KernelObjectRef<PageTableObject>),
-    UserPageSet(KernelObjectRef<UserPageSet>),
     IpcEndpoint(CapIpcEndpoint),
     CapabilitySet(KernelObjectRef<CapabilitySet>),
 }
@@ -255,9 +252,6 @@ impl CapabilityEndpointObject {
             CapabilityEndpointObject::RootPageTable(pt) => {
                 invoke_cap_root_page_table(invocation, pt)
             }
-            CapabilityEndpointObject::UserPageSet(buffer) => {
-                invoke_cap_user_page_set(invocation, buffer)
-            }
             CapabilityEndpointObject::IpcEndpoint(endpoint) => {
                 invoke_cap_ipc_endpoint(invocation, endpoint)
             }
@@ -318,8 +312,7 @@ fn invoke_cap_basic_task(
                 retype_user_with(
                     &current_root,
                     current_root.clone(),
-                    VirtAddr::try_new(invocation.arg(2)? as u64)
-                        .map_err(|_| KernelError::InvalidAddress)?,
+                    UserAddr(invocation.arg(2)? as u64),
                     Some(|new_task: &mut Task| {
                         core::ptr::write(new_task, task.deep_clone());
                         Ok(())
@@ -352,57 +345,14 @@ fn invoke_cap_basic_task(
                 })?;
             Ok(0)
         }
-        BasicTaskRequest::GetRegister => {
-            let field_index = invocation.arg(1)? as usize;
-            let return_uvaddr = VirtAddr::try_new(invocation.arg(2)? as u64)
-                .map_err(|_| KernelError::InvalidAddress)?;
-
-            // Here we may read a "partial" value, but anyway it's memory safe,
-            let value = *task.registers.lock().field_mut(field_index)?;
-
-            current.page_table_root.get().with(|pt| {
-                let return_kvaddr = phys_to_virt(virt_to_phys(pt, return_uvaddr)?).as_u64();
-                // Must be aligned.
-                if return_kvaddr % 8 != 0 {
-                    return Err(KernelError::InvalidAddress);
-                }
-                let return_kptr = return_kvaddr as *mut u64;
-                unsafe {
-                    *return_kptr = value;
-                }
-                Ok(())
-            })?;
-            Ok(0)
-        }
+        BasicTaskRequest::GetRegister => Err(KernelError::NotImplemented),
         BasicTaskRequest::SetRegister => {
             let field_index = invocation.arg(1)? as usize;
             let new_value = invocation.arg(2)? as u64;
             *task.registers.lock().field_mut(field_index)? = new_value;
             Ok(0)
         }
-        BasicTaskRequest::FetchNewUserPageSet => {
-            let cptr = CapPtr(invocation.arg(1)? as u64);
-            let buf_object = VirtAddr::try_new(invocation.arg(2)? as u64)
-                .map_err(|_| KernelError::InvalidAddress)?;
-            let current_root = current.page_table_root.get();
-            let delegation: KernelObjectRef<UserPageSet> = unsafe {
-                retype_user_with(
-                    &current_root,
-                    current_root.clone(),
-                    buf_object,
-                    Some(|buf_object: &mut UserPageSet| {
-                        buf_object.retype(task.page_table_root.get())
-                    }),
-                )?
-            };
-            current
-                .capabilities
-                .get()
-                .entry_endpoint(cptr, |endpoint| {
-                    endpoint.object = CapabilityEndpointObject::UserPageSet(delegation);
-                })?;
-            Ok(0)
-        }
+        BasicTaskRequest::FetchNewUserPageSet => Err(KernelError::NotImplemented),
         BasicTaskRequest::FetchIpcEndpoint => {
             let cptr = CapPtr(invocation.arg(1)? as u64);
             let entry_pc = invocation.arg(2)? as u64;
@@ -484,10 +434,8 @@ fn invoke_cap_basic_task(
         BasicTaskRequest::MakeCapSet => {
             let current_root = current.page_table_root.get();
             let cptr = CapPtr(invocation.arg(1)? as u64);
-            let obj_delegation = VirtAddr::try_new(invocation.arg(2)? as u64)
-                .map_err(|_| KernelError::InvalidAddress)?;
-            let root_delegation = VirtAddr::try_new(invocation.arg(3)? as u64)
-                .map_err(|_| KernelError::InvalidAddress)?;
+            let obj_delegation = UserAddr(invocation.arg(2)? as u64);
+            let root_delegation = UserAddr(invocation.arg(3)? as u64);
             let delegation: KernelObjectRef<CapabilitySet> = unsafe {
                 retype_user_with(
                     &current_root,
@@ -538,11 +486,7 @@ fn invoke_cap_root_task(invocation: &CapabilityInvocation) -> KernelResult<i64> 
         }
         RootTaskCapRequest::Mmio => {
             let cptr = CapPtr(invocation.arg(1)? as u64);
-            let phys_addr = PhysAddr::new(invocation.arg(2)? as u64);
-
-            if !phys_addr.is_aligned(PAGE_SIZE) {
-                return Err(KernelError::NotAligned);
-            }
+            let phys_addr = PhysAddr(invocation.arg(2)? as u64);
 
             current
                 .capabilities
@@ -588,51 +532,22 @@ fn invoke_cap_root_page_table(
     invocation: &CapabilityInvocation,
     pt: KernelObjectRef<PageTableObject>,
 ) -> KernelResult<i64> {
-    let target_vaddr =
-        VirtAddr::try_new(invocation.arg(0)? as u64).map_err(|_| KernelError::InvalidAddress)?;
-    let user_page =
-        VirtAddr::try_new(invocation.arg(1)? as u64).map_err(|_| KernelError::InvalidAddress)?;
+    let current = Task::current();
+    let target = UserAddr(invocation.arg(0)? as u64);
+    let user_page = UserAddr(invocation.arg(1)? as u64);
 
-    pt.with(|pt| crate::task::retype_page_table_from_user(pt, target_vaddr, user_page))
-        .map(|x| x as i64)
+    let leaf = pt.build_from_user(target, current.page_table_root.get(), user_page)?;
+    Ok(if leaf { 1 } else { 0 })
 }
 
 fn invoke_cap_mmio(invocation: &CapabilityInvocation, mmio: CapMmio) -> KernelResult<i64> {
-    let target_vaddr =
-        VirtAddr::try_new(invocation.arg(0)? as u64).map_err(|_| KernelError::InvalidAddress)?;
-
-    mmio.page_table.with(|pt| unsafe {
-        crate::task::map_physical_page_into_user(
-            pt,
-            target_vaddr,
-            mmio.page_addr,
-            PageTableFlags::PRESENT
-                | PageTableFlags::WRITABLE
-                | PageTableFlags::NO_EXECUTE
-                | PageTableFlags::USER_ACCESSIBLE
-                | PageTableFlags::NO_CACHE,
-        )
-    })?;
-    tlb::flush(target_vaddr);
+    let target = UserAddr(invocation.arg(0)? as u64);
+    unsafe {
+        mmio.page_table
+            .map_physical_page_for_user(target, mmio.page_addr)?;
+    }
+    tlb::flush(target);
     Ok(0)
-}
-
-fn invoke_cap_user_page_set(
-    invocation: &CapabilityInvocation,
-    _buffer: KernelObjectRef<UserPageSet>,
-) -> KernelResult<i64> {
-    #[repr(u32)]
-    #[derive(Debug, Copy, Clone, TryFromPrimitive)]
-    enum UserPageSetCapRequest {
-        Map = 0,
-    }
-
-    //let current = Task::current();
-    let req = UserPageSetCapRequest::try_from(invocation.arg(0)? as u32)?;
-
-    match req {
-        UserPageSetCapRequest::Map => Err(KernelError::NotImplemented),
-    }
 }
 
 #[repr(u32)]
@@ -785,8 +700,7 @@ fn invoke_cap_capability_set(
     match req {
         CapSetRequest::Map => {
             let ptr = invocation.arg(1)? as u64;
-            let uaddr = VirtAddr::try_new(invocation.arg(2)? as u64)
-                .map_err(|_| KernelError::InvalidAddress)?;
+            let uaddr = UserAddr(invocation.arg(2)? as u64);
             let leaf = set
                 .0
                 .build_from_user(ptr, current.page_table_root.get(), uaddr)?;

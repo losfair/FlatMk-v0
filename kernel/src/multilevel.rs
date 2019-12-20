@@ -1,14 +1,13 @@
 //! Multilevel table objects.
 
+use crate::addr::*;
 use crate::arch;
 use crate::error::*;
 use crate::kobj::*;
-use crate::paging::phys_to_virt;
+use crate::paging::PageTableObject;
 use core::mem::ManuallyDrop;
 use core::ptr::NonNull;
 use spin::Mutex;
-use x86_64::structures::paging::page_table::PageTableEntry;
-use x86_64::VirtAddr;
 
 /// A multilevel table object (MTO) is an abstraction for pagetable-like structures and is used
 /// for page tables and capability tables.
@@ -21,7 +20,7 @@ pub struct MultilevelTableObject<
     const TABLE_SIZE: usize,
 > {
     root: Mutex<NonNull<Level<T, P, TABLE_SIZE>>>,
-    root_uaddr: VirtAddr,
+    root_uaddr: UserAddr,
 }
 
 unsafe impl<
@@ -54,6 +53,75 @@ pub union Level<T: Send, P: AsLevel<T, TABLE_SIZE> + Send, const TABLE_SIZE: usi
     pub value: ManuallyDrop<T>,
 }
 
+impl<T: Send, P: AsLevel<T, TABLE_SIZE> + Send, const TABLE_SIZE: usize> Level<T, P, TABLE_SIZE> {
+    /// Looks up an entry by a pointer.
+    ///
+    /// O(levels).
+    pub unsafe fn lookup_entry<F: FnOnce(u8, &mut P) -> R, R>(
+        &mut self,
+        ptr: u64,
+        levels: u8,
+        start_bit: u8,
+        bits: u8,
+        cb: F,
+    ) -> R {
+        assert!(levels > 0);
+        let mut current = NonNull::from(self);
+
+        for i in 0..levels {
+            let index = ptr_to_index(ptr, i, start_bit, bits);
+            let entry = &mut current.as_mut().table[index];
+            if i == levels - 1 {
+                return cb(i, entry);
+            }
+            current = match entry.as_level() {
+                Some(x) => x,
+                None => return cb(i, entry),
+            }
+        }
+
+        unreachable!()
+    }
+
+    pub unsafe fn lookup_leaf_entry<F: FnOnce(&mut P) -> R, R>(
+        &mut self,
+        ptr: u64,
+        levels: u8,
+        start_bit: u8,
+        bits: u8,
+        cb: F,
+    ) -> Option<R> {
+        self.lookup_entry(ptr, levels, start_bit, bits, |depth, entry| {
+            if depth == levels - 1 {
+                Some(cb(entry))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Convenience function for looking up a leaf entry. Internally calls `lookup_entry`.
+    pub unsafe fn lookup<F: FnOnce(&mut T) -> R, R>(
+        &mut self,
+        ptr: u64,
+        levels: u8,
+        start_bit: u8,
+        bits: u8,
+        cb: F,
+    ) -> Option<R> {
+        Some(self.lookup_leaf_entry(
+            ptr,
+            levels,
+            start_bit,
+            bits,
+            |entry| match entry.as_level() {
+                Some(mut x) => Some(cb(&mut *x.as_mut().value)),
+                None => None,
+            },
+        )??)
+    }
+}
+
 /// The entry type in a MTO must implement the AsLevel trait.
 ///
 /// If the type has a Drop implementation, it should only cleanup the resources associated
@@ -61,15 +129,6 @@ pub union Level<T: Send, P: AsLevel<T, TABLE_SIZE> + Send, const TABLE_SIZE: usi
 /// fields of Level. Recursive cleanup on all levels is managed by the caller.
 pub trait AsLevel<T: Send, const TABLE_SIZE: usize>: Sized + Send {
     fn as_level(&mut self) -> Option<NonNull<Level<T, Self, TABLE_SIZE>>>;
-}
-
-pub type Page = [u8; 4096];
-pub type PageTableObject = MultilevelTableObject<Page, PageTableEntry, 9, 4, 47, 512>;
-
-impl AsLevel<Page, 512> for PageTableEntry {
-    fn as_level(&mut self) -> Option<NonNull<Level<Page, Self, 512>>> {
-        NonNull::new(phys_to_virt(self.addr()).as_mut_ptr())
-    }
 }
 
 impl<
@@ -110,7 +169,7 @@ impl<
             Ok(())
         })
         .unwrap();
-        if self.root_uaddr.as_u64() != 0 {
+        if self.root_uaddr.0 != 0 {
             owner.return_user_page(self.root_uaddr);
         }
     }
@@ -119,7 +178,7 @@ impl<
     /// that both `inner` and `uaddr` are valid.
     ///
     /// If uaddr == 0, no cleanup will be performed on `inner` itself.
-    pub unsafe fn new(inner: NonNull<Level<T, P, TABLE_SIZE>>, uaddr: VirtAddr) -> Self {
+    pub unsafe fn new(inner: NonNull<Level<T, P, TABLE_SIZE>>, uaddr: UserAddr) -> Self {
         Self::check();
         MultilevelTableObject {
             root: Mutex::new(inner),
@@ -129,9 +188,8 @@ impl<
 
     /// Extracts index of a specific level from a pointer.
     #[inline]
-    fn ptr_to_index(ptr: u64, current_level: u8) -> usize {
-        let start = START_BIT + current_level * BITS - 1;
-        ((ptr << (64 - start as usize)) >> (64 - BITS as usize)) as usize
+    pub fn ptr_to_index(ptr: u64, current_level: u8) -> usize {
+        ptr_to_index(ptr, current_level, START_BIT, BITS)
     }
 
     /// Recursive foreach implementation.
@@ -165,37 +223,27 @@ impl<
     ///
     /// O(LEVELS).
     pub fn lookup_entry<F: FnOnce(u8, &mut P) -> R, R>(&self, ptr: u64, cb: F) -> R {
-        let root = self.root.lock();
-        let mut current = *root;
+        let mut root = self.root.lock();
+        unsafe { root.as_mut().lookup_entry(ptr, LEVELS, START_BIT, BITS, cb) }
+    }
 
-        for i in 0..LEVELS {
-            unsafe {
-                let entry = &mut current.as_mut().table[Self::ptr_to_index(ptr, i)];
-                if i == LEVELS - 1 {
-                    return cb(i, entry);
-                }
-                current = match entry.as_level() {
-                    Some(x) => x,
-                    None => return cb(i, entry),
-                }
-            }
+    pub fn lookup_leaf_entry<F: FnOnce(&mut P) -> R, R>(&self, ptr: u64, cb: F) -> Option<R> {
+        let mut root = self.root.lock();
+        unsafe {
+            root.as_mut()
+                .lookup_leaf_entry(ptr, LEVELS, START_BIT, BITS, cb)
         }
-
-        unreachable!()
     }
 
     /// Convenience function for looking up a leaf entry in this MTO. Internally calls `lookup_entry`.
     pub fn lookup<F: FnOnce(&mut T) -> R, R>(&self, ptr: u64, cb: F) -> Option<R> {
-        self.lookup_entry(ptr, |depth, entry| {
-            if depth == LEVELS - 1 {
-                match entry.as_level() {
-                    Some(mut x) => Some(cb(unsafe { &mut *x.as_mut().value })),
-                    None => None,
-                }
-            } else {
-                None
-            }
-        })
+        let mut root = self.root.lock();
+        unsafe { root.as_mut().lookup(ptr, LEVELS, START_BIT, BITS, cb) }
+    }
+
+    pub fn with_root<F: FnOnce(&mut Level<T, P, TABLE_SIZE>) -> R, R>(&self, cb: F) -> R {
+        let mut root = self.root.lock();
+        cb(unsafe { root.as_mut() })
     }
 }
 
@@ -206,8 +254,8 @@ pub trait DefaultUser<T: Send, P: AsLevel<T, TABLE_SIZE> + Send, const TABLE_SIZ
     unsafe fn default_user(
         kref: NonNull<Level<T, P, TABLE_SIZE>>,
         leaf: bool,
-        owner: KernelObjectRef<crate::paging::PageTableObject>,
-        uaddr: VirtAddr,
+        owner: KernelObjectRef<PageTableObject>,
+        uaddr: UserAddr,
     ) -> KernelResult<Self>;
 }
 
@@ -222,10 +270,10 @@ impl<
 {
     /// Creates a MTO with root taken from userspace.
     pub fn new_from_user(
-        owner: &KernelObjectRef<crate::paging::PageTableObject>,
-        uaddr: VirtAddr,
+        owner: &KernelObjectRef<PageTableObject>,
+        uaddr: UserAddr,
     ) -> KernelResult<Self> {
-        let page = owner.with(|pt| crate::paging::take_from_user(pt, uaddr))?;
+        let page = owner.take_from_user(uaddr)?;
         let raw = NonNull::new(page.as_mut_ptr::<Level<T, P, TABLE_SIZE>>()).unwrap();
         unsafe {
             for entry in (*raw.as_ptr()).table.iter_mut() {
@@ -251,30 +299,41 @@ impl<
     pub fn build_from_user(
         &self,
         ptr: u64,
-        owner: KernelObjectRef<crate::paging::PageTableObject>,
-        uaddr: VirtAddr,
+        owner: KernelObjectRef<PageTableObject>,
+        uaddr: UserAddr,
     ) -> KernelResult<bool> {
-        self.lookup_entry(ptr, |depth, entry| {
-            let leaf = if depth == LEVELS - 1 { true } else { false };
-            if uaddr.as_u64() == 0 {
-                return Ok(leaf);
-            }
-
-            let page = owner.with(|pt| crate::paging::take_from_user(pt, uaddr))?;
-            let raw = NonNull::new(page.as_mut_ptr::<Level<T, P, TABLE_SIZE>>()).unwrap();
-            let new_entry = match unsafe { P::default_user(raw, leaf, owner.clone(), uaddr) } {
-                Ok(x) => x,
-                Err(e) => {
-                    owner.with(|pt| {
-                        drop(unsafe { crate::paging::put_to_user(pt, uaddr) });
-                    });
-                    return Err(e);
+        let prev_depth = self.lookup_entry(ptr, |depth, _| depth);
+        let leaf = if prev_depth == LEVELS - 1 {
+            true
+        } else {
+            false
+        };
+        let page = owner.take_from_user(uaddr)?;
+        let raw = NonNull::new(page.as_mut_ptr::<Level<T, P, TABLE_SIZE>>()).unwrap();
+        let result = match unsafe { P::default_user(raw, leaf, owner.clone(), uaddr) } {
+            Ok(new_entry) => self.lookup_entry(ptr, |depth, entry| {
+                if depth != prev_depth {
+                    return Err(KernelError::RaceRetry);
                 }
-            };
-            *entry = new_entry;
-            Ok(leaf)
-        })
+                *entry = new_entry;
+                Ok(())
+            }),
+            Err(e) => Err(e),
+        };
+        match result {
+            Ok(()) => Ok(leaf),
+            Err(e) => {
+                drop(owner.put_to_user(uaddr));
+                Err(e)
+            }
+        }
     }
+}
+
+#[inline]
+fn ptr_to_index(ptr: u64, current_level: u8, start_bit: u8, bits: u8) -> usize {
+    let start = start_bit + 1 - current_level * bits;
+    ((ptr << (64 - start as usize)) >> (64 - bits as usize)) as usize
 }
 
 const fn _check_size(size: usize, limit: usize) {
