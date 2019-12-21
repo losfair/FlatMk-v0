@@ -71,11 +71,7 @@ impl PageTableObject {
         addr.validate()?;
         addr.check_page_alignment()?;
 
-        Ok(self.0.lookup_entry(addr.0, |depth, entry| {
-            if depth != PAGE_TABLE_LEVELS - 1 {
-                return Err(KernelError::InvalidAddress);
-            }
-
+        Ok(self.0.lookup_leaf_entry(addr.0, |entry| {
             match entry.as_level() {
                 Some(x) => {
                     if !entry.is_user_accessible() {
@@ -87,7 +83,7 @@ impl PageTableObject {
                 }
                 None => Err(KernelError::InvalidAddress),
             }
-        })?)
+        })??)
     }
 
     pub fn put_to_user(&self, addr: UserAddr) -> KernelResult<()> {
