@@ -170,13 +170,11 @@ pub unsafe fn arch_enter_user_mode(registers: *const TaskRegisters) -> ! {
 
     asm!(
         r#"
-            mov %cx, %ds
-            mov %cx, %es
             pushq %rcx // ds
             pushq %rcx // ss
             pushq 112(%rsi) // rsp
             pushq 136(%rsi) // rflags
-            pushq %rdx
+            pushq %rdx // cs
             pushq 128(%rsi) // rip
             mov 0(%rsi), %r15
             mov 8(%rsi), %r14
