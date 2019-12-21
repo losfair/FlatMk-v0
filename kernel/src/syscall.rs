@@ -13,7 +13,7 @@ pub unsafe fn init() {
 fn dispatch_syscall(invocation: &mut CapabilityInvocation) -> i64 {
     let cptr = invocation.cptr();
     if cptr.0 == INVALID_CAP {
-        handle_trivial_syscall(invocation)
+        KernelError::InvalidArgument as i32 as i64
     } else {
         let cap = {
             let task = Task::current();
@@ -38,8 +38,4 @@ extern "C" fn syscall_entry(invocation: &mut CapabilityInvocation) -> ! {
     unsafe {
         crate::arch::task::arch_enter_user_mode_syscall(&invocation.registers);
     }
-}
-
-fn handle_trivial_syscall(_invocation: &mut CapabilityInvocation) -> i64 {
-    KernelError::InvalidArgument as i32 as i64
 }
