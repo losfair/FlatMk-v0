@@ -41,6 +41,7 @@ use crate::arch::{arch_early_init, arch_late_init, PageTableEntry};
 use crate::kobj::*;
 use crate::multilevel::*;
 use crate::paging::{PageTableLevel, PageTableMto, PageTableObject};
+use crate::task::StateRestoreMode;
 use bootloader::BootInfo;
 use capability::{
     CapabilityEndpointObject, CapabilitySet, CapabilityTable, CapabilityTableNode,
@@ -65,8 +66,7 @@ lazy_static! {
                 table: ManuallyDrop::new(CapabilityTableNode::new_table()),
             });
             let cap_table = CapabilityTable::new(NonNull::new(CAP_ROOT.as_mut_ptr()).unwrap(), UserAddr(0));
-            (*KOBJ.as_mut_ptr()).write(CapabilitySet(cap_table));
-            (*KOBJ.as_mut_ptr()).init(&*ROOT_KOBJ, UserAddr(0), false).unwrap();
+            (*KOBJ.as_mut_ptr()).init(&*ROOT_KOBJ, UserAddr(0), CapabilitySet(cap_table)).unwrap();
             &*KOBJ.as_ptr()
         };
         kobj.get_ref()
@@ -80,8 +80,7 @@ lazy_static! {
                 table: ManuallyDrop::new(PageTableEntry::new_table()),
             });
             let pt = PageTableMto::new(NonNull::new(PT_ROOT.as_mut_ptr()).unwrap(), UserAddr(0));
-            (*KOBJ.as_mut_ptr()).write(PageTableObject(pt));
-            (*KOBJ.as_mut_ptr()).init(&*ROOT_KOBJ, UserAddr(0), false).unwrap();
+            (*KOBJ.as_mut_ptr()).init(&*ROOT_KOBJ, UserAddr(0), PageTableObject(pt)).unwrap();
             &*KOBJ.as_ptr()
         };
         kobj.get_ref()
@@ -89,8 +88,15 @@ lazy_static! {
     static ref ROOT_TASK: KernelObjectRef<Task> = {
         static mut TASK: MaybeUninit<KernelObject<Task>> = MaybeUninit::uninit();
         let task = unsafe {
-            (*TASK.as_mut_ptr()).write(Task::new_initial(VirtAddr(crate::arch::config::KERNEL_STACK_END), ROOT_PT_OBJECT.clone(), ROOT_CAPSET.clone()));
-            (*TASK.as_mut_ptr()).init(&*ROOT_KOBJ, UserAddr(0), false).unwrap();
+            (*TASK.as_mut_ptr()).init(
+                &*ROOT_KOBJ,
+                UserAddr(0),
+                Task::new_initial(
+                    VirtAddr(crate::arch::config::KERNEL_STACK_END),
+                    ROOT_PT_OBJECT.clone(),
+                    ROOT_CAPSET.clone()
+                ),
+            ).unwrap();
             &*TASK.as_ptr()
         };
         task.get_ref()
@@ -122,7 +128,7 @@ pub extern "C" fn kstart(boot_info: &'static BootInfo) -> ! {
     with_serial_port(|p| {
         writeln!(p, "Dropping to user mode at {:p}.", initial_ip as *mut u8).unwrap();
     });
-    task::enter_user_mode();
+    task::enter_user_mode(StateRestoreMode::Full);
 }
 
 unsafe fn setup_initial_caps() {

@@ -5,15 +5,15 @@ use crate::error::*;
 use crate::paging::{PageTableMto, PageTableObject};
 use core::ptr::NonNull;
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct PhysAddr(pub u64);
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct VirtAddr(pub u64);
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct UserAddr(pub u64);
 

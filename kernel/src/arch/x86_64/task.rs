@@ -75,6 +75,8 @@ impl TaskRegisters {
             14 => &mut self.r14,
             15 => &mut self.r15,
             16 => &mut self.rip,
+            58 => &mut self.fs_base,
+            59 => &mut self.gs_base,
             _ => return Err(KernelError::InvalidArgument),
         })
     }
@@ -109,20 +111,18 @@ impl TaskRegisters {
 
     /// Loads part of the register set that are not touched by the kernel
     /// but can be used by the userspace.
-    pub fn lazy_load(&mut self) {
+    pub fn lazy_read(&mut self) {
         unsafe {
             self.fs_base = FsBase::MSR.read();
             self.gs_base = KernelGsBase::MSR.read();
         }
     }
 
-    /// Saves all general-purpose and lazy registers, assuming we are in the same context
-    /// as when this register set is loaded.
-    ///
-    /// Should be called before task switching.
-    pub fn save_current(&mut self, from: &TaskRegisters) {
-        *self = from.clone();
-        self.lazy_load();
+    pub fn lazy_write(&self) {
+        unsafe {
+            FsBase::MSR.write(self.fs_base);
+            KernelGsBase::MSR.write(self.gs_base);
+        }
     }
 }
 
@@ -161,12 +161,43 @@ pub unsafe fn arch_set_kernel_tls(value: u64) {
     asm!("mov $0, %gs:16" :: "r"(value) :);
 }
 
+/// The syscall path of entering user mode.
+///
+/// Invalidates registers as defined by the calling convention, but is usually faster.
+pub unsafe fn arch_enter_user_mode_syscall(registers: *const TaskRegisters) -> ! {
+    asm!(
+        r#"
+            mov 136(%rsi), %r11 // rflags
+            mov 128(%rsi), %rcx // rip
+
+            mov 0(%rsi), %r15
+            mov 8(%rsi), %r14
+            mov 16(%rsi), %r13
+            mov 24(%rsi), %r12
+            //mov 32(%rsi), %r11
+            mov 40(%rsi), %r10
+            mov 48(%rsi), %r9
+            mov 56(%rsi), %r8
+            mov 64(%rsi), %rax
+            mov 72(%rsi), %rbx
+            //mov 80(%rsi), %rcx
+            mov 88(%rsi), %rdx
+            mov 104(%rsi), %rdi
+            mov 120(%rsi), %rbp
+            mov 112(%rsi), %rsp
+            mov 96(%rsi), %rsi
+            swapgs
+            sysretq
+        "# : :
+            "{rsi}"(registers)
+            :: "volatile"
+    );
+    unreachable!()
+}
+
 pub unsafe fn arch_enter_user_mode(registers: *const TaskRegisters) -> ! {
     let selectors = super::exception::get_selectors();
     assert_eq!(core::mem::size_of::<TaskRegisters>(), 160);
-
-    FsBase::MSR.write((*registers).fs_base);
-    KernelGsBase::MSR.write((*registers).gs_base);
 
     asm!(
         r#"
@@ -232,31 +263,7 @@ unsafe extern "C" fn arch_lowlevel_syscall_entry() {
         push %r15
 
         mov %rsp, %rdi
-        call syscall_entry
-
-        pop %r15
-        pop %r14
-        pop %r13
-        pop %r12
-        pop %r11
-        pop %r10
-        pop %r9
-        pop %r8
-        add $$8, %rsp // rax
-        pop %rbx
-        pop %rcx
-        pop %rdx
-        pop %rsi
-        pop %rdi
-        add $$8, %rsp // rsp
-        pop %rbp
-        pop %rcx
-        pop %r11
-        add $$16, %rsp // fs, gs
-
-        mov %gs:8, %rsp
-        swapgs
-        sysretq
+        jmp syscall_entry
     "# :::: "volatile");
 }
 

@@ -26,7 +26,6 @@ pub type PageTableLevel = Level<Page, PageTableEntry, PAGE_TABLE_SIZE>;
 
 pub struct PageTableObject(pub PageTableMto);
 
-impl Retype for PageTableObject {}
 impl Notify for PageTableObject {
     unsafe fn will_drop(&mut self, owner: &dyn LikeKernelObject) {
         self.0.will_drop(owner);

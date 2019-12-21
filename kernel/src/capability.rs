@@ -5,7 +5,7 @@ use crate::multilevel::*;
 use crate::paging::PageTableObject;
 
 use crate::arch::{task::TaskRegisters, tlb};
-use crate::task::{retype_user_with, IpcEntry, Task, TaskFaultState};
+use crate::task::{retype_user, IpcEntry, StateRestoreMode, Task, TaskFaultState};
 use core::convert::TryFrom;
 use core::mem::ManuallyDrop;
 use core::mem::MaybeUninit;
@@ -126,12 +126,6 @@ impl LockedCapabilityEndpointSet {
     }
 }
 
-impl Retype for LockedCapabilityEndpointSet {
-    unsafe fn retype_in_place(&mut self) -> KernelResult<()> {
-        core::ptr::write(self, Self::new());
-        Ok(())
-    }
-}
 impl Notify for LockedCapabilityEndpointSet {}
 
 #[derive(Clone)]
@@ -173,6 +167,11 @@ pub struct CapIpcEndpoint {
     /// - Can only be used once.
     /// - Will not create another reply endpoint in the target task.
     pub reply: bool,
+
+    /// Whether this endpoint is created by a non-cooperative preemption (e.g. interrupts, faults).
+    ///
+    /// Full state recovery will be performed if this is set to true.
+    pub was_preempted: bool,
 }
 
 impl Clone for CapIpcEndpoint {
@@ -186,12 +185,14 @@ impl Clone for CapIpcEndpoint {
                     user_context: AtomicU64::new(core::u64::MAX),
                 },
                 reply: true,
+                was_preempted: false,
             }
         } else {
             CapIpcEndpoint {
                 task: self.task.clone(),
                 entry: self.entry.clone(),
                 reply: self.reply,
+                was_preempted: self.was_preempted,
             }
         }
     }
@@ -203,7 +204,6 @@ pub struct CapMmio {
     pub page_addr: PhysAddr,
 }
 
-impl Retype for CapabilitySet {}
 impl Notify for CapabilitySet {
     unsafe fn will_drop(&mut self, owner: &dyn LikeKernelObject) {
         self.0.will_drop(owner);
@@ -274,7 +274,6 @@ impl CapabilityEndpointObject {
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, TryFromPrimitive)]
 enum BasicTaskRequest {
-    SwitchTo = 0,
     FetchDeepClone = 1,
     FetchCapSet = 2,
     FetchRootPageTable = 3,
@@ -298,26 +297,14 @@ fn invoke_cap_basic_task(
 
     let req = BasicTaskRequest::try_from(invocation.arg(0)? as u32)?;
     match req {
-        BasicTaskRequest::SwitchTo => {
-            *invocation.registers.return_value_mut() = 0;
-            drop(current);
-            crate::task::switch_to(task, Some(&invocation.registers))?;
-            crate::task::enter_user_mode();
-        }
         BasicTaskRequest::FetchDeepClone => {
             let cptr = CapPtr(invocation.arg(1)? as u64);
-            let delegation: KernelObjectRef<Task> = unsafe {
-                let current_root = current.page_table_root.get();
-                retype_user_with(
-                    &current_root,
-                    current_root.clone(),
-                    UserAddr(invocation.arg(2)? as u64),
-                    Some(|new_task: &mut Task| {
-                        core::ptr::write(new_task, task.deep_clone());
-                        Ok(())
-                    }),
-                )?
-            };
+            let current_root = current.page_table_root.get();
+            let delegation: KernelObjectRef<Task> = retype_user(
+                &current_root,
+                UserAddr(invocation.arg(2)? as u64),
+                task.deep_clone(),
+            )?;
             current
                 .capabilities
                 .get()
@@ -349,6 +336,10 @@ fn invoke_cap_basic_task(
             let field_index = invocation.arg(1)? as usize;
             let new_value = invocation.arg(2)? as u64;
             *task.registers.lock().field_mut(field_index)? = new_value;
+            if task.is_current() {
+                *invocation.registers.field_mut(field_index)? = new_value;
+                invocation.registers.lazy_write();
+            }
             Ok(0)
         }
         BasicTaskRequest::FetchNewUserPageSet => Err(KernelError::NotImplemented),
@@ -368,6 +359,7 @@ fn invoke_cap_basic_task(
                             user_context: AtomicU64::new(0),
                         },
                         reply: false,
+                        was_preempted: false,
                     });
                 })?;
             Ok(0)
@@ -435,23 +427,14 @@ fn invoke_cap_basic_task(
             let cptr = CapPtr(invocation.arg(1)? as u64);
             let obj_delegation = UserAddr(invocation.arg(2)? as u64);
             let root_delegation = UserAddr(invocation.arg(3)? as u64);
-            let delegation: KernelObjectRef<CapabilitySet> = unsafe {
-                retype_user_with(
+            let delegation: KernelObjectRef<CapabilitySet> = retype_user(
+                &current_root,
+                obj_delegation,
+                CapabilitySet(CapabilityTable::new_from_user(
                     &current_root,
-                    current_root.clone(),
-                    obj_delegation,
-                    Some(|new_set: &mut CapabilitySet| {
-                        core::ptr::write(
-                            new_set,
-                            CapabilitySet(CapabilityTable::new_from_user(
-                                &current_root,
-                                root_delegation,
-                            )?),
-                        );
-                        Ok(())
-                    }),
-                )?
-            };
+                    root_delegation,
+                )?),
+            )?;
             task.capabilities.get().entry_endpoint(cptr, |endpoint| {
                 endpoint.object = CapabilityEndpointObject::CapabilitySet(delegation);
             })?;
@@ -627,6 +610,7 @@ fn invoke_cap_ipc_endpoint(
                                     user_context: AtomicU64::new(core::u64::MAX),
                                 },
                                 reply: true,
+                                was_preempted: false,
                             }),
                         };
                     }
@@ -660,11 +644,16 @@ fn invoke_cap_ipc_endpoint(
 
                 let task = task.clone();
                 let entry = endpoint.entry.clone();
+                let mode = if endpoint.was_preempted {
+                    StateRestoreMode::Full
+                } else {
+                    StateRestoreMode::Syscall
+                };
 
                 drop(current);
                 drop(endpoint);
 
-                let (e, task) = Task::invoke_ipc(task, entry, &invocation.registers);
+                let (e, task) = Task::invoke_ipc(task, entry, &invocation.registers, mode);
                 drop(task.unblock_ipc());
                 return Err(e);
             }

@@ -1,9 +1,9 @@
 use crate::addr::*;
 use crate::arch::{
-    arch_set_current_page_table,
+    arch_get_current_page_table, arch_set_current_page_table,
     task::{
-        arch_enter_user_mode, arch_get_kernel_tls, arch_init_kernel_tls_for_cpu,
-        arch_set_kernel_tls, TaskRegisters, TlsIndirect,
+        arch_enter_user_mode, arch_enter_user_mode_syscall, arch_get_kernel_tls,
+        arch_init_kernel_tls_for_cpu, arch_set_kernel_tls, TaskRegisters, TlsIndirect,
     },
     tlb, PAGE_SIZE, PAGE_TABLE_LEVELS,
 };
@@ -156,17 +156,6 @@ pub fn empty_ipc_caps() -> [CapabilityEndpoint; 4] {
     ]
 }
 
-#[inline]
-fn get_current_task() -> KernelObjectRef<Task> {
-    // Clone the current reference, if any.
-    let ptr = arch_get_kernel_tls() as *mut KernelObject<Task>;
-    let obj = unsafe { KernelObjectRef::from_raw(ptr) };
-    let ret = obj.clone();
-    // We should not drop the old reference here.
-    KernelObjectRef::into_raw(obj);
-    ret
-}
-
 fn set_current_task(t: KernelObjectRef<Task>) {
     // Drop the old reference.
     let old = arch_get_kernel_tls() as *mut KernelObject<Task>;
@@ -221,8 +210,6 @@ unsafe fn make_user_continuous_map<I: Iterator<Item = PhysAddr>>(
     }
     count
 }
-
-impl Retype for Task {}
 
 impl Notify for Task {}
 
@@ -293,7 +280,20 @@ impl Task {
 
     #[inline]
     pub fn current() -> KernelObjectRef<Task> {
-        get_current_task()
+        // Clone the current reference, if any.
+        let ptr = arch_get_kernel_tls() as *mut KernelObject<Task>;
+        let obj = unsafe { KernelObjectRef::from_raw(ptr) };
+        let ret = obj.clone();
+        // We should not drop the old reference here.
+        KernelObjectRef::into_raw(obj);
+        ret
+    }
+
+    #[inline]
+    pub fn is_current(&self) -> bool {
+        let ptr = arch_get_kernel_tls() as *mut KernelObject<Task>;
+        let inner = unsafe { (*ptr).value() as *const Task };
+        self as *const Task == inner
     }
 
     pub fn deep_clone(&self) -> Task {
@@ -350,6 +350,7 @@ impl Task {
         task: KernelObjectRef<Task>,
         entry: IpcEntry,
         old_registers: &TaskRegisters,
+        mode: StateRestoreMode,
     ) -> (KernelError, KernelObjectRef<Task>) {
         {
             // TODO: Save old PC/SP and pass user context.
@@ -358,7 +359,7 @@ impl Task {
             *target_regs.sp_mut() = entry.sp;
         }
 
-        match crate::task::switch_to(task.clone(), Some(old_registers)) {
+        match switch_to(task.clone(), Some(old_registers)) {
             Ok(()) => {
                 drop(task);
             }
@@ -366,33 +367,25 @@ impl Task {
                 return (e, task);
             }
         }
-        crate::task::enter_user_mode();
+        enter_user_mode(mode);
     }
 }
 
-pub unsafe fn retype_user_with<
-    T: Retype + Notify + Send + Sync + 'static,
-    K: Into<LikeKernelObjectRef>,
-    F: FnOnce(&mut T) -> KernelResult<()>,
->(
-    current: &KernelObjectRef<PageTableObject>,
-    owner: K,
+pub fn retype_user<T: Notify + Send + Sync + 'static>(
+    owner: &KernelObjectRef<PageTableObject>,
     uaddr: UserAddr,
-    retyper: Option<F>,
+    value: T,
 ) -> KernelResult<KernelObjectRef<T>> {
-    let kvaddr = current.take_from_user(uaddr)?;
-    let maybe_value = kvaddr.as_mut_ptr::<KernelObject<T>>();
-    let owner = owner.into();
+    let kvaddr = owner.take_from_user(uaddr)?;
 
-    let result = if let Some(retyper) = retyper {
-        (*maybe_value).init_with(owner.get(), uaddr, retyper)
-    } else {
-        (*maybe_value).init(owner.get(), uaddr, true)
-    };
+    let maybe_obj = kvaddr.as_mut_ptr::<KernelObject<T>>();
+
+    let result =
+        unsafe { (*maybe_obj).init(LikeKernelObjectRef::from(owner.clone()).get(), uaddr, value) };
     match result {
-        Ok(_) => Ok((*maybe_value).get_ref()),
+        Ok(_) => Ok(unsafe { (*maybe_obj).get_ref() }),
         Err(e) => {
-            drop(current.put_to_user(uaddr));
+            drop(owner.put_to_user(uaddr));
             Err(e)
         }
     }
@@ -402,8 +395,16 @@ pub fn switch_to(
     task: KernelObjectRef<Task>,
     old_registers: Option<&TaskRegisters>,
 ) -> KernelResult<()> {
-    if let Some(regs) = old_registers {
-        Task::current().registers.lock().save_current(regs);
+    if let Some(old_regs) = old_registers {
+        let current = Task::current();
+        let mut regs = current.registers.lock();
+        *regs = old_regs.clone();
+        regs.lazy_read();
+    }
+
+    // Do nothing if we are switching to the same task.
+    if task.is_current() {
+        return Ok(());
     }
 
     let root = task.page_table_root.get();
@@ -414,16 +415,35 @@ pub fn switch_to(
     task.running
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .map_err(|_| KernelError::InvalidState)?;
+
+    task.registers.lock().lazy_write();
     set_current_task(task);
+
+    // Don't reload if the new task shares a same page table with ourselves.
     unsafe {
-        arch_set_current_page_table(PhysAddr::from_virt(&*root, root_level).unwrap());
-    };
+        let addr = PhysAddr::from_virt(&*root, root_level).unwrap();
+        if addr != arch_get_current_page_table() {
+            arch_set_current_page_table(addr);
+        }
+    }
 
     Ok(())
 }
 
+/// The mode for restoring user context.
+#[derive(Copy, Clone, Debug)]
+pub enum StateRestoreMode {
+    /// Performs full GPR restore.
+    Full,
+
+    /// Performs state restore according to the platform calling convention.
+    ///
+    /// Kernel data will not be leaked.
+    Syscall,
+}
+
 /// Switches out of kernel mode and enters user mode.
-pub fn enter_user_mode() -> ! {
+pub fn enter_user_mode(mode: StateRestoreMode) -> ! {
     let task = Task::current();
 
     let registers: *const TaskRegisters = {
@@ -435,6 +455,9 @@ pub fn enter_user_mode() -> ! {
     drop(task);
 
     unsafe {
-        arch_enter_user_mode(registers);
+        match mode {
+            StateRestoreMode::Full => arch_enter_user_mode(registers),
+            StateRestoreMode::Syscall => arch_enter_user_mode_syscall(registers),
+        }
     }
 }
