@@ -7,13 +7,12 @@ use crate::arch::{
     },
     tlb, PAGE_SIZE, PAGE_TABLE_LEVELS,
 };
-use crate::capability::{CapabilityEndpoint, CapabilitySet};
+use crate::capability::{CapabilitySet, INVALID_CAP};
 use crate::error::*;
 use crate::kobj::*;
 use crate::paging::{PageTableLevel, PageTableObject};
 use crate::serial::with_serial_port;
 use bootloader::bootinfo::MemoryRegionType;
-use core::cell::{Cell, UnsafeCell};
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
@@ -33,75 +32,31 @@ pub enum TaskFaultState {
     IntegerDivision,
 }
 
-/// LocalState is NOT thread safe and should only be accessed on the task's
-/// own thread.
-#[repr(C)]
-pub struct LocalState {
-    /// Address of the kernel syscall stack.
-    pub kernel_stack: Cell<VirtAddr>,
-
-    /// Saved address of the user stack.
-    pub user_stack: Cell<UserAddr>,
-}
-
-impl LocalState {
-    pub fn new() -> LocalState {
-        let current = Task::current();
-        LocalState {
-            kernel_stack: Cell::new(
-                unsafe { current.local_state.unsafe_deref() }
-                    .kernel_stack
-                    .get(),
-            ),
-            user_stack: Cell::new(UserAddr(0)),
-        }
-    }
-}
-
-#[repr(transparent)]
-pub struct LocalStateWrapper(UnsafeCell<LocalState>);
-
-impl LocalStateWrapper {
-    pub fn new(inner: LocalState) -> LocalStateWrapper {
-        LocalStateWrapper(UnsafeCell::new(inner))
-    }
-
-    pub unsafe fn unsafe_deref(&self) -> &LocalState {
-        &*self.0.get()
-    }
-}
-
-unsafe impl Send for LocalStateWrapper {}
-unsafe impl Sync for LocalStateWrapper {}
-
 #[repr(C)]
 pub struct Task {
-    /// Thread-unsafe local state. Used in assembly and must be the first field.
-    pub local_state: LocalStateWrapper,
-
     /// Page table of this task.
     pub page_table_root: AtomicKernelObjectRef<PageTableObject>,
 
     /// Root capability set.
     pub capabilities: AtomicKernelObjectRef<CapabilitySet>,
 
-    /// IPC capabilities.
-    pub ipc_caps: Mutex<[CapabilityEndpoint; 4]>,
-
-    /// Pending fault.
-    pub pending_fault: Mutex<TaskFaultState>,
-
-    /// Saved registers when scheduled out.
-    pub registers: Mutex<TaskRegisters>,
-
-    /// Fault handler table.
-    pub fault_handlers: Mutex<FaultHandlerTable>,
+    /// IPC base capability address.
+    pub ipc_base: AtomicU64,
 
     /// Indicates whether or not IPC is being blocked.
     pub ipc_blocked: AtomicBool,
 
     /// Indicates whether this task is currently running (being the current task for any CPU).
     pub running: AtomicBool,
+
+    /// Saved registers when scheduled out.
+    pub registers: Mutex<TaskRegisters>,
+
+    /// Pending fault.
+    pub pending_fault: Mutex<TaskFaultState>,
+
+    /// Fault handler table.
+    pub fault_handlers: Mutex<FaultHandlerTable>,
 }
 
 #[derive(Default, Clone)]
@@ -145,15 +100,6 @@ impl Clone for IpcEntry {
             user_context: AtomicU64::new(self.user_context.load(Ordering::SeqCst)),
         }
     }
-}
-
-pub fn empty_ipc_caps() -> [CapabilityEndpoint; 4] {
-    [
-        CapabilityEndpoint::default(),
-        CapabilityEndpoint::default(),
-        CapabilityEndpoint::default(),
-        CapabilityEndpoint::default(),
-    ]
 }
 
 fn set_current_task(t: KernelObjectRef<Task>) {
@@ -217,18 +163,13 @@ impl Task {
     /// Creates a new initial task for the current CPU.
     /// This does not depend on having a current task.
     pub fn new_initial(
-        kernel_stack: VirtAddr,
         page_table_root: KernelObjectRef<PageTableObject>,
         cap_root: KernelObjectRef<CapabilitySet>,
     ) -> Task {
         Task {
-            local_state: LocalStateWrapper(UnsafeCell::new(LocalState {
-                kernel_stack: Cell::new(kernel_stack),
-                user_stack: Cell::new(UserAddr(0)),
-            })),
             page_table_root: AtomicKernelObjectRef::new(page_table_root),
             capabilities: AtomicKernelObjectRef::new(cap_root),
-            ipc_caps: Mutex::new(empty_ipc_caps()),
+            ipc_base: AtomicU64::new(INVALID_CAP),
             pending_fault: Mutex::new(TaskFaultState::NoFault),
             registers: Mutex::new(TaskRegisters::new()),
             fault_handlers: Mutex::new(FaultHandlerTable::default()),
@@ -298,10 +239,9 @@ impl Task {
 
     pub fn deep_clone(&self) -> Task {
         Task {
-            local_state: LocalStateWrapper::new(LocalState::new()),
             page_table_root: AtomicKernelObjectRef::new(self.page_table_root.get()),
             capabilities: AtomicKernelObjectRef::new(self.capabilities.get()),
-            ipc_caps: Mutex::new(empty_ipc_caps()),
+            ipc_base: AtomicU64::new(INVALID_CAP),
             pending_fault: Mutex::new(TaskFaultState::NoFault),
             registers: Mutex::new(TaskRegisters::new()),
             fault_handlers: Mutex::new(self.fault_handlers.lock().clone()),
@@ -316,10 +256,6 @@ impl Task {
     }
 
     pub fn unblock_ipc(&self) -> KernelResult<()> {
-        let mut caps = self.ipc_caps.lock();
-        for cap in caps.iter_mut() {
-            *cap = CapabilityEndpoint::default();
-        }
         if self
             .ipc_blocked
             .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
@@ -351,7 +287,7 @@ impl Task {
         entry: IpcEntry,
         old_registers: &TaskRegisters,
         mode: StateRestoreMode,
-    ) -> (KernelError, KernelObjectRef<Task>) {
+    ) -> KernelError {
         {
             // TODO: Save old PC/SP and pass user context.
             let mut target_regs = task.registers.lock();
@@ -359,13 +295,9 @@ impl Task {
             *target_regs.sp_mut() = entry.sp;
         }
 
-        match switch_to(task.clone(), Some(old_registers)) {
-            Ok(()) => {
-                drop(task);
-            }
-            Err(e) => {
-                return (e, task);
-            }
+        match switch_to(task, Some(old_registers)) {
+            Ok(()) => {}
+            Err(e) => return e,
         }
         enter_user_mode(mode);
     }

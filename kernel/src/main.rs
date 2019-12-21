@@ -44,8 +44,8 @@ use crate::paging::{PageTableLevel, PageTableMto, PageTableObject};
 use crate::task::StateRestoreMode;
 use bootloader::BootInfo;
 use capability::{
-    CapabilityEndpointObject, CapabilitySet, CapabilityTable, CapabilityTableNode,
-    LockedCapabilityEndpointSet,
+    CapabilityEndpointObject, CapabilityEndpointSet, CapabilitySet, CapabilityTable,
+    CapabilityTableNode,
 };
 use core::fmt::Write;
 use core::mem::{ManuallyDrop, MaybeUninit};
@@ -59,7 +59,7 @@ lazy_static! {
     static ref ROOT_KOBJ: RootKernelObject = RootKernelObject;
     static ref ROOT_CAPSET: KernelObjectRef<CapabilitySet> = {
         static mut KOBJ: MaybeUninit<KernelObject<CapabilitySet>> = MaybeUninit::uninit();
-        static mut CAP_ROOT: MaybeUninit<Level<LockedCapabilityEndpointSet, CapabilityTableNode, 128>> = MaybeUninit::uninit();
+        static mut CAP_ROOT: MaybeUninit<Level<CapabilityEndpointSet, CapabilityTableNode, 128>> = MaybeUninit::uninit();
 
         let kobj = unsafe {
             CAP_ROOT.write(Level {
@@ -92,7 +92,6 @@ lazy_static! {
                 &*ROOT_KOBJ,
                 UserAddr(0),
                 Task::new_initial(
-                    VirtAddr(crate::arch::config::KERNEL_STACK_END),
                     ROOT_PT_OBJECT.clone(),
                     ROOT_CAPSET.clone()
                 ),
@@ -133,7 +132,7 @@ pub extern "C" fn kstart(boot_info: &'static BootInfo) -> ! {
 
 unsafe fn setup_initial_caps() {
     static mut INITIAL_CAP_TABLE_NODES: MaybeUninit<
-        [Level<LockedCapabilityEndpointSet, CapabilityTableNode, 128>; 4],
+        [Level<CapabilityEndpointSet, CapabilityTableNode, 128>; 4],
     > = MaybeUninit::uninit();
     INITIAL_CAP_TABLE_NODES.write([
         Level {
@@ -159,12 +158,9 @@ unsafe fn setup_initial_caps() {
         if level == 3 {
             let mut entry = entry.as_level().unwrap();
             let entry = entry.as_mut();
-            let set = LockedCapabilityEndpointSet::new();
-            {
-                let mut endpoints = set.endpoints.lock();
-                endpoints[0].object = CapabilityEndpointObject::BasicTask(ROOT_TASK.clone());
-                endpoints[1].object = CapabilityEndpointObject::RootTask;
-            }
+            let mut set = CapabilityEndpointSet::new();
+            set.endpoints[0].object = CapabilityEndpointObject::BasicTask(ROOT_TASK.clone());
+            set.endpoints[1].object = CapabilityEndpointObject::RootTask;
             entry.value = ManuallyDrop::new(set);
             return true;
         }

@@ -12,7 +12,6 @@ use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU64, Ordering};
 use num_enum::TryFromPrimitive;
-use spin::Mutex;
 
 pub const N_ENDPOINT_SLOTS: usize = 32;
 pub const INVALID_CAP: u64 = core::u64::MAX;
@@ -43,7 +42,7 @@ impl CapabilityInvocation {
 #[repr(C)]
 #[derive(Clone, Default)]
 pub struct CapabilityTableNode {
-    pub next: Option<NonNull<Level<LockedCapabilityEndpointSet, CapabilityTableNode, 128>>>,
+    pub next: Option<NonNull<Level<CapabilityEndpointSet, CapabilityTableNode, 128>>>,
     pub owner: Option<KernelObjectRef<PageTableObject>>,
     pub uaddr: UserAddr,
 }
@@ -52,7 +51,7 @@ unsafe impl Send for CapabilityTableNode {}
 
 pub struct CapabilitySet(pub CapabilityTable);
 pub type CapabilityTable =
-    MultilevelTableObject<LockedCapabilityEndpointSet, CapabilityTableNode, 7, 4, 35, 128>;
+    MultilevelTableObject<CapabilityEndpointSet, CapabilityTableNode, 7, 4, 35, 128>;
 
 impl CapabilityTableNode {
     pub fn new_table() -> [CapabilityTableNode; 128] {
@@ -65,22 +64,22 @@ impl CapabilityTableNode {
         }
     }
 }
-impl AsLevel<LockedCapabilityEndpointSet, 128> for CapabilityTableNode {
+impl AsLevel<CapabilityEndpointSet, 128> for CapabilityTableNode {
     fn as_level(
         &mut self,
-    ) -> Option<NonNull<Level<LockedCapabilityEndpointSet, CapabilityTableNode, 128>>> {
+    ) -> Option<NonNull<Level<CapabilityEndpointSet, CapabilityTableNode, 128>>> {
         self.next
     }
 }
-impl DefaultUser<LockedCapabilityEndpointSet, CapabilityTableNode, 128> for CapabilityTableNode {
+impl DefaultUser<CapabilityEndpointSet, CapabilityTableNode, 128> for CapabilityTableNode {
     unsafe fn default_user(
-        mut kref: NonNull<Level<LockedCapabilityEndpointSet, CapabilityTableNode, 128>>,
+        mut kref: NonNull<Level<CapabilityEndpointSet, CapabilityTableNode, 128>>,
         leaf: bool,
         owner: KernelObjectRef<PageTableObject>,
         uaddr: UserAddr,
     ) -> KernelResult<Self> {
         if leaf {
-            kref.as_mut().value = ManuallyDrop::new(LockedCapabilityEndpointSet::new());
+            kref.as_mut().value = ManuallyDrop::new(CapabilityEndpointSet::new());
         } else {
             kref.as_mut().table = ManuallyDrop::new(Self::new_table());
         }
@@ -106,12 +105,12 @@ impl Drop for CapabilityTableNode {
     }
 }
 
-pub struct LockedCapabilityEndpointSet {
-    pub endpoints: Mutex<[CapabilityEndpoint; N_ENDPOINT_SLOTS]>,
+pub struct CapabilityEndpointSet {
+    pub endpoints: [CapabilityEndpoint; N_ENDPOINT_SLOTS],
 }
 
-impl LockedCapabilityEndpointSet {
-    pub fn new() -> LockedCapabilityEndpointSet {
+impl CapabilityEndpointSet {
+    pub fn new() -> CapabilityEndpointSet {
         let mut endpoints: MaybeUninit<[CapabilityEndpoint; N_ENDPOINT_SLOTS]> =
             MaybeUninit::uninit();
         unsafe {
@@ -120,13 +119,13 @@ impl LockedCapabilityEndpointSet {
                 core::ptr::write(elem, CapabilityEndpoint::default());
             }
         }
-        LockedCapabilityEndpointSet {
-            endpoints: Mutex::new(unsafe { endpoints.assume_init() }),
+        CapabilityEndpointSet {
+            endpoints: unsafe { endpoints.assume_init() },
         }
     }
 }
 
-impl Notify for LockedCapabilityEndpointSet {}
+impl Notify for CapabilityEndpointSet {}
 
 #[derive(Clone)]
 pub struct CapabilityEndpoint {
@@ -217,12 +216,11 @@ impl CapabilitySet {
         f: F,
     ) -> KernelResult<T> {
         Ok(self.0.lookup(cptr.0, |set| {
-            let mut set = set.endpoints.lock();
             let subindex = (cptr.0 & 0xff) as usize;
-            if subindex >= set.len() {
+            if subindex >= set.endpoints.len() {
                 Err(KernelError::InvalidArgument)
             } else {
-                Ok(f(&mut set[subindex]))
+                Ok(f(&mut set.endpoints[subindex]))
             }
         })??)
     }
@@ -282,7 +280,7 @@ enum BasicTaskRequest {
     FetchNewUserPageSet = 6,
     FetchIpcEndpoint = 7,
     UnblockIpc = 8,
-    FetchIpcCap = 9,
+    SetIpcBase = 9,
     PutCapSet = 10,
     IpcIsBlocked = 11,
     IsUnique = 12,
@@ -368,28 +366,9 @@ fn invoke_cap_basic_task(
             task.unblock_ipc()?;
             Ok(0)
         }
-        BasicTaskRequest::FetchIpcCap => {
-            let cptr = CapPtr(invocation.arg(1)? as u64);
-            let index = invocation.arg(2)? as usize;
-
-            let mut caps = task.ipc_caps.lock();
-            if index >= caps.len() {
-                return Err(KernelError::InvalidArgument);
-            }
-
-            current
-                .capabilities
-                .get()
-                .entry_endpoint(cptr, |endpoint| {
-                    endpoint.object = core::mem::replace(
-                        &mut caps[index],
-                        CapabilityEndpoint {
-                            object: CapabilityEndpointObject::Empty,
-                        },
-                    )
-                    .object;
-                })?;
-
+        BasicTaskRequest::SetIpcBase => {
+            task.ipc_base
+                .store(invocation.arg(1)? as u64, Ordering::SeqCst);
             Ok(0)
         }
         BasicTaskRequest::PutCapSet => {
@@ -567,8 +546,8 @@ fn invoke_cap_ipc_endpoint(
     };
 
     let req = IpcRequest::try_from(invocation.arg(0)? as u32)?;
-    let task: &KernelObjectRef<Task> = match endpoint.task {
-        Some(ref t) => t,
+    let task: KernelObjectRef<Task> = match endpoint.task {
+        Some(ref t) => t.clone(),
         None => return Err(KernelError::InvalidArgument),
     };
 
@@ -596,12 +575,37 @@ fn invoke_cap_ipc_endpoint(
                     _ => unreachable!(),
                 }
             } else {
-                // From here on we should not return or fault.
-                {
-                    let mut ipc_caps = task.ipc_caps.lock();
+                let remote_base = task.ipc_base.load(Ordering::SeqCst);
 
-                    if !endpoint.reply {
-                        ipc_caps[0] = CapabilityEndpoint {
+                // Swap CapabilityEndpointSet of local and remote tasks.
+                {
+                    let current_capabilities = current.capabilities.get();
+                    let remote_capabilities = task.capabilities.get();
+                    if &*current_capabilities as *const CapabilitySet
+                        != &*remote_capabilities as *const CapabilitySet
+                    {
+                        let local_base = current.ipc_base.load(Ordering::SeqCst);
+                        if local_base != INVALID_CAP && remote_base != INVALID_CAP {
+                            current_capabilities.0.lookup_leaf_entry(
+                                local_base,
+                                |local_entry| {
+                                    remote_capabilities.0.lookup_leaf_entry(
+                                        remote_base,
+                                        |remote_entry| {
+                                            let remote_next = remote_entry.next;
+                                            remote_entry.next = local_entry.next;
+                                            local_entry.next = remote_next;
+                                        },
+                                    )
+                                },
+                            )??;
+                        }
+                    }
+                }
+
+                if !endpoint.reply {
+                    task.capabilities.get().0.lookup(remote_base, |entry| {
+                        entry.endpoints[0] = CapabilityEndpoint {
                             object: CapabilityEndpointObject::IpcEndpoint(CapIpcEndpoint {
                                 task: Some(current.clone()),
                                 entry: IpcEntry {
@@ -613,36 +617,11 @@ fn invoke_cap_ipc_endpoint(
                                 was_preempted: false,
                             }),
                         };
-                    }
-
-                    for i in 1.. {
-                        if i >= ipc_caps.len() {
-                            break;
-                        }
-                        let arg = match invocation.arg(i) {
-                            Ok(x) => x,
-                            Err(_) => break,
-                        };
-                        if arg != INVALID_CAP {
-                            match current
-                                .capabilities
-                                .get()
-                                .entry_endpoint(CapPtr(arg), |x| x.clone())
-                            {
-                                Ok(x) => {
-                                    ipc_caps[i] = x;
-                                }
-                                Err(_) => {
-                                    ipc_caps[i] = CapabilityEndpoint::default();
-                                }
-                            }
-                        }
-                    }
-
-                    *invocation.registers.return_value_mut() = 0;
+                    })?;
                 }
 
-                let task = task.clone();
+                *invocation.registers.return_value_mut() = 0;
+
                 let entry = endpoint.entry.clone();
                 let mode = if endpoint.was_preempted {
                     StateRestoreMode::Full
@@ -653,8 +632,7 @@ fn invoke_cap_ipc_endpoint(
                 drop(current);
                 drop(endpoint);
 
-                let (e, task) = Task::invoke_ipc(task, entry, &invocation.registers, mode);
-                drop(task.unblock_ipc());
+                let e = Task::invoke_ipc(task, entry, &invocation.registers, mode);
                 return Err(e);
             }
         }
