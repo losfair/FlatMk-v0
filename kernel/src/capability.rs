@@ -155,11 +155,11 @@ pub enum CapabilityEndpointObject {
     X86IoPort(u16),
     Mmio(CapMmio),
     RootPageTable(KernelObjectRef<PageTableObject>),
-    IpcEndpoint(CapIpcEndpoint),
+    TaskEndpoint(CapTaskEndpoint),
     CapabilitySet(KernelObjectRef<CapabilitySet>),
 }
 
-pub struct CapIpcEndpoint {
+pub struct CapTaskEndpoint {
     /// Task object to send IPC messages to.
     pub task: Option<KernelObjectRef<Task>>,
 
@@ -180,10 +180,10 @@ pub struct CapIpcEndpoint {
     pub was_preempted: bool,
 }
 
-impl Clone for CapIpcEndpoint {
-    fn clone(&self) -> CapIpcEndpoint {
+impl Clone for CapTaskEndpoint {
+    fn clone(&self) -> CapTaskEndpoint {
         if self.reply {
-            CapIpcEndpoint {
+            CapTaskEndpoint {
                 task: None,
                 entry: IpcEntry {
                     pc: 0,
@@ -194,7 +194,7 @@ impl Clone for CapIpcEndpoint {
                 was_preempted: false,
             }
         } else {
-            CapIpcEndpoint {
+            CapTaskEndpoint {
                 task: self.task.clone(),
                 entry: self.entry.clone(),
                 reply: self.reply,
@@ -257,8 +257,8 @@ impl CapabilityEndpointObject {
             CapabilityEndpointObject::RootPageTable(pt) => {
                 invoke_cap_root_page_table(invocation, pt)
             }
-            CapabilityEndpointObject::IpcEndpoint(endpoint) => {
-                invoke_cap_ipc_endpoint(invocation, endpoint)
+            CapabilityEndpointObject::TaskEndpoint(endpoint) => {
+                invoke_cap_task_endpoint(invocation, endpoint)
             }
             CapabilityEndpointObject::CapabilitySet(set) => {
                 invoke_cap_capability_set(invocation, set)
@@ -285,7 +285,7 @@ enum BasicTaskRequest {
     GetRegister = 4,
     SetRegister = 5,
     FetchNewUserPageSet = 6,
-    FetchIpcEndpoint = 7,
+    FetchTaskEndpoint = 7,
     UnblockIpc = 8,
     SetIpcBase = 9,
     PutCapSet = 10,
@@ -348,7 +348,7 @@ fn invoke_cap_basic_task(
             Ok(0)
         }
         BasicTaskRequest::FetchNewUserPageSet => Err(KernelError::NotImplemented),
-        BasicTaskRequest::FetchIpcEndpoint => {
+        BasicTaskRequest::FetchTaskEndpoint => {
             let cptr = CapPtr(invocation.arg(1)? as u64);
             let entry_pc = invocation.arg(2)? as u64;
             let entry_sp = invocation.arg(3)? as u64;
@@ -356,7 +356,7 @@ fn invoke_cap_basic_task(
                 .capabilities
                 .get()
                 .entry_endpoint(cptr, |endpoint| {
-                    endpoint.object = CapabilityEndpointObject::IpcEndpoint(CapIpcEndpoint {
+                    endpoint.object = CapabilityEndpointObject::TaskEndpoint(CapTaskEndpoint {
                         task: Some(task.clone()),
                         entry: IpcEntry {
                             pc: entry_pc,
@@ -529,9 +529,9 @@ enum IpcRequest {
     SetUserContext = 4,
 }
 
-fn invoke_cap_ipc_endpoint(
+fn invoke_cap_task_endpoint(
     invocation: &mut CapabilityInvocation,
-    endpoint: CapIpcEndpoint,
+    endpoint: CapTaskEndpoint,
 ) -> KernelResult<i64> {
     let current = Task::current();
     let endpoint = if endpoint.reply {
@@ -545,7 +545,7 @@ fn invoke_cap_ipc_endpoint(
             .lookup_cptr_take(invocation.cptr())?
             .object
         {
-            CapabilityEndpointObject::IpcEndpoint(x) => x,
+            CapabilityEndpointObject::TaskEndpoint(x) => x,
             _ => return Err(KernelError::InvalidState),
         }
     } else {
@@ -613,7 +613,7 @@ fn invoke_cap_ipc_endpoint(
                 if !endpoint.reply {
                     task.capabilities.get().0.lookup(remote_base, |entry| {
                         entry.endpoints[0] = CapabilityEndpoint {
-                            object: CapabilityEndpointObject::IpcEndpoint(CapIpcEndpoint {
+                            object: CapabilityEndpointObject::TaskEndpoint(CapTaskEndpoint {
                                 task: Some(current.clone()),
                                 entry: IpcEntry {
                                     pc: *invocation.registers.pc_mut(),
