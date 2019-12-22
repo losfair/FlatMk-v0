@@ -9,11 +9,69 @@ use core::mem::ManuallyDrop;
 use core::ptr::NonNull;
 use spin::Mutex;
 
+pub enum OpaqueCacheElement {}
+
+pub struct GenericLeafCache {
+    inner: [Option<(u64, NonNull<OpaqueCacheElement>)>; 8],
+    next: usize,
+}
+unsafe impl Send for GenericLeafCache {}
+
+impl LeafCache for GenericLeafCache {
+    fn new() -> Self {
+        Self {
+            inner: [None; 8],
+            next: 0,
+        }
+    }
+
+    fn lookup(&mut self, ptr: u64) -> Option<NonNull<OpaqueCacheElement>> {
+        for elem in self.inner.iter() {
+            if let Some(ref elem) = *elem {
+                if elem.0 == ptr {
+                    return Some(elem.1);
+                }
+            }
+        }
+        None
+    }
+
+    fn insert(&mut self, ptr: u64, value: NonNull<OpaqueCacheElement>) {
+        self.inner[self.next] = Some((ptr, value));
+        if self.next + 1 == self.inner.len() {
+            self.next = 0;
+        } else {
+            self.next += 1;
+        }
+    }
+
+    fn invalidate(&mut self, _ptr: u64) {
+        unimplemented!()
+    }
+}
+
+pub trait LeafCache: Sized + Send {
+    /// Creates Self.
+    fn new() -> Self;
+
+    /// Looks up an entry in this cache.
+    ///
+    /// The caller needs to ensure proper cache validation.
+    fn lookup(&mut self, ptr: u64) -> Option<NonNull<OpaqueCacheElement>>;
+
+    /// Inserts an entry.
+    fn insert(&mut self, ptr: u64, value: NonNull<OpaqueCacheElement>);
+
+    /// Invalidates an entry.
+    fn invalidate(&mut self, ptr: u64);
+}
+
 /// A multilevel table object (MTO) is an abstraction for pagetable-like structures and is used
 /// for page tables and capability tables.
 pub struct MultilevelTableObject<
     T: Send,
     P: AsLevel<T, TABLE_SIZE> + Send,
+    C: LeafCache,
     const BITS: u8,
     const LEVELS: u8,
     const START_BIT: u8,
@@ -21,27 +79,30 @@ pub struct MultilevelTableObject<
 > {
     root: Mutex<NonNull<Level<T, P, TABLE_SIZE>>>,
     root_uaddr: UserAddr,
+    cache: Mutex<C>,
 }
 
 unsafe impl<
         T: Send,
         P: AsLevel<T, TABLE_SIZE> + Send,
+        C: LeafCache,
         const BITS: u8,
         const LEVELS: u8,
         const START_BIT: u8,
         const TABLE_SIZE: usize,
-    > Send for MultilevelTableObject<T, P, BITS, LEVELS, START_BIT, TABLE_SIZE>
+    > Send for MultilevelTableObject<T, P, C, BITS, LEVELS, START_BIT, TABLE_SIZE>
 {
 }
 
 unsafe impl<
         T: Send,
         P: AsLevel<T, TABLE_SIZE> + Send,
+        C: LeafCache,
         const BITS: u8,
         const LEVELS: u8,
         const START_BIT: u8,
         const TABLE_SIZE: usize,
-    > Sync for MultilevelTableObject<T, P, BITS, LEVELS, START_BIT, TABLE_SIZE>
+    > Sync for MultilevelTableObject<T, P, C, BITS, LEVELS, START_BIT, TABLE_SIZE>
 {
 }
 
@@ -134,11 +195,12 @@ pub trait AsLevel<T: Send, const TABLE_SIZE: usize>: Sized + Send {
 impl<
         T: Send,
         P: AsLevel<T, TABLE_SIZE> + Send,
+        C: LeafCache,
         const BITS: u8,
         const LEVELS: u8,
         const START_BIT: u8,
         const TABLE_SIZE: usize,
-    > MultilevelTableObject<T, P, BITS, LEVELS, START_BIT, TABLE_SIZE>
+    > MultilevelTableObject<T, P, C, BITS, LEVELS, START_BIT, TABLE_SIZE>
 {
     /// Checks that the constant type parameters are correct.
     const fn check() {
@@ -183,6 +245,7 @@ impl<
         MultilevelTableObject {
             root: Mutex::new(inner),
             root_uaddr: uaddr,
+            cache: Mutex::new(C::new()),
         }
     }
 
@@ -229,16 +292,29 @@ impl<
 
     pub fn lookup_leaf_entry<F: FnOnce(&mut P) -> R, R>(&self, ptr: u64, cb: F) -> Option<R> {
         let mut root = self.root.lock();
-        unsafe {
-            root.as_mut()
-                .lookup_leaf_entry(ptr, LEVELS, START_BIT, BITS, cb)
+        let mut cache = self.cache.lock();
+        if let Some(x) = cache.lookup(ptr) {
+            Some(cb(unsafe { &mut *(x.as_ptr() as *mut P) }))
+        } else {
+            unsafe {
+                root.as_mut()
+                    .lookup_leaf_entry(ptr, LEVELS, START_BIT, BITS, |x| {
+                        cache.insert(
+                            ptr,
+                            NonNull::new_unchecked(x as *mut P as *mut OpaqueCacheElement),
+                        );
+                        cb(x)
+                    })
+            }
         }
     }
 
     /// Convenience function for looking up a leaf entry in this MTO. Internally calls `lookup_entry`.
     pub fn lookup<F: FnOnce(&mut T) -> R, R>(&self, ptr: u64, cb: F) -> Option<R> {
-        let mut root = self.root.lock();
-        unsafe { root.as_mut().lookup(ptr, LEVELS, START_BIT, BITS, cb) }
+        self.lookup_leaf_entry(ptr, |entry| match entry.as_level() {
+            Some(mut x) => Some(cb(unsafe { &mut *x.as_mut().value })),
+            None => None,
+        })?
     }
 
     pub fn with_root<F: FnOnce(&mut Level<T, P, TABLE_SIZE>) -> R, R>(&self, cb: F) -> R {
@@ -262,11 +338,12 @@ pub trait DefaultUser<T: Send, P: AsLevel<T, TABLE_SIZE> + Send, const TABLE_SIZ
 impl<
         T: Send,
         P: AsLevel<T, TABLE_SIZE> + Default + Send,
+        C: LeafCache,
         const BITS: u8,
         const LEVELS: u8,
         const START_BIT: u8,
         const TABLE_SIZE: usize,
-    > MultilevelTableObject<T, P, BITS, LEVELS, START_BIT, TABLE_SIZE>
+    > MultilevelTableObject<T, P, C, BITS, LEVELS, START_BIT, TABLE_SIZE>
 {
     /// Creates a MTO with root taken from userspace.
     pub fn new_from_user(
@@ -287,11 +364,12 @@ impl<
 impl<
         T: Send,
         P: AsLevel<T, TABLE_SIZE> + DefaultUser<T, P, TABLE_SIZE> + Send,
+        C: LeafCache,
         const BITS: u8,
         const LEVELS: u8,
         const START_BIT: u8,
         const TABLE_SIZE: usize,
-    > MultilevelTableObject<T, P, BITS, LEVELS, START_BIT, TABLE_SIZE>
+    > MultilevelTableObject<T, P, C, BITS, LEVELS, START_BIT, TABLE_SIZE>
 {
     /// Builds either a leaf or an intermediate level in an MTO, with memory taken from userspace.
     ///

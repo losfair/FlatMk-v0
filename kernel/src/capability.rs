@@ -50,8 +50,15 @@ pub struct CapabilityTableNode {
 unsafe impl Send for CapabilityTableNode {}
 
 pub struct CapabilitySet(pub CapabilityTable);
-pub type CapabilityTable =
-    MultilevelTableObject<CapabilityEndpointSet, CapabilityTableNode, 7, 4, 35, 128>;
+pub type CapabilityTable = MultilevelTableObject<
+    CapabilityEndpointSet,
+    CapabilityTableNode,
+    GenericLeafCache,
+    7,
+    4,
+    35,
+    128,
+>;
 
 impl CapabilityTableNode {
     pub fn new_table() -> [CapabilityTableNode; 128] {

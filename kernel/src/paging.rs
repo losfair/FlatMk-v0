@@ -17,6 +17,7 @@ pub(crate) static mut PHYSICAL_OFFSET: u64 = 0;
 pub type PageTableMto = MultilevelTableObject<
     Page,
     PageTableEntry,
+    GenericLeafCache,
     PAGE_TABLE_LEVEL_BITS,
     PAGE_TABLE_LEVELS,
     PAGE_TABLE_INDEX_START,
