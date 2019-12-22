@@ -75,9 +75,6 @@ pub struct IpcEntry {
     /// Instruction pointer.
     pub pc: u64,
 
-    /// Stack pointer.
-    pub sp: u64,
-
     /// Context provided by the user.
     /// Can only be modified when equals to zero.
     pub user_context: AtomicU64,
@@ -96,7 +93,6 @@ impl Clone for IpcEntry {
     fn clone(&self) -> IpcEntry {
         IpcEntry {
             pc: self.pc,
-            sp: self.sp,
             user_context: AtomicU64::new(self.user_context.load(Ordering::SeqCst)),
         }
     }
@@ -292,12 +288,17 @@ impl Task {
             // TODO: Save old PC/SP and pass user context.
             let mut target_regs = task.registers.lock();
             *target_regs.pc_mut() = entry.pc;
-            *target_regs.sp_mut() = entry.sp;
         }
 
         match switch_to(task, Some(old_registers)) {
             Ok(()) => {}
             Err(e) => return e,
+        }
+        let user_context = entry.user_context.load(Ordering::SeqCst);
+        unsafe {
+            asm!(
+                "mov $0, %xmm0" : : "r"(user_context) : : "volatile"
+            );
         }
         enter_user_mode(mode);
     }

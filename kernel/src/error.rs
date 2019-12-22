@@ -8,20 +8,17 @@ pub enum KernelError {
     InvalidArgument = -1,
     /// Invalid memory delegation.
     InvalidDelegation = -2,
-    /// Invalid object type. Usually indicates a failure during retyping.
-    //InvalidType = -3,
+
     /// Not implemented.
     NotImplemented = -4,
-    /// The type for a kernel object has a size larger than one page.
-    //KernelObjectTooLarge = -5,
+
     /// Some state is invalid for the requested operation.
     InvalidState = -6,
     /// Invalid memory address.
     InvalidAddress = -7,
     /// Some object is empty when processing invocation request.
     EmptyObject = -8,
-    /// An address provided is not aligned to a required boundary.
-    NotAligned = -9,
+
     /// An IPC operation would block, but non-blocking mode is requested.
     WouldBlock = -10,
     /// An empty capability is invoked.

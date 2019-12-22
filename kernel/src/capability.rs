@@ -187,7 +187,6 @@ impl Clone for CapTaskEndpoint {
                 task: None,
                 entry: IpcEntry {
                     pc: 0,
-                    sp: 0,
                     user_context: AtomicU64::new(core::u64::MAX),
                 },
                 reply: true,
@@ -351,7 +350,6 @@ fn invoke_cap_basic_task(
         BasicTaskRequest::FetchTaskEndpoint => {
             let cptr = CapPtr(invocation.arg(1)? as u64);
             let entry_pc = invocation.arg(2)? as u64;
-            let entry_sp = invocation.arg(3)? as u64;
             current
                 .capabilities
                 .get()
@@ -360,7 +358,6 @@ fn invoke_cap_basic_task(
                         task: Some(task.clone()),
                         entry: IpcEntry {
                             pc: entry_pc,
-                            sp: entry_sp,
                             user_context: AtomicU64::new(0),
                         },
                         reply: false,
@@ -617,7 +614,6 @@ fn invoke_cap_task_endpoint(
                                 task: Some(current.clone()),
                                 entry: IpcEntry {
                                     pc: *invocation.registers.pc_mut(),
-                                    sp: *invocation.registers.sp_mut(),
                                     user_context: AtomicU64::new(core::u64::MAX),
                                 },
                                 reply: true,
