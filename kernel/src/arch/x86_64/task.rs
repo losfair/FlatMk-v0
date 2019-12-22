@@ -1,4 +1,5 @@
 use crate::error::*;
+use crate::task::{Task, TaskFaultState};
 use x86_64::registers::{
     model_specific::{Efer, EferFlags, FsBase, GsBase, KernelGsBase, Msr},
     rflags::RFlags,
@@ -165,6 +166,10 @@ pub unsafe fn arch_set_kernel_tls(value: u64) {
 ///
 /// Invalidates registers as defined by the calling convention, but is usually faster.
 pub unsafe fn arch_enter_user_mode_syscall(registers: *const TaskRegisters) -> ! {
+    if !super::addr::address_is_canonical((*registers).rip) {
+        Task::current().raise_fault(TaskFaultState::GeneralProtection);
+    }
+
     asm!(
         r#"
             mov 136(%rsi), %r11 // rflags

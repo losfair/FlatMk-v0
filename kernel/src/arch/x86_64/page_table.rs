@@ -2,7 +2,6 @@ use crate::addr::*;
 use crate::error::*;
 use crate::kobj::*;
 use crate::multilevel::*;
-use bit_field::BitField;
 use core::fmt;
 use core::mem::ManuallyDrop;
 use core::ptr::NonNull;
@@ -236,13 +235,6 @@ pub unsafe fn arch_get_current_page_table() -> PhysAddr {
     let (level_4_table_frame, _) = Cr3::read();
 
     PhysAddr(level_4_table_frame.start_address().as_u64())
-}
-
-pub fn arch_validate_virtual_address(addr: u64) -> KernelResult<()> {
-    match addr.get_bits(47..64) {
-        0 | 0x1ffff => Ok(()),
-        _ => Err(KernelError::InvalidAddress),
-    }
 }
 
 pub fn arch_translate_phys_mapped_virt(virt: VirtAddr) -> KernelResult<PhysAddr> {
