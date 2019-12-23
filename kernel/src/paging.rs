@@ -1,15 +1,17 @@
 //! Paging-related types and methods.
 
 use crate::error::*;
-use crate::kobj::*;
 
 use crate::addr::*;
 use crate::arch::tlb;
 use crate::arch::{
-    arch_get_current_page_table, Page, PageTableEntry, PAGE_TABLE_INDEX_START, PAGE_TABLE_LEVELS,
-    PAGE_TABLE_LEVEL_BITS, PAGE_TABLE_SIZE,
+    arch_get_current_page_table, Page, PageTableEntry, PAGE_SIZE, PAGE_TABLE_INDEX_START,
+    PAGE_TABLE_LEVELS, PAGE_TABLE_LEVEL_BITS, PAGE_TABLE_SIZE,
 };
 use crate::multilevel::*;
+use crate::pagealloc::*;
+use bootloader::bootinfo::MemoryRegionType;
+use core::mem::MaybeUninit;
 
 pub(crate) static mut PHYSICAL_OFFSET: u64 = 0;
 
@@ -27,13 +29,33 @@ pub type PageTableLevel = Level<Page, PageTableEntry, PAGE_TABLE_SIZE>;
 
 pub struct PageTableObject(pub PageTableMto);
 
-impl Notify for PageTableObject {
-    unsafe fn will_drop(&mut self, owner: &dyn LikeKernelObject) {
-        self.0.will_drop(owner);
-    }
+unsafe fn populate_available_pages() {
+    let phys_mappings = &crate::boot::boot_info().memory_map;
 
-    unsafe fn return_user_page(&self, addr: UserAddr) {
-        drop(self.put_to_user(addr));
+    let phys_iterator = phys_mappings
+        .iter()
+        .filter_map(|x| match x.region_type {
+            MemoryRegionType::Usable | MemoryRegionType::Bootloader => Some(
+                (x.range.start_addr()..x.range.end_addr())
+                    .step_by(PAGE_SIZE as _)
+                    .map(|x| PhysAddr(x)),
+            ),
+            _ => None,
+        })
+        .flatten();
+    let mut next: usize = 0;
+    for addr in phys_iterator {
+        if next == 0 {
+            init_clear_and_push_alloc_frame(VirtAddr::from_phys(addr).as_nonnull().unwrap());
+        } else {
+            push_physical_page(addr);
+        }
+        // Each group consists of one `AllocFrame` + `PAGES_PER_ALLOC_FRAME` normal pages.
+        if next + 1 == 1 + PAGES_PER_ALLOC_FRAME {
+            next = 0;
+        } else {
+            next += 1;
+        }
     }
 }
 
@@ -65,43 +87,11 @@ pub unsafe fn init() {
         // Update boot info virtual address.
         crate::boot::set_boot_info(&*boot_info_kvaddr.as_mut_ptr());
     }
+
+    populate_available_pages();
 }
 
 impl PageTableObject {
-    pub fn take_from_user(&self, addr: UserAddr) -> KernelResult<VirtAddr> {
-        addr.validate()?;
-        addr.check_page_alignment()?;
-
-        Ok(self.0.lookup_leaf_entry(addr.0, |entry| {
-            match entry.as_level() {
-                Some(x) => {
-                    if !entry.is_user_accessible() {
-                        return Err(KernelError::InvalidState);
-                    }
-                    entry.set_user_accessible(false);
-                    tlb::flush(addr); // TODO: Fix when we add multicore support.
-                    Ok(VirtAddr::from_nonnull(x))
-                }
-                None => Err(KernelError::InvalidAddress),
-            }
-        })??)
-    }
-
-    pub fn put_to_user(&self, addr: UserAddr) -> KernelResult<()> {
-        addr.validate()?;
-        addr.check_page_alignment()?;
-
-        Ok(self.0.lookup_leaf_entry(addr.0, |entry| {
-            if entry.is_unused() {
-                Err(KernelError::EmptyObject)
-            } else {
-                entry.set_user_accessible(true);
-                tlb::flush(addr); // TODO: Fix when we add multicore support.
-                Ok(())
-            }
-        })??)
-    }
-
     pub unsafe fn copy_kernel_range_from_level(&self, src: &PageTableLevel) {
         self.0.with_root(|this| {
             for (i, entry) in src
@@ -115,31 +105,39 @@ impl PageTableObject {
         })
     }
 
-    pub fn build_from_user(
-        &self,
-        target: UserAddr,
-        backing_owner: KernelObjectRef<PageTableObject>,
-        backing: UserAddr,
-    ) -> KernelResult<bool> {
-        target.validate()?;
+    pub fn make_leaf_entry(&self, target: UserAddr) -> KernelResult<()> {
         target.check_page_alignment()?;
-
-        self.0.build_from_user(target.0, backing_owner, backing)
+        self.0.make_leaf_entry(target.get())
     }
 
-    pub unsafe fn map_physical_page_for_user(
+    pub fn map_anonymous(&self, target: UserAddr) -> KernelResult<()> {
+        target.check_page_alignment()?;
+        let mut page: MaybeUninit<KernelPageRef<Page>> = KernelPageRef::new_uninit()?;
+        for b in unsafe { (*page.as_mut_ptr()).0.iter_mut() } {
+            *b = 0;
+        }
+        self.0
+            .attach_leaf(target.get(), unsafe { page.assume_init() })?;
+        tlb::flush(target);
+        Ok(())
+    }
+
+    pub unsafe fn map_physical_page(
         &self,
         target: UserAddr,
         backing: PhysAddr,
     ) -> KernelResult<()> {
-        target.validate()?;
         target.check_page_alignment()?;
-
-        self.0.lookup_leaf_entry(target.0, |entry| {
+        self.0.lookup_leaf_entry(target.get(), |entry| {
+            if let Some(mut old) = entry.as_level() {
+                old.as_mut().drop_and_release_assuming_leaf();
+            }
             entry.set_addr_rw(backing);
             entry.set_user_accessible(true);
             entry.set_no_cache(true);
+            entry.set_unowned(true); // Direct physical page mappings are always unowned.
         })?;
+        tlb::flush(target);
         Ok(())
     }
 }

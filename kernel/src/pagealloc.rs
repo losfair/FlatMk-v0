@@ -3,9 +3,13 @@
 use crate::addr::*;
 use crate::arch::PAGE_SIZE;
 use crate::error::*;
-use core::mem::size_of;
+use core::mem::{size_of, MaybeUninit};
+use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 use spin::Mutex;
+
+/// This number is chosen to ensure size_of::<AllocFrame>() == size_of::<Page>() .
+pub const PAGES_PER_ALLOC_FRAME: usize = PAGE_SIZE / size_of::<usize>() - 3;
 
 /// A NonNull pointer to `AllocFrame` that implements `Send`.
 #[derive(Copy, Clone)]
@@ -17,7 +21,7 @@ unsafe impl Send for AllocFramePtr {}
 #[repr(C)]
 pub struct AllocFrame {
     /// A stack of unused physical addresses.
-    elements: [PhysAddr; PAGE_SIZE / size_of::<usize>() - 3],
+    elements: [PhysAddr; PAGES_PER_ALLOC_FRAME],
 
     /// Stack top, exclusively. `next_index == elements.len()` if the frame is full.
     next_index: usize,
@@ -106,6 +110,28 @@ impl<T> KernelPageRef<T> {
             Ok(KernelPageRef(ptr))
         }
     }
+
+    pub fn new_uninit() -> KernelResult<MaybeUninit<Self>> {
+        assert!(size_of::<T>() <= PAGE_SIZE);
+        let phys = unsafe { pop_physical_page()? };
+        let virt = VirtAddr::from_phys(phys);
+        let ptr = virt.as_nonnull().unwrap();
+        Ok(MaybeUninit::new(KernelPageRef(ptr)))
+    }
+
+    pub fn as_nonnull(&mut self) -> NonNull<T> {
+        self.0
+    }
+
+    pub fn into_raw(me: KernelPageRef<T>) -> NonNull<T> {
+        let result = me.0;
+        core::mem::forget(me);
+        result
+    }
+
+    pub unsafe fn from_raw(x: NonNull<T>) -> KernelPageRef<T> {
+        KernelPageRef(x)
+    }
 }
 
 impl<T> Drop for KernelPageRef<T> {
@@ -117,5 +143,19 @@ impl<T> Drop for KernelPageRef<T> {
         unsafe {
             push_physical_page(phys);
         }
+    }
+}
+
+impl<T> Deref for KernelPageRef<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl<T> DerefMut for KernelPageRef<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        unsafe { self.0.as_mut() }
     }
 }

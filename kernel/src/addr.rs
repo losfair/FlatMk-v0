@@ -15,7 +15,7 @@ pub struct VirtAddr(pub u64);
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 #[repr(transparent)]
-pub struct UserAddr(pub u64);
+pub struct UserAddr(u64);
 
 impl VirtAddr {
     #[inline]
@@ -67,6 +67,20 @@ impl PhysAddr {
 }
 
 impl UserAddr {
+    pub fn new(value: u64) -> KernelResult<Self> {
+        let result = unsafe { Self::new_unchecked(value) };
+        result.validate()?;
+        Ok(result)
+    }
+
+    pub unsafe fn new_unchecked(value: u64) -> Self {
+        UserAddr(value)
+    }
+
+    pub fn get(&self) -> u64 {
+        self.0
+    }
+
     pub fn validate(&self) -> KernelResult<()> {
         arch_validate_virtual_address(self.0)?;
 

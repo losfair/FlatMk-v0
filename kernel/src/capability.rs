@@ -1,13 +1,12 @@
 use crate::addr::*;
+use crate::arch::task::TaskRegisters;
 use crate::error::*;
 use crate::kobj::*;
 use crate::multilevel::*;
+use crate::pagealloc::*;
 use crate::paging::PageTableObject;
-
-use crate::arch::{task::TaskRegisters, tlb};
-use crate::task::{retype_user, IpcEntry, StateRestoreMode, Task, TaskFaultState};
+use crate::task::{IpcEntry, StateRestoreMode, Task, TaskFaultState};
 use core::convert::TryFrom;
-use core::mem::ManuallyDrop;
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -39,12 +38,10 @@ impl CapabilityInvocation {
     }
 }
 
-#[repr(C)]
+#[repr(transparent)]
 #[derive(Clone, Default)]
 pub struct CapabilityTableNode {
     pub next: Option<NonNull<Level<CapabilityEndpointSet, CapabilityTableNode, 128>>>,
-    pub owner: Option<KernelObjectRef<PageTableObject>>,
-    pub uaddr: UserAddr,
 }
 
 unsafe impl Send for CapabilityTableNode {}
@@ -60,55 +57,18 @@ pub type CapabilityTable = MultilevelTableObject<
     128,
 >;
 
-impl CapabilityTableNode {
-    pub fn new_table() -> [CapabilityTableNode; 128] {
-        unsafe {
-            let mut nodes: MaybeUninit<[CapabilityTableNode; 128]> = MaybeUninit::uninit();
-            for entry in (*nodes.as_mut_ptr()).iter_mut() {
-                core::ptr::write(entry, CapabilityTableNode::default());
-            }
-            nodes.assume_init()
-        }
-    }
-}
 impl AsLevel<CapabilityEndpointSet, 128> for CapabilityTableNode {
     fn as_level(
         &mut self,
     ) -> Option<NonNull<Level<CapabilityEndpointSet, CapabilityTableNode, 128>>> {
         self.next
     }
-}
-impl DefaultUser<CapabilityEndpointSet, CapabilityTableNode, 128> for CapabilityTableNode {
-    unsafe fn default_user(
-        mut kref: NonNull<Level<CapabilityEndpointSet, CapabilityTableNode, 128>>,
-        leaf: bool,
-        owner: KernelObjectRef<PageTableObject>,
-        uaddr: UserAddr,
-    ) -> KernelResult<Self> {
-        if leaf {
-            kref.as_mut().value = ManuallyDrop::new(CapabilityEndpointSet::new());
-        } else {
-            kref.as_mut().table = ManuallyDrop::new(Self::new_table());
-        }
-        Ok(CapabilityTableNode {
-            next: Some(kref),
-            owner: Some(owner),
-            uaddr: uaddr,
-        })
-    }
-}
 
-impl Drop for CapabilityTableNode {
-    fn drop(&mut self) {
-        if let Some(owner) = self.owner.take() {
-            if self.uaddr.0 != 0 {
-                unsafe {
-                    LikeKernelObjectRef::from(owner)
-                        .get()
-                        .return_user_page(self.uaddr);
-                }
-            }
-        }
+    fn attach_level(
+        &mut self,
+        level: NonNull<Level<CapabilityEndpointSet, CapabilityTableNode, 128>>,
+    ) {
+        self.next = Some(level);
     }
 }
 
@@ -131,8 +91,6 @@ impl CapabilityEndpointSet {
         }
     }
 }
-
-impl Notify for CapabilityEndpointSet {}
 
 #[derive(Clone)]
 pub struct CapabilityEndpoint {
@@ -209,12 +167,6 @@ pub struct CapMmio {
     pub page_addr: PhysAddr,
 }
 
-impl Notify for CapabilitySet {
-    unsafe fn will_drop(&mut self, owner: &dyn LikeKernelObject) {
-        self.0.will_drop(owner);
-    }
-}
-
 impl CapabilitySet {
     pub fn entry_endpoint<T, F: FnOnce(&mut CapabilityEndpoint) -> T>(
         &self,
@@ -289,8 +241,7 @@ enum BasicTaskRequest {
     SetIpcBase = 9,
     PutCapSet = 10,
     IpcIsBlocked = 11,
-    IsUnique = 12,
-    MakeCapSet = 13,
+    MakeCapSet = 12,
 }
 
 fn invoke_cap_basic_task(
@@ -303,17 +254,12 @@ fn invoke_cap_basic_task(
     match req {
         BasicTaskRequest::FetchDeepClone => {
             let cptr = CapPtr(invocation.arg(1)? as u64);
-            let current_root = current.page_table_root.get();
-            let delegation: KernelObjectRef<Task> = retype_user(
-                &current_root,
-                UserAddr(invocation.arg(2)? as u64),
-                task.deep_clone(),
-            )?;
+            let clone = task.deep_clone()?;
             current
                 .capabilities
                 .get()
                 .entry_endpoint(cptr, |endpoint| {
-                    endpoint.object = CapabilityEndpointObject::BasicTask(delegation);
+                    endpoint.object = CapabilityEndpointObject::BasicTask(clone);
                 })?;
             Ok(0)
         }
@@ -395,31 +341,11 @@ fn invoke_cap_basic_task(
                 Ok(0)
             }
         }
-        BasicTaskRequest::IsUnique => {
-            let task = LikeKernelObjectRef::from(task);
-
-            // Capabilities are cloned for invocation.
-            if task.get().count_ref() == 2 {
-                Ok(1)
-            } else {
-                Ok(0)
-            }
-        }
         BasicTaskRequest::MakeCapSet => {
-            let current_root = current.page_table_root.get();
             let cptr = CapPtr(invocation.arg(1)? as u64);
-            let obj_delegation = UserAddr(invocation.arg(2)? as u64);
-            let root_delegation = UserAddr(invocation.arg(3)? as u64);
-            let delegation: KernelObjectRef<CapabilitySet> = retype_user(
-                &current_root,
-                obj_delegation,
-                CapabilitySet(CapabilityTable::new_from_user(
-                    &current_root,
-                    root_delegation,
-                )?),
-            )?;
+            let capset = KernelObjectRef::new(CapabilitySet(CapabilityTable::new()?))?;
             task.capabilities.get().entry_endpoint(cptr, |endpoint| {
-                endpoint.object = CapabilityEndpointObject::CapabilitySet(delegation);
+                endpoint.object = CapabilityEndpointObject::CapabilitySet(capset);
             })?;
             Ok(0)
         }
@@ -493,25 +419,39 @@ fn invoke_cap_x86_io_port(invocation: &CapabilityInvocation, port: u16) -> Kerne
     }
 }
 
+#[repr(u32)]
+#[allow(non_camel_case_types)]
+#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+enum RootPageTableRequest {
+    MakeLeaf = 0,
+    AllocLeaf = 1,
+}
+
 fn invoke_cap_root_page_table(
     invocation: &CapabilityInvocation,
     pt: KernelObjectRef<PageTableObject>,
 ) -> KernelResult<i64> {
-    let current = Task::current();
-    let target = UserAddr(invocation.arg(0)? as u64);
-    let user_page = UserAddr(invocation.arg(1)? as u64);
+    let req = RootPageTableRequest::try_from(invocation.arg(0)? as u32)?;
 
-    let leaf = pt.build_from_user(target, current.page_table_root.get(), user_page)?;
-    Ok(if leaf { 1 } else { 0 })
+    match req {
+        RootPageTableRequest::MakeLeaf => {
+            let target = UserAddr::new(invocation.arg(1)? as u64)?;
+            pt.make_leaf_entry(target)?;
+            Ok(0)
+        }
+        RootPageTableRequest::AllocLeaf => {
+            let target = UserAddr::new(invocation.arg(1)? as u64)?;
+            pt.map_anonymous(target)?;
+            Ok(0)
+        }
+    }
 }
 
 fn invoke_cap_mmio(invocation: &CapabilityInvocation, mmio: CapMmio) -> KernelResult<i64> {
-    let target = UserAddr(invocation.arg(0)? as u64);
+    let target = UserAddr::new(invocation.arg(0)? as u64)?;
     unsafe {
-        mmio.page_table
-            .map_physical_page_for_user(target, mmio.page_addr)?;
+        mmio.page_table.map_physical_page(target, mmio.page_addr)?;
     }
-    tlb::flush(target);
     Ok(0)
 }
 
@@ -650,12 +590,11 @@ fn invoke_cap_task_endpoint(
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, TryFromPrimitive)]
 enum CapSetRequest {
-    Map = 0,
-    IsUnique = 1,
-    CloneCap = 2,
-    DropCap = 3,
-    FetchCap = 4,
-    PutCap = 5,
+    MakeLeafSet = 0,
+    CloneCap = 1,
+    DropCap = 2,
+    FetchCap = 3,
+    PutCap = 4,
 }
 
 fn invoke_cap_capability_set(
@@ -666,23 +605,12 @@ fn invoke_cap_capability_set(
     let current = Task::current();
 
     match req {
-        CapSetRequest::Map => {
+        CapSetRequest::MakeLeafSet => {
             let ptr = invocation.arg(1)? as u64;
-            let uaddr = UserAddr(invocation.arg(2)? as u64);
-            let leaf = set
-                .0
-                .build_from_user(ptr, current.page_table_root.get(), uaddr)?;
-            Ok(if leaf { 1 } else { 0 })
-        }
-        CapSetRequest::IsUnique => {
-            let set = LikeKernelObjectRef::from(set);
-
-            // Capabilities are cloned for invocation.
-            if set.get().count_ref() == 2 {
-                Ok(1)
-            } else {
-                Ok(0)
-            }
+            set.0.make_leaf_entry(ptr)?;
+            set.0
+                .attach_leaf(ptr, KernelPageRef::new(CapabilityEndpointSet::new())?)?;
+            Ok(0)
         }
         CapSetRequest::CloneCap => {
             let src = CapPtr(invocation.arg(1)? as u64);

@@ -5,14 +5,13 @@ use crate::arch::{
         arch_enter_user_mode, arch_enter_user_mode_syscall, arch_get_kernel_tls,
         arch_init_kernel_tls_for_cpu, arch_set_kernel_tls, TaskRegisters, TlsIndirect,
     },
-    tlb, PAGE_SIZE, PAGE_TABLE_LEVELS,
+    PAGE_SIZE,
 };
 use crate::capability::{CapabilitySet, INVALID_CAP};
 use crate::error::*;
 use crate::kobj::*;
 use crate::paging::{PageTableLevel, PageTableObject};
 use crate::serial::with_serial_port;
-use bootloader::bootinfo::MemoryRegionType;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
@@ -123,38 +122,6 @@ pub unsafe fn init() {
     arch_init_kernel_tls_for_cpu(&mut INIT_TLS);
 }
 
-/// This function is unsafe because arbitrary physical memory can be mapped.
-unsafe fn make_user_continuous_map<I: Iterator<Item = PhysAddr>>(
-    region: I,
-    mut uaddr: UserAddr,
-    root: &PageTableObject,
-) -> u64 {
-    let mut count: u64 = 0;
-    for page_phys in region {
-        if uaddr.validate().is_err() {
-            return count;
-        }
-
-        let page_virt = VirtAddr::from_phys(page_phys);
-        for b in (*page_virt.as_mut_ptr::<[u8; PAGE_SIZE]>()).iter_mut() {
-            *b = 0;
-        }
-
-        root.0.lookup_entry(uaddr.0, |depth, entry| {
-            entry.set_addr_rw(page_phys);
-            entry.set_user_accessible(true);
-
-            if depth == PAGE_TABLE_LEVELS - 1 {
-                uaddr.0 += PAGE_SIZE as u64;
-                count += 1;
-            }
-        });
-    }
-    count
-}
-
-impl Notify for Task {}
-
 impl Task {
     /// Creates a new initial task for the current CPU.
     /// This does not depend on having a current task.
@@ -175,39 +142,23 @@ impl Task {
     }
 
     pub fn load_root_image(&self) -> u64 {
-        // Map all available physical memory into root task's address space.
-        let num_pages_mapped = {
-            let phys_mappings = &crate::boot::boot_info().memory_map;
+        let map_begin = ROOT_TASK_FULL_MAP_BASE;
+        let map_end = map_begin + 1048576 * 32;
 
-            let phys_iterator = phys_mappings
-                .iter()
-                .filter_map(|x| match x.region_type {
-                    MemoryRegionType::Usable | MemoryRegionType::Bootloader => Some(
-                        (x.range.start_addr()..x.range.end_addr())
-                            .step_by(PAGE_SIZE as _)
-                            .map(|x| PhysAddr(x)),
-                    ),
-                    _ => None,
-                })
-                .flatten();
-            unsafe {
-                make_user_continuous_map(
-                    phys_iterator,
-                    UserAddr(ROOT_TASK_FULL_MAP_BASE),
-                    &self.page_table_root.get(),
-                )
-            }
-        };
-        tlb::flush_all();
-        with_serial_port(|p| writeln!(p, "Mapped {} pages.", num_pages_mapped).unwrap());
+        let pt = self.page_table_root.get();
+
+        // TODO: fix this
+        for i in (map_begin..map_end).step_by(PAGE_SIZE) {
+            let uaddr = UserAddr::new(i).unwrap();
+            pt.make_leaf_entry(uaddr).unwrap();
+            pt.map_anonymous(uaddr).unwrap();
+        }
+        with_serial_port(|p| writeln!(p, "Mapped memory for initial task.").unwrap());
 
         let user_view = unsafe {
-            core::slice::from_raw_parts_mut(
-                ROOT_TASK_FULL_MAP_BASE as *mut u8,
-                (num_pages_mapped * (PAGE_SIZE as u64)) as usize,
-            )
+            core::slice::from_raw_parts_mut(map_begin as *mut u8, (map_end - map_begin) as usize)
         };
-        match crate::elf::load(ROOT_IMAGE, user_view, ROOT_TASK_FULL_MAP_BASE) {
+        match crate::elf::load(ROOT_IMAGE, user_view, map_begin) {
             Some(x) => x,
             None => {
                 panic!("Unable to load root image");
@@ -233,8 +184,8 @@ impl Task {
         self as *const Task == inner
     }
 
-    pub fn deep_clone(&self) -> Task {
-        Task {
+    pub fn deep_clone(&self) -> KernelResult<KernelObjectRef<Task>> {
+        KernelObjectRef::new(Task {
             page_table_root: AtomicKernelObjectRef::new(self.page_table_root.get()),
             capabilities: AtomicKernelObjectRef::new(self.capabilities.get()),
             ipc_base: AtomicU64::new(INVALID_CAP),
@@ -243,7 +194,7 @@ impl Task {
             fault_handlers: Mutex::new(self.fault_handlers.lock().clone()),
             ipc_blocked: AtomicBool::new(true),
             running: AtomicBool::new(false),
-        }
+        })
     }
 
     pub fn raise_fault(&self, fault: TaskFaultState) -> ! {
@@ -304,26 +255,6 @@ impl Task {
     }
 }
 
-pub fn retype_user<T: Notify + Send + Sync + 'static>(
-    owner: &KernelObjectRef<PageTableObject>,
-    uaddr: UserAddr,
-    value: T,
-) -> KernelResult<KernelObjectRef<T>> {
-    let kvaddr = owner.take_from_user(uaddr)?;
-
-    let maybe_obj = kvaddr.as_mut_ptr::<KernelObject<T>>();
-
-    let result =
-        unsafe { (*maybe_obj).init(LikeKernelObjectRef::from(owner.clone()).get(), uaddr, value) };
-    match result {
-        Ok(_) => Ok(unsafe { (*maybe_obj).get_ref() }),
-        Err(e) => {
-            drop(owner.put_to_user(uaddr));
-            Err(e)
-        }
-    }
-}
-
 pub fn switch_to(
     task: KernelObjectRef<Task>,
     old_registers: Option<&TaskRegisters>,
@@ -354,7 +285,7 @@ pub fn switch_to(
 
     // Don't reload if the new task shares a same page table with ourselves.
     unsafe {
-        let addr = PhysAddr::from_virt(&*root, root_level).unwrap();
+        let addr = PhysAddr::from_phys_mapped_virt(root_level).unwrap();
         if addr != arch_get_current_page_table() {
             arch_set_current_page_table(addr);
         }

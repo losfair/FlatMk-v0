@@ -6,27 +6,22 @@ use num_enum::{TryFromPrimitive, TryFromPrimitiveError};
 pub enum KernelError {
     /// General error that indicates at least one argument is invalid.
     InvalidArgument = -1,
-    /// Invalid memory delegation.
-    InvalidDelegation = -2,
-
     /// Not implemented.
-    NotImplemented = -4,
-
+    NotImplemented = -2,
     /// Some state is invalid for the requested operation.
-    InvalidState = -6,
+    InvalidState = -3,
     /// Invalid memory address.
-    InvalidAddress = -7,
+    InvalidAddress = -4,
     /// Some object is empty when processing invocation request.
-    EmptyObject = -8,
-
+    EmptyObject = -5,
     /// An IPC operation would block, but non-blocking mode is requested.
-    WouldBlock = -10,
+    WouldBlock = -6,
     /// An empty capability is invoked.
-    EmptyCapability = -11,
+    EmptyCapability = -7,
     /// A race condition is detected.
-    RaceRetry = -12,
+    RaceRetry = -8,
     /// No available memory.
-    OutOfMemory = -13,
+    OutOfMemory = -9,
 }
 
 pub type KernelResult<T> = Result<T, KernelError>;

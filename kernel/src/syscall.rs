@@ -1,13 +1,10 @@
 use crate::arch::task::arch_init_syscall;
 use crate::capability::{CapabilityInvocation, INVALID_CAP};
 use crate::error::*;
-use crate::serial::with_serial_port;
 use crate::task::Task;
-use core::fmt::Write;
 
 pub unsafe fn init() {
     arch_init_syscall();
-    with_serial_port(|p| writeln!(p, "System call enabled.").unwrap());
 }
 
 fn dispatch_syscall(invocation: &mut CapabilityInvocation) -> i64 {

@@ -105,11 +105,6 @@ impl TaskRegisters {
         &mut self.rip
     }
 
-    #[inline]
-    pub fn sp_mut(&mut self) -> &mut u64 {
-        &mut self.rsp
-    }
-
     /// Loads part of the register set that are not touched by the kernel
     /// but can be used by the userspace.
     pub fn lazy_read(&mut self) {

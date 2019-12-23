@@ -1,9 +1,7 @@
 use crate::addr::*;
 use crate::error::*;
-use crate::kobj::*;
 use crate::multilevel::*;
 use core::fmt;
-use core::mem::ManuallyDrop;
 use core::ptr::NonNull;
 
 #[repr(align(4096))]
@@ -81,6 +79,8 @@ bitflags! {
     }
 }
 
+const PTE_UNOWNED: PageTableFlags = PageTableFlags::BIT_9;
+
 /// Partially taken from https://docs.rs/x86_64/0.8.2/src/x86_64/structures/paging/page_table.rs.html .
 ///
 /// A 64-bit page table entry.
@@ -152,10 +152,6 @@ impl PageTableEntry {
         self.set_flags(current_flags);
     }
 
-    pub fn is_user_accessible(&self) -> bool {
-        self.test_flag(PageTableFlags::USER_ACCESSIBLE)
-    }
-
     pub fn set_user_accessible(&mut self, accessible: bool) {
         self.toggle_flag(PageTableFlags::USER_ACCESSIBLE, accessible);
     }
@@ -164,8 +160,12 @@ impl PageTableEntry {
         self.toggle_flag(PageTableFlags::NO_CACHE, no_cache);
     }
 
-    pub const fn new_table() -> [Self; 512] {
-        [Self::new(); 512]
+    pub fn set_unowned(&mut self, unowned: bool) {
+        self.toggle_flag(PTE_UNOWNED, unowned);
+    }
+
+    pub fn is_unowned(&mut self) -> bool {
+        self.test_flag(PTE_UNOWNED)
     }
 }
 
@@ -184,38 +184,31 @@ impl Default for PageTableEntry {
     }
 }
 
-impl DefaultUser<Page, PageTableEntry, 512> for PageTableEntry {
-    unsafe fn default_user(
-        mut kref: NonNull<Level<Page, PageTableEntry, 512>>,
-        leaf: bool,
-        _owner: KernelObjectRef<crate::paging::PageTableObject>,
-        _uaddr: UserAddr,
-    ) -> KernelResult<Self> {
-        if leaf {
-            kref.as_mut().value = ManuallyDrop::new(Page([0; PAGE_SIZE as usize]));
-        } else {
-            kref.as_mut().table = ManuallyDrop::new(Self::new_table());
-        }
-        let mut pte = PageTableEntry::new();
-        pte.set_addr(
-            PhysAddr::from_phys_mapped_virt(VirtAddr::from_nonnull(kref))?,
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
-        );
-        // TODO: owner and uaddr
-        Ok(pte)
-    }
-}
-
 impl AsLevel<Page, 512> for PageTableEntry {
     fn as_level(&mut self) -> Option<NonNull<Level<Page, PageTableEntry, 512>>> {
         if self.is_huge_page() {
             panic!("Huge page is not supported.");
         }
+
+        // Prevent dereferencing or dropping the underlying physical page if this pte is unowned.
+        // (e.g. MMIO)
+        if self.is_unowned() {
+            return None;
+        }
+
         if self.is_unused() {
             None
         } else {
             VirtAddr::from_phys(self.addr()).as_nonnull::<Level<Page, PageTableEntry, 512>>()
         }
+    }
+
+    fn attach_level(&mut self, level: NonNull<Level<Page, PageTableEntry, 512>>) {
+        self.set_addr(
+            PhysAddr::from_phys_mapped_virt(VirtAddr::from_nonnull(level))
+                .expect("PageTableEntry::attach_level: Invalid level pointer"),
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
+        );
     }
 }
 
