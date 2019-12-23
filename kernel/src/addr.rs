@@ -18,32 +18,39 @@ pub struct VirtAddr(pub u64);
 pub struct UserAddr(pub u64);
 
 impl VirtAddr {
+    #[inline]
     pub fn from_nonnull<T>(x: NonNull<T>) -> VirtAddr {
         VirtAddr(x.as_ptr() as u64)
     }
 
+    #[inline]
     pub fn from_ptr<T>(x: *const T) -> VirtAddr {
         VirtAddr(x as u64)
     }
 
+    #[inline]
     pub fn from_phys(phys: PhysAddr) -> VirtAddr {
         VirtAddr(unsafe { crate::paging::PHYSICAL_OFFSET } + phys.0)
     }
 
+    #[inline]
     pub fn from_ref<T>(x: &T) -> VirtAddr {
         VirtAddr(x as *const T as u64)
     }
 
+    #[inline]
     pub fn as_mut_ptr<T>(&self) -> *mut T {
         self.0 as *mut T
     }
 
+    #[inline]
     pub fn as_nonnull<T>(&self) -> Option<NonNull<T>> {
         NonNull::new(self.0 as *mut T)
     }
 }
 
 impl PhysAddr {
+    #[inline]
     pub fn from_phys_mapped_virt(virt: VirtAddr) -> KernelResult<PhysAddr> {
         arch_translate_phys_mapped_virt(virt)
     }

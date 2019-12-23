@@ -30,6 +30,7 @@ mod elf;
 mod error;
 mod kobj;
 mod multilevel;
+mod pagealloc;
 mod paging;
 mod serial;
 mod syscall;

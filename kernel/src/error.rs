@@ -25,6 +25,8 @@ pub enum KernelError {
     EmptyCapability = -11,
     /// A race condition is detected.
     RaceRetry = -12,
+    /// No available memory.
+    OutOfMemory = -13,
 }
 
 pub type KernelResult<T> = Result<T, KernelError>;

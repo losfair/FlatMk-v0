@@ -237,6 +237,7 @@ pub unsafe fn arch_get_current_page_table() -> PhysAddr {
     PhysAddr(level_4_table_frame.start_address().as_u64())
 }
 
+#[inline]
 pub fn arch_translate_phys_mapped_virt(virt: VirtAddr) -> KernelResult<PhysAddr> {
     const MAP_BEGIN: u64 = 0xFFFF800000000000;
     const MAP_END: u64 = 0xFFFFFF0000000000;
