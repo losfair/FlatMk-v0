@@ -1,24 +1,18 @@
+use crate::error::*;
 use alloc::boxed::Box;
+use core::convert::TryFrom;
 use core::intrinsics::abort;
 use core::mem::MaybeUninit;
 
-mod syscall_impl {
-    #[naked]
-    #[inline(never)]
-    #[no_mangle]
-    unsafe extern "C" fn _do_syscall() {
-        asm!(
-            r#"
-            movq %rcx, %r10
-            syscall
-            retq
-        "#
-        );
-    }
-}
-
-extern "C" {
-    fn _do_syscall(p0: i64, p1: i64, p2: i64, p3: i64, p4: i64, p5: i64) -> i64;
+unsafe fn _do_syscall(p0: i64, p1: i64, p2: i64, p3: i64, p4: i64, p5: i64) -> i64 {
+    let result: i64;
+    asm!(
+        "syscall" :
+            "={rax}"(result) :
+            "{rdi}"(p0), "{rsi}"(p1), "{rdx}"(p2), "{r10}"(p3), "{r8}"(p4), "{r9}"(p5) :
+            "rcx", "r11"
+    );
+    result
 }
 
 pub const INVALID_CAP: u64 = core::u64::MAX;
@@ -31,39 +25,29 @@ pub enum RootTaskCapRequest {
     LocalMmio = 2,
 }
 
-#[repr(align(4096))]
-pub struct Delegation([u8; 4096]);
-
-impl Delegation {
-    pub const fn new() -> Delegation {
-        Delegation([0; 4096])
-    }
-
-    pub unsafe fn new_uninitialized_boxed() -> Box<Delegation> {
-        Box::new_uninit().assume_init()
-    }
-}
-
+#[repr(transparent)]
 pub struct CPtr(u64);
 
 impl CPtr {
-    pub const fn make_trivial_twolevel(level0: u8, level1: u8) -> u64 {
-        ((level0 as u64) << 56) | ((level1 as u64) << 48)
+    pub const unsafe fn new(inner: u64) -> CPtr {
+        CPtr(inner)
     }
 
-    pub const unsafe fn new_twolevel(level0: u8, level1: u8) -> CPtr {
-        CPtr(Self::make_trivial_twolevel(level0, level1))
-    }
-
+    #[inline(never)]
     pub unsafe fn call(&self, p0: i64, p1: i64, p2: i64, p3: i64) -> i64 {
         _do_syscall(self.0 as _, p0, p1, p2, p3, 0)
     }
 
+    pub unsafe fn call_result(&self, p0: i64, p1: i64, p2: i64, p3: i64) -> KernelResult<i64> {
+        match self.call(p0, p1, p2, p3) {
+            x if x < 0 => Err(KernelError::try_from(x as i32).unwrap()),
+            x => Ok(x),
+        }
+    }
+
     #[inline]
-    pub unsafe fn drop_and_call(mut self, p0: i64, p1: i64, p2: i64, p3: i64) -> i64 {
-        // FIXME: Race condition between drop and call.
+    pub unsafe fn leaky_call(mut self, p0: i64, p1: i64, p2: i64, p3: i64) -> i64 {
         let raw = self.0;
-        crate::task::release_cptr_no_dropcap(&mut self);
         core::mem::forget(self);
         _do_syscall(raw as _, p0, p1, p2, p3, 0)
     }

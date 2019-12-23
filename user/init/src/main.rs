@@ -1,6 +1,6 @@
 #![no_main]
 #![no_std]
-#![feature(core_intrinsics)]
+#![feature(core_intrinsics, asm, naked_functions)]
 
 #[macro_use]
 extern crate lazy_static;
@@ -15,10 +15,12 @@ use alloc::boxed::Box;
 use core::arch::x86_64::_rdtsc;
 use core::fmt::Write;
 use flatruntime_user::{
+    capset::CapSet,
     io::Port,
     ipc::*,
     mm::{Mmio, RootPageTable},
-    syscall::Delegation,
+    syscall::{CPtr, INVALID_CAP},
+    thread::{this_ipc_base, this_task, Thread},
 };
 
 lazy_static! {
@@ -38,18 +40,13 @@ lazy_static! {
             SerialPort::new(serial_ports)
         }
     };
-    static ref PT: RootPageTable = flatruntime_user::task::THIS_TASK.fetch_rpt().unwrap();
+    static ref PT: RootPageTable = this_task().fetch_rpt().unwrap();
     static ref VGA_MMIO: Mmio = flatruntime_user::root::new_mmio(0xb8000).unwrap();
 }
 
-#[repr(align(4096))]
-struct Stack([u8; 1048576]);
-
-#[repr()]
-static mut STACK_AFTER_SWITCH: Stack = Stack([0; 1048576]);
-
 unsafe fn resource_init() {
-    PT.map_page(0x1b8000).unwrap();
+    PT.make_leaf(0x1b8000).unwrap();
+    writeln!(SERIAL_PORT.handle(), "AAA");
     VGA_MMIO.alloc_at(0x1b8000).unwrap();
 }
 
@@ -57,64 +54,53 @@ unsafe fn resource_init() {
 pub unsafe extern "C" fn user_start() -> ! {
     writeln!(SERIAL_PORT.handle(), "Init process started.");
     resource_init();
+    writeln!(SERIAL_PORT.handle(), "XXX");
     println!("init: FlatMK init task started.");
 
+    benchmark(1000000, "syscall", || unsafe {
+        let cptr = CPtr::new(INVALID_CAP);
+        cptr.call(0, 0, 0, 0);
+        core::mem::forget(cptr);
+    });
+
     benchmark(1000000, "simple capability invocation", || {
-        flatruntime_user::task::THIS_TASK.call_invalid();
+        this_task().call_invalid();
     });
 
-    let cloned = flatruntime_user::task::THIS_TASK.deep_clone().unwrap();
-    println!("init: Cloned task.");
+    let new_thread = Thread::new(0x300100);
+    println!("init: Created thread.");
 
-    cloned.reset_caps(unsafe {
-        Delegation::new_uninitialized_boxed()
-    }).unwrap();
     unsafe {
-        cloned
-            .make_first_level_endpoint(0, Delegation::new_uninitialized_boxed())
-            .unwrap();
-        cloned.put_cap(cloned.get_cptr(), 0).unwrap();
+        new_thread.task().unblock_ipc().unwrap();
     }
-    println!("init: Initialized capabilities on clone.");
-    cloned.unblock_ipc().unwrap();
 
-    cloned
-        .set_register(16, 0)
-        .unwrap();
-
-    benchmark(1000000, "complex capability invocation", || {
-        assert_eq!(
-            cloned.get_register(16).unwrap(),
-            0
-        );
-    });
-
-    let cloned_endpoint = unsafe { IpcEndpoint::new(cloned.fetch_ipc_endpoint(
-        after_switch as _,
-        unsafe {
-            let stack_begin = STACK_AFTER_SWITCH.0.as_mut_ptr();
-            stack_begin.offset(STACK_AFTER_SWITCH.0.len() as isize) as u64
-        }
-    ).unwrap()) };
+    let endpoint = unsafe { new_thread.task_endpoint(handle_ipc_begin as _) };
+    println!("init: Fetched IPC endpoint.");
 
     let mut payload = FastIpcPayload::default();
-
     benchmark(1000000, "IPC call", || {
-        payload.0[0] = 1;
-        payload.0[1] = 2;
-        cloned_endpoint.call(&mut payload).unwrap();
-        assert_eq!(payload.0[0], 3);
+        payload.data[0] = 1;
+        payload.data[1] = 2;
+        endpoint.call(&mut payload).unwrap();
+        assert_eq!(payload.data[0], 3);
     });
+    drop(endpoint);
 
-    cloned.reset_caps(Delegation::new_uninitialized_boxed()).unwrap();
-
-    drop(cloned_endpoint);
-    drop(cloned);
-
-    println!("init: Dropped clone.");
+    drop(new_thread);
+    println!("init: Dropped child thread.");
 
     benchmark(1000000, "task deep clone", || {
-        flatruntime_user::task::THIS_TASK.deep_clone().unwrap();
+        this_task().deep_clone().unwrap();
+    });
+
+    benchmark(1000000, "thread creation", || {
+        Thread::new(0x300200);
+    });
+
+    benchmark(1000000, "full capset initialization", || {
+        let capset = this_task().make_capset().unwrap();
+        capset.make_leaf(0x100000).unwrap();
+        capset.put_cap(this_task().cptr(), 0x100000).unwrap();
     });
 
     loop {}
@@ -130,13 +116,38 @@ fn benchmark<F: FnMut()>(n: usize, msg: &str, mut f: F) {
     println!("init: benchmark: {} cycles per {}.", result, msg);
 }
 
-extern "C" fn after_switch() -> ! {
-    flatruntime_user::ipc::handle_ipc();
+#[naked]
+unsafe extern "C" fn handle_ipc_begin() -> ! {
+    asm!(
+        r#"
+            mov %gs:8, %rsp
+            jmp handle_ipc
+        "# :::: "volatile"
+    );
+    loop {}
+}
+
+#[no_mangle]
+extern "C" fn handle_ipc() -> ! {
+    let peer_endpoint = unsafe { CPtr::new(this_ipc_base()) };
+    let mut payload = FastIpcPayload::default();
+    fastipc_read(&mut payload);
+    payload.data[0] = payload.data[0] + payload.data[1];
+    fastipc_write(&payload);
+    let code = unsafe {
+        peer_endpoint.leaky_call(
+            IpcRequest::SwitchToBlocking_UnblockLocalIpc as u32 as i64,
+            INVALID_CAP as _,
+            INVALID_CAP as _,
+            INVALID_CAP as _,
+        )
+    };
+    panic!("handle_ipc: {}", code);
 }
 
 #[panic_handler]
 fn on_panic(info: &core::panic::PanicInfo) -> ! {
-    println!("panic(): {:#?}", info);
-    //writeln!(SERIAL_PORT.handle(), "panic(): {:#?}", info);
+    //println!("panic(): {:#?}", info);
+    writeln!(SERIAL_PORT.handle(), "panic(): {:#?}", info);
     loop {}
 }

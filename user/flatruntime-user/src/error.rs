@@ -5,22 +5,22 @@ use num_enum::TryFromPrimitive;
 pub enum KernelError {
     /// General error that indicates at least one argument is invalid.
     InvalidArgument = -1,
-    /// Invalid memory delegation.
-    InvalidDelegation = -2,
-    /// Invalid object type. Usually indicates a failure during retyping.
-    InvalidType = -3,
     /// Not implemented.
-    NotImplemented = -4,
-    /// The type for a kernel object has a size larger than one page.
-    KernelObjectTooLarge = -5,
+    NotImplemented = -2,
     /// Some state is invalid for the requested operation.
-    InvalidState = -6,
+    InvalidState = -3,
     /// Invalid memory address.
-    InvalidAddress = -7,
-    /// The provided capability slot is empty.
-    EmptyObject = -8,
-    /// An address provided is not aligned to page boundary.
-    NotAligned = -9,
+    InvalidAddress = -4,
+    /// Some object is empty when processing invocation request.
+    EmptyObject = -5,
+    /// An IPC operation would block, but non-blocking mode is requested.
+    WouldBlock = -6,
+    /// An empty capability is invoked.
+    EmptyCapability = -7,
+    /// A race condition is detected.
+    RaceRetry = -8,
+    /// No available memory.
+    OutOfMemory = -9,
 }
 
 pub type KernelResult<T> = Result<T, KernelError>;

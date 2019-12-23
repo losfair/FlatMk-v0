@@ -1,5 +1,5 @@
 use crate::error::*;
-use crate::syscall::{CPtr, Delegation};
+use crate::syscall::CPtr;
 use alloc::boxed::Box;
 use core::convert::TryFrom;
 
@@ -7,30 +7,27 @@ pub struct RootPageTable {
     cap: CPtr,
 }
 
+#[repr(u32)]
+#[derive(Debug, Copy, Clone)]
+enum RootPageTableRequest {
+    MakeLeaf = 0,
+    AllocLeaf = 1,
+}
+
 impl RootPageTable {
     pub unsafe fn new(cap: CPtr) -> RootPageTable {
         RootPageTable { cap }
     }
 
-    pub unsafe fn map_page(&self, vaddr: u64) -> Result<(), i64> {
-        loop {
-            let mut del = Delegation::new_uninitialized_boxed();
-            let ret = self
-                .cap
-                .call(vaddr as i64, &mut *del as *mut Delegation as i64, 0, 0);
-            if ret < 0 {
-                return Err(ret);
-            }
-            if ret == 0 {
-                break;
-            }
-
-            Box::leak(del);
-            if ret == 1 {
-                break;
-            }
-        }
-        Ok(())
+    pub unsafe fn make_leaf(&self, vaddr: u64) -> KernelResult<()> {
+        self.cap
+            .call_result(
+                RootPageTableRequest::MakeLeaf as u32 as i64,
+                vaddr as i64,
+                0,
+                0,
+            )
+            .map(|_| ())
     }
 }
 
@@ -44,11 +41,6 @@ impl Mmio {
     }
 
     pub unsafe fn alloc_at(&self, vaddr: u64) -> KernelResult<()> {
-        let result = self.cap.call(vaddr as i64, 0, 0, 0);
-        if result < 0 {
-            Err(KernelError::try_from(result as i32).unwrap())
-        } else {
-            Ok(())
-        }
+        self.cap.call_result(vaddr as i64, 0, 0, 0).map(|_| ())
     }
 }
