@@ -4,7 +4,7 @@ use crate::error::*;
 use crate::kobj::*;
 use crate::multilevel::*;
 use crate::pagealloc::*;
-use crate::paging::PageTableObject;
+use crate::paging::{PageTableMto, PageTableObject};
 use crate::task::{IpcEntry, StateRestoreMode, Task, TaskFaultState};
 use core::convert::TryFrom;
 use core::mem::MaybeUninit;
@@ -242,6 +242,8 @@ enum BasicTaskRequest {
     PutCapSet = 10,
     IpcIsBlocked = 11,
     MakeCapSet = 12,
+    MakeRootPageTable = 13,
+    PutRootPageTable = 14,
 }
 
 fn invoke_cap_basic_task(
@@ -347,6 +349,27 @@ fn invoke_cap_basic_task(
             task.capabilities.get().entry_endpoint(cptr, |endpoint| {
                 endpoint.object = CapabilityEndpointObject::CapabilitySet(capset);
             })?;
+            Ok(0)
+        }
+        BasicTaskRequest::MakeRootPageTable => {
+            let cptr = CapPtr(invocation.arg(1)? as u64);
+            let pto = KernelObjectRef::new(PageTableObject(PageTableMto::new()?))?;
+            task.capabilities.get().entry_endpoint(cptr, |endpoint| {
+                endpoint.object = CapabilityEndpointObject::RootPageTable(pto);
+            })?;
+            Ok(0)
+        }
+        BasicTaskRequest::PutRootPageTable => {
+            let cptr = CapPtr(invocation.arg(1)? as u64);
+            let pto =
+                current
+                    .capabilities
+                    .get()
+                    .entry_endpoint(cptr, |endpoint| match endpoint.object {
+                        CapabilityEndpointObject::RootPageTable(ref pto) => Ok(pto.clone()),
+                        _ => Err(KernelError::InvalidArgument),
+                    })??;
+            task.page_table_root.swap(pto);
             Ok(0)
         }
     }
