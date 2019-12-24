@@ -7,12 +7,15 @@ use crate::arch::{
     },
     Page, PAGE_SIZE,
 };
-use crate::capability::{CapabilitySet, INVALID_CAP};
+use crate::capability::{
+    CapPtr, CapTaskEndpoint, CapabilityEndpointObject, CapabilitySet, INVALID_CAP,
+};
 use crate::error::*;
 use crate::kobj::*;
 use crate::paging::{PageTableLevel, PageTableObject};
 use crate::serial::with_serial_port;
 use core::fmt::Write;
+use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -79,31 +82,13 @@ pub struct FaultHandler {
     pub entry: IpcEntry,
 }
 
+#[derive(Clone)]
 pub struct IpcEntry {
     /// Instruction pointer.
     pub pc: u64,
 
     /// Context provided by the user.
-    /// Can only be modified when equals to zero.
-    pub user_context: AtomicU64,
-}
-
-impl IpcEntry {
-    pub fn set_user_context(&self, ctx: u64) -> KernelResult<()> {
-        self.user_context
-            .compare_exchange(0, ctx, Ordering::SeqCst, Ordering::SeqCst)
-            .map(|_| ())
-            .map_err(|_| KernelError::InvalidState)
-    }
-}
-
-impl Clone for IpcEntry {
-    fn clone(&self) -> IpcEntry {
-        IpcEntry {
-            pc: self.pc,
-            user_context: AtomicU64::new(self.user_context.load(Ordering::SeqCst)),
-        }
-    }
+    pub user_context: u64,
 }
 
 fn set_current_task(t: KernelObjectRef<Task>) {
@@ -249,22 +234,60 @@ impl Task {
         mode: StateRestoreMode,
     ) -> KernelError {
         {
-            // TODO: Save old PC/SP and pass user context.
             let mut target_regs = task.registers.lock();
             *target_regs.pc_mut() = entry.pc;
+            if entry.user_context != core::u64::MAX {
+                *target_regs.usermode_arg_mut(0).unwrap() = entry.user_context;
+            }
         }
 
         match switch_to(task, Some(old_registers)) {
             Ok(()) => {}
             Err(e) => return e,
         }
-        let user_context = entry.user_context.load(Ordering::SeqCst);
-        unsafe {
-            asm!(
-                "mov $0, %xmm0" : : "r"(user_context) : : "volatile"
-            );
-        }
         enter_user_mode(mode);
+    }
+
+    /// Invokes asynchronous preemption to this task.
+    ///
+    /// Maintains ipc_blocked == false if returns due to an error.
+    pub fn invoke_async_preemption(
+        task: KernelObjectRef<Task>,
+        entry: IpcEntry,
+        old_registers: &TaskRegisters,
+        code: Option<u64>,
+    ) -> KernelError {
+        if let Err(e) = task.block_ipc() {
+            return e;
+        }
+
+        let remote_base = task.ipc_base.load(Ordering::SeqCst);
+
+        if let Err(e) = task
+            .capabilities
+            .get()
+            .entry_endpoint(CapPtr(remote_base), |endpoint| {
+                endpoint.object = CapabilityEndpointObject::TaskEndpoint(CapTaskEndpoint {
+                    task: Some(Task::current()),
+                    entry: IpcEntry {
+                        pc: old_registers.pc(),
+                        user_context: core::u64::MAX,
+                    },
+                    reply: true,
+                    was_preempted: true,
+                });
+            })
+        {
+            drop(task.unblock_ipc());
+            return e;
+        }
+
+        if let Some(code) = code {
+            let mut target_regs = task.registers.lock();
+            *target_regs.usermode_arg_mut(1).unwrap() = code; // argument 0 is used in invoke_ipc
+        }
+
+        Self::invoke_ipc(task, entry, old_registers, StateRestoreMode::Syscall)
     }
 }
 
@@ -336,5 +359,45 @@ pub fn enter_user_mode(mode: StateRestoreMode) -> ! {
             StateRestoreMode::Full => arch_enter_user_mode(registers),
             StateRestoreMode::Syscall => arch_enter_user_mode_syscall(registers),
         }
+    }
+}
+
+lazy_static! {
+    static ref INTERRUPT_BINDINGS: Mutex<[Option<InterruptEntry>; 256]> = Mutex::new(unsafe {
+        let mut result: MaybeUninit<[Option<InterruptEntry>; 256]> = MaybeUninit::uninit();
+        for entry in (*result.as_mut_ptr()).iter_mut() {
+            core::ptr::write(entry, None);
+        }
+        result.assume_init()
+    });
+}
+
+#[derive(Clone)]
+struct InterruptEntry {
+    task: KernelObjectRef<Task>,
+    entry: IpcEntry,
+}
+
+pub fn bind_interrupt(index: u8, handler: KernelObjectRef<Task>, entry: IpcEntry) {
+    INTERRUPT_BINDINGS.lock()[index as usize] = Some(InterruptEntry {
+        task: handler,
+        entry,
+    });
+}
+
+pub fn unbind_interrupt(index: u8) {
+    INTERRUPT_BINDINGS.lock()[index as usize] = None;
+}
+
+pub fn invoke_interrupt(
+    index: u8,
+    old_registers: &TaskRegisters,
+    code: Option<u64>,
+) -> KernelError {
+    let entry = INTERRUPT_BINDINGS.lock()[index as usize].clone();
+    if let Some(entry) = entry {
+        Task::invoke_async_preemption(entry.task, entry.entry, old_registers, code)
+    } else {
+        KernelError::EmptyObject
     }
 }

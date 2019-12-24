@@ -1,7 +1,7 @@
 use super::config::*;
-use super::task::TaskRegisters;
+use super::task::{get_hlt, set_hlt, TaskRegisters};
 use crate::serial::with_serial_port;
-use crate::task::{Task, TaskFaultState};
+use crate::task::{invoke_interrupt, Task, TaskFaultState};
 use core::fmt::Write;
 use pic8259_simple::ChainedPics;
 use spin::Mutex;
@@ -290,13 +290,15 @@ include!("../../../generated/interrupts_impl.rs");
 fn handle_external_interrupt(
     frame: &mut InterruptStackFrame,
     registers: &mut TaskRegisters,
-    _index: u8,
+    index: u8,
 ) -> ! {
-    if !is_user_fault(frame) {
+    if !is_user_fault(frame) && !get_hlt() {
         panic!("External interrupt in kernel mode");
-    } else {
-        unsafe {
-            super::task::arch_enter_user_mode(registers);
-        }
+    }
+    unsafe {
+        set_hlt(false);
+        invoke_interrupt(index, registers, None);
+        // If fails, silently discard the error and continues execution in the current task...
+        super::task::arch_enter_user_mode(registers);
     }
 }

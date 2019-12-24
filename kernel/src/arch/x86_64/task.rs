@@ -101,8 +101,26 @@ impl TaskRegisters {
     }
 
     #[inline]
+    pub fn usermode_arg_mut(&mut self, n: usize) -> KernelResult<&mut u64> {
+        Ok(match n {
+            0 => &mut self.rdi,
+            1 => &mut self.rsi,
+            2 => &mut self.rdx,
+            3 => &mut self.rcx,
+            4 => &mut self.r8,
+            5 => &mut self.r9,
+            _ => return Err(KernelError::InvalidArgument),
+        })
+    }
+
+    #[inline]
     pub fn pc_mut(&mut self) -> &mut u64 {
         &mut self.rip
+    }
+
+    #[inline]
+    pub fn pc(&self) -> u64 {
+        self.rip
     }
 
     /// Loads part of the register set that are not touched by the kernel
@@ -127,6 +145,7 @@ pub struct TlsIndirect {
     pub kernel_stack: u64,
     pub user_stack: u64,
     pub context: u64,
+    pub(super) hlt: u64,
 }
 
 impl TlsIndirect {
@@ -135,6 +154,7 @@ impl TlsIndirect {
             kernel_stack,
             user_stack: 0,
             context: 0,
+            hlt: 0,
         }
     }
 }
@@ -154,7 +174,20 @@ pub fn arch_get_kernel_tls() -> u64 {
 
 /// Sets the kernel thread local storage (TLS) pointer for the current CPU.
 pub unsafe fn arch_set_kernel_tls(value: u64) {
-    asm!("mov $0, %gs:16" :: "r"(value) :);
+    asm!("mov $0, %gs:16" :: "r"(value) :: "volatile");
+}
+
+pub(super) unsafe fn set_hlt(hlt: bool) {
+    let hlt = if hlt { 1u64 } else { 0u64 };
+    asm!("mov $0, %gs:24" :: "r"(hlt) :: "volatile");
+}
+
+pub(super) fn get_hlt() -> bool {
+    let result: u64;
+    unsafe {
+        asm!("mov %gs:24, $0" : "=r"(result) ::);
+    }
+    result != 0
 }
 
 /// The syscall path of entering user mode.
@@ -286,4 +319,16 @@ pub unsafe fn arch_init_syscall() {
         ((selectors.kernel_code_selector.0 as u64) << 32)
             | ((selectors.kernel_data_selector.0 as u64) << 48),
     );
+}
+
+/// Waits for an interrupt. Never returns because the interrupt handler will return to usermode.
+pub fn wait_for_interrupt() -> ! {
+    unsafe {
+        set_hlt(true);
+        asm!(
+            "sti\nhlt\nud2" :::: "volatile"
+        );
+    }
+
+    unreachable!()
 }

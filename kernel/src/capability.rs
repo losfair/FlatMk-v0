@@ -1,5 +1,5 @@
 use crate::addr::*;
-use crate::arch::task::TaskRegisters;
+use crate::arch::task::{wait_for_interrupt, TaskRegisters};
 use crate::error::*;
 use crate::kobj::*;
 use crate::multilevel::*;
@@ -9,7 +9,7 @@ use crate::task::{IpcEntry, StateRestoreMode, Task, TaskFaultState};
 use core::convert::TryFrom;
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
 use num_enum::TryFromPrimitive;
 
 pub const N_ENDPOINT_SLOTS: usize = 32;
@@ -117,6 +117,8 @@ pub enum CapabilityEndpointObject {
     RootPageTable(KernelObjectRef<PageTableObject>),
     TaskEndpoint(CapTaskEndpoint),
     CapabilitySet(KernelObjectRef<CapabilitySet>),
+    WaitForInterrupt,
+    Interrupt(u8),
 }
 
 pub struct CapTaskEndpoint {
@@ -147,7 +149,7 @@ impl Clone for CapTaskEndpoint {
                 task: None,
                 entry: IpcEntry {
                     pc: 0,
-                    user_context: AtomicU64::new(core::u64::MAX),
+                    user_context: core::u64::MAX,
                 },
                 reply: true,
                 was_preempted: false,
@@ -216,6 +218,8 @@ impl CapabilityEndpointObject {
             CapabilityEndpointObject::CapabilitySet(set) => {
                 invoke_cap_capability_set(invocation, set)
             }
+            CapabilityEndpointObject::WaitForInterrupt => wait_for_interrupt(),
+            CapabilityEndpointObject::Interrupt(index) => invoke_cap_interrupt(invocation, index),
         }
     }
 }
@@ -300,6 +304,7 @@ fn invoke_cap_basic_task(
         BasicTaskRequest::FetchTaskEndpoint => {
             let cptr = CapPtr(invocation.arg(1)? as u64);
             let entry_pc = invocation.arg(2)? as u64;
+            let user_context = invocation.arg(3)? as u64;
             current
                 .capabilities
                 .get()
@@ -308,7 +313,7 @@ fn invoke_cap_basic_task(
                         task: Some(task.clone()),
                         entry: IpcEntry {
                             pc: entry_pc,
-                            user_context: AtomicU64::new(0),
+                            user_context,
                         },
                         reply: false,
                         was_preempted: false,
@@ -378,14 +383,16 @@ fn invoke_cap_basic_task(
     }
 }
 
-fn invoke_cap_root_task(invocation: &CapabilityInvocation) -> KernelResult<i64> {
-    #[repr(u32)]
-    #[derive(Debug, Copy, Clone, TryFromPrimitive)]
-    enum RootTaskCapRequest {
-        X86IoPort = 0,
-        Mmio = 1,
-    }
+#[repr(u32)]
+#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+enum RootTaskCapRequest {
+    X86IoPort = 0,
+    Mmio = 1,
+    WaitForInterrupt = 2,
+    Interrupt = 3,
+}
 
+fn invoke_cap_root_task(invocation: &CapabilityInvocation) -> KernelResult<i64> {
     let current = Task::current();
 
     let requested_cap = RootTaskCapRequest::try_from(invocation.arg(0)? as u32)?;
@@ -413,6 +420,27 @@ fn invoke_cap_root_task(invocation: &CapabilityInvocation) -> KernelResult<i64> 
                         page_table: current.page_table_root.get(),
                         page_addr: phys_addr,
                     });
+                })?;
+            Ok(0)
+        }
+        RootTaskCapRequest::WaitForInterrupt => {
+            let cptr = CapPtr(invocation.arg(1)? as u64);
+            current
+                .capabilities
+                .get()
+                .entry_endpoint(cptr, |endpoint| {
+                    endpoint.object = CapabilityEndpointObject::WaitForInterrupt;
+                })?;
+            Ok(0)
+        }
+        RootTaskCapRequest::Interrupt => {
+            let cptr = CapPtr(invocation.arg(1)? as u64);
+            let interrupt_index = invocation.arg(2)? as u8;
+            current
+                .capabilities
+                .get()
+                .entry_endpoint(cptr, |endpoint| {
+                    endpoint.object = CapabilityEndpointObject::Interrupt(interrupt_index);
                 })?;
             Ok(0)
         }
@@ -500,7 +528,6 @@ enum IpcRequest {
     SwitchToNonblocking = 1,
     SwitchToBlocking_UnblockLocalIpc = 2,
     SwitchToNonblocking_UnblockLocalIpc = 3,
-    SetUserContext = 4,
 }
 
 fn invoke_cap_task_endpoint(
@@ -544,7 +571,10 @@ fn invoke_cap_task_endpoint(
                 }
                 _ => {}
             }
-            if task.block_ipc().is_err() {
+
+            // Only modify the remote task's IPC blocking state if the remote task is "aware of" it.
+            // This means the remote task wasn't preempted out.
+            if !endpoint.was_preempted && task.block_ipc().is_err() {
                 match req {
                     IpcRequest::SwitchToBlocking | IpcRequest::SwitchToBlocking_UnblockLocalIpc => {
                         task.raise_fault(TaskFaultState::IpcBlocked);
@@ -553,51 +583,53 @@ fn invoke_cap_task_endpoint(
                     | IpcRequest::SwitchToNonblocking_UnblockLocalIpc => {
                         return Err(KernelError::WouldBlock);
                     }
-                    _ => unreachable!(),
                 }
             } else {
-                let remote_base = task.ipc_base.load(Ordering::SeqCst);
+                // Only transfer capabilities if the remote task wasn't preempted out.
+                if !endpoint.was_preempted {
+                    let remote_base = task.ipc_base.load(Ordering::SeqCst);
 
-                // Swap CapabilityEndpointSet of local and remote tasks.
-                {
-                    let current_capabilities = current.capabilities.get();
-                    let remote_capabilities = task.capabilities.get();
-                    if &*current_capabilities as *const CapabilitySet
-                        != &*remote_capabilities as *const CapabilitySet
+                    // Swap CapabilityEndpointSet of local and remote tasks.
                     {
-                        let local_base = current.ipc_base.load(Ordering::SeqCst);
-                        if local_base != INVALID_CAP && remote_base != INVALID_CAP {
-                            current_capabilities.0.lookup_leaf_entry(
-                                local_base,
-                                |local_entry| {
-                                    remote_capabilities.0.lookup_leaf_entry(
-                                        remote_base,
-                                        |remote_entry| {
-                                            let remote_next = remote_entry.next;
-                                            remote_entry.next = local_entry.next;
-                                            local_entry.next = remote_next;
-                                        },
-                                    )
-                                },
-                            )??;
+                        let current_capabilities = current.capabilities.get();
+                        let remote_capabilities = task.capabilities.get();
+                        if &*current_capabilities as *const CapabilitySet
+                            != &*remote_capabilities as *const CapabilitySet
+                        {
+                            let local_base = current.ipc_base.load(Ordering::SeqCst);
+                            if local_base != INVALID_CAP && remote_base != INVALID_CAP {
+                                current_capabilities.0.lookup_leaf_entry(
+                                    local_base,
+                                    |local_entry| {
+                                        remote_capabilities.0.lookup_leaf_entry(
+                                            remote_base,
+                                            |remote_entry| {
+                                                let remote_next = remote_entry.next;
+                                                remote_entry.next = local_entry.next;
+                                                local_entry.next = remote_next;
+                                            },
+                                        )
+                                    },
+                                )??;
+                            }
                         }
                     }
-                }
 
-                if !endpoint.reply {
-                    task.capabilities.get().0.lookup(remote_base, |entry| {
-                        entry.endpoints[0] = CapabilityEndpoint {
-                            object: CapabilityEndpointObject::TaskEndpoint(CapTaskEndpoint {
-                                task: Some(current.clone()),
-                                entry: IpcEntry {
-                                    pc: *invocation.registers.pc_mut(),
-                                    user_context: AtomicU64::new(core::u64::MAX),
-                                },
-                                reply: true,
-                                was_preempted: false,
-                            }),
-                        };
-                    })?;
+                    if !endpoint.reply {
+                        task.capabilities.get().0.lookup(remote_base, |entry| {
+                            entry.endpoints[0] = CapabilityEndpoint {
+                                object: CapabilityEndpointObject::TaskEndpoint(CapTaskEndpoint {
+                                    task: Some(current.clone()),
+                                    entry: IpcEntry {
+                                        pc: *invocation.registers.pc_mut(),
+                                        user_context: core::u64::MAX,
+                                    },
+                                    reply: true,
+                                    was_preempted: false,
+                                }),
+                            };
+                        })?;
+                    }
                 }
 
                 *invocation.registers.return_value_mut() = 0;
@@ -615,11 +647,6 @@ fn invoke_cap_task_endpoint(
                 let e = Task::invoke_ipc(task, entry, &invocation.registers, mode);
                 return Err(e);
             }
-        }
-        IpcRequest::SetUserContext => {
-            let new_context_value = invocation.arg(1)? as u64;
-            endpoint.entry.set_user_context(new_context_value)?;
-            Ok(0)
         }
     }
 }
@@ -693,6 +720,45 @@ fn invoke_cap_capability_set(
             current.capabilities.get().entry_endpoint(dst, |endpoint| {
                 endpoint.object = CapabilityEndpointObject::CapabilitySet(clone);
             })?;
+            Ok(0)
+        }
+    }
+}
+
+#[repr(u32)]
+#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+enum InterruptRequest {
+    Bind = 0,
+    Unbind = 1,
+}
+
+fn invoke_cap_interrupt(invocation: &mut CapabilityInvocation, index: u8) -> KernelResult<i64> {
+    let req = InterruptRequest::try_from(invocation.arg(0)? as u32)?;
+
+    match req {
+        InterruptRequest::Bind => {
+            let task = Task::current().capabilities.get().entry_endpoint(
+                CapPtr(invocation.arg(1)? as u64),
+                |endpoint| match endpoint.object {
+                    CapabilityEndpointObject::BasicTask(ref t) => Ok(t.clone()),
+                    _ => Err(KernelError::InvalidArgument),
+                },
+            )??;
+            let entry_pc = invocation.arg(2)? as u64;
+            let user_context = invocation.arg(3)? as u64;
+
+            crate::task::bind_interrupt(
+                index,
+                task,
+                IpcEntry {
+                    pc: entry_pc,
+                    user_context,
+                },
+            );
+            Ok(0)
+        }
+        InterruptRequest::Unbind => {
+            crate::task::unbind_interrupt(index);
             Ok(0)
         }
     }
