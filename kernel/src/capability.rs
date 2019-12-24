@@ -41,7 +41,7 @@ impl CapabilityInvocation {
 #[repr(transparent)]
 #[derive(Clone, Default)]
 pub struct CapabilityTableNode {
-    pub next: Option<NonNull<Level<CapabilityEndpointSet, CapabilityTableNode, 128>>>,
+    pub next: Option<NonNull<Level<CapabilityEndpointSet, CapabilityTableNode, 512>>>,
 }
 
 unsafe impl Send for CapabilityTableNode {}
@@ -51,22 +51,22 @@ pub type CapabilityTable = MultilevelTableObject<
     CapabilityEndpointSet,
     CapabilityTableNode,
     GenericLeafCache,
-    7,
+    9,
     4,
-    35,
-    128,
+    43,
+    512,
 >;
 
-impl AsLevel<CapabilityEndpointSet, 128> for CapabilityTableNode {
+impl AsLevel<CapabilityEndpointSet, 512> for CapabilityTableNode {
     fn as_level(
         &mut self,
-    ) -> Option<NonNull<Level<CapabilityEndpointSet, CapabilityTableNode, 128>>> {
+    ) -> Option<NonNull<Level<CapabilityEndpointSet, CapabilityTableNode, 512>>> {
         self.next
     }
 
     fn attach_level(
         &mut self,
-        level: NonNull<Level<CapabilityEndpointSet, CapabilityTableNode, 128>>,
+        level: NonNull<Level<CapabilityEndpointSet, CapabilityTableNode, 512>>,
     ) {
         self.next = Some(level);
     }
