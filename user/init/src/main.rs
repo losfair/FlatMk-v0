@@ -21,6 +21,7 @@ use flatruntime_user::{
     mm::{Mmio, RootPageTable},
     syscall::{CPtr, INVALID_CAP},
     thread::{this_ipc_base, this_task, Thread},
+    task::{ROOT_PAGE_TABLE},
 };
 
 lazy_static! {
@@ -40,13 +41,11 @@ lazy_static! {
             SerialPort::new(serial_ports)
         }
     };
-    static ref PT: RootPageTable = this_task().fetch_rpt().unwrap();
     static ref VGA_MMIO: Mmio = flatruntime_user::root::new_mmio(0xb8000).unwrap();
 }
 
 unsafe fn resource_init() {
-    PT.make_leaf(0x1b8000).unwrap();
-    writeln!(SERIAL_PORT.handle(), "AAA");
+    ROOT_PAGE_TABLE.make_leaf(0x1b8000).unwrap();
     VGA_MMIO.alloc_at(0x1b8000).unwrap();
 }
 
@@ -54,7 +53,7 @@ unsafe fn resource_init() {
 pub unsafe extern "C" fn user_start() -> ! {
     writeln!(SERIAL_PORT.handle(), "Init process started.");
     resource_init();
-    writeln!(SERIAL_PORT.handle(), "XXX");
+    writeln!(SERIAL_PORT.handle(), "Resources initialized.");
     println!("init: FlatMK init task started.");
 
     benchmark(1000000, "syscall", || unsafe {
@@ -89,19 +88,27 @@ pub unsafe extern "C" fn user_start() -> ! {
     drop(new_thread);
     println!("init: Dropped child thread.");
 
-    benchmark(1000000, "task deep clone", || {
+    benchmark(500000, "task deep clone", || {
         this_task().deep_clone().unwrap();
     });
 
-    benchmark(1000000, "thread creation", || {
+    benchmark(500000, "thread creation", || {
         Thread::new(0x300200);
     });
 
-    benchmark(1000000, "full capset initialization", || {
+    benchmark(100000, "full capset initialization", || {
         let capset = this_task().make_capset().unwrap();
         capset.make_leaf(0x100000).unwrap();
         capset.put_cap(this_task().cptr(), 0x100000).unwrap();
     });
+
+    benchmark(100000, "full page table initialization", || {
+        let rpt = this_task().make_root_page_table().unwrap();
+        rpt.make_leaf(0x100000).unwrap();
+        rpt.alloc_leaf(0x100000).unwrap();
+    });
+
+    println!("Benchmark done.");
 
     loop {}
 }
