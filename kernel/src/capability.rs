@@ -474,7 +474,7 @@ fn invoke_cap_root_page_table(
         }
         RootPageTableRequest::FetchDeepClone => {
             let dst = CapPtr(invocation.arg(1)? as u64);
-            let clone = KernelObjectRef::new(PageTableObject(pt.0.deep_clone()?))?;
+            let clone = KernelObjectRef::new(PageTableObject(pt.0.deep_clone_direct()?))?;
             clone.copy_kernel_range_from(&*pt);
             current.capabilities.get().entry_endpoint(dst, |endpoint| {
                 endpoint.object = CapabilityEndpointObject::RootPageTable(clone);

@@ -26,6 +26,7 @@ mod arch;
 mod boot;
 mod capability;
 mod debug;
+mod direct;
 mod error;
 mod kobj;
 mod multilevel;

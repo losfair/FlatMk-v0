@@ -1,6 +1,7 @@
 //! Multilevel table objects.
 
 use crate::arch;
+use crate::direct::*;
 use crate::error::*;
 use crate::pagealloc::KernelPageRef;
 use bit_field::BitField;
@@ -8,6 +9,7 @@ use core::marker::PhantomData;
 use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ptr::NonNull;
 use spin::Mutex;
+
 pub enum OpaqueCacheElement {}
 
 pub struct GenericLeafCache {
@@ -384,6 +386,37 @@ impl<
                         ptr,
                         KernelPageRef::new(unsafe { (*inner.as_ref().value).clone() })?,
                     )?;
+                }
+            }
+            Ok(())
+        })?;
+        Ok(clone)
+    }
+}
+
+impl<
+        T: DirectCopy + Send,
+        P: AsLevel<T, TABLE_SIZE> + Default + Send,
+        C: LeafCache,
+        L: EntryFilter,
+        const BITS: u8,
+        const LEVELS: u8,
+        const START_BIT: u8,
+        const TABLE_SIZE: usize,
+    > MultilevelTableObject<T, P, C, L, BITS, LEVELS, START_BIT, TABLE_SIZE>
+{
+    pub fn deep_clone_direct(&self) -> KernelResult<Self> {
+        let clone = Self::new()?;
+        self.foreach_entry(|depth, ptr, entry| {
+            if depth == LEVELS - 1 {
+                clone.make_leaf_entry(ptr)?;
+                if let Some(inner) = entry.as_level() {
+                    let page = unsafe {
+                        let mut page = KernelPageRef::new_uninit()?.assume_init();
+                        (*inner.as_ref().value).copy_to(&mut *page);
+                        page
+                    };
+                    clone.attach_leaf(ptr, page)?;
                 }
             }
             Ok(())

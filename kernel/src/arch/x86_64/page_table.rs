@@ -1,4 +1,5 @@
 use crate::addr::*;
+use crate::direct::*;
 use crate::error::*;
 use crate::multilevel::*;
 use core::fmt;
@@ -7,6 +8,12 @@ use core::ptr::NonNull;
 #[repr(align(4096))]
 #[derive(Clone)]
 pub struct Page(pub [u8; PAGE_SIZE]);
+
+unsafe impl DirectCopy for Page {
+    unsafe fn copy_to(&self, that: *mut Self) {
+        core::ptr::copy_nonoverlapping(self, that, 1);
+    }
+}
 
 pub const PAGE_SIZE: usize = 4096;
 pub const PAGE_TABLE_LEVEL_BITS: u8 = 9;
