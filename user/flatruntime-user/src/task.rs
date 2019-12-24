@@ -8,12 +8,13 @@ use core::convert::TryFrom;
 use spin::Mutex;
 
 pub const LOCAL_CAP_INDEX_CAPSET: u64 = 4;
+pub const LOCAL_CAP_INDEX_RPT: u64 = 5;
 
 lazy_static! {
     pub static ref ROOT_TASK: Task = Task {
         cap: unsafe { CPtr::new(0) },
     };
-    pub static ref ROOT_CAPSET: Mutex<CapSet> = {
+    pub static ref ROOT_CAPSET: CapSet = {
         unsafe {
             ROOT_TASK
                 .cap
@@ -25,7 +26,21 @@ lazy_static! {
                 )
                 .unwrap();
         }
-        Mutex::new(unsafe { CapSet::new(CPtr::new(LOCAL_CAP_INDEX_CAPSET)) })
+        unsafe { CapSet::new(CPtr::new(LOCAL_CAP_INDEX_CAPSET)) }
+    };
+    pub static ref ROOT_PAGE_TABLE: RootPageTable = {
+        unsafe {
+            ROOT_TASK
+                .cap
+                .call_result(
+                    BasicTaskRequest::FetchRootPageTable as u32 as i64,
+                    LOCAL_CAP_INDEX_RPT as i64,
+                    0,
+                    0,
+                )
+                .unwrap();
+        }
+        unsafe { RootPageTable::new(CPtr::new(LOCAL_CAP_INDEX_RPT)) }
     };
     static ref CAP_ALLOC_STATE: Mutex<CapAllocState> = Mutex::new(CapAllocState::new());
 }
@@ -49,6 +64,8 @@ enum BasicTaskRequest {
     PutCapSet = 10,
     IpcIsBlocked = 11,
     MakeCapSet = 12,
+    MakeRootPageTable = 13,
+    PutRootPageTable = 14,
 }
 
 struct CapAllocState {
@@ -94,7 +111,7 @@ impl Task {
         Ok(unsafe { CapSet::new(cptr) })
     }
 
-    pub fn fetch_rpt(&self) -> KernelResult<RootPageTable> {
+    pub fn fetch_root_page_table(&self) -> KernelResult<RootPageTable> {
         let (cptr, _) = allocate_cptr(|cptr| {
             unsafe {
                 self.cap.call_result(
@@ -215,6 +232,33 @@ impl Task {
         }
     }
 
+    pub fn put_root_page_table(&self, rpt: &RootPageTable) -> KernelResult<()> {
+        unsafe {
+            self.cap.call_result(
+                BasicTaskRequest::PutRootPageTable as u32 as i64,
+                rpt.cptr().index() as i64,
+                0,
+                0,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn make_root_page_table(&self) -> KernelResult<RootPageTable> {
+        unsafe {
+            let (cptr, _) = allocate_cptr(|cptr| {
+                self.cap.call_result(
+                    BasicTaskRequest::MakeRootPageTable as u32 as i64,
+                    cptr.index() as i64,
+                    0,
+                    0,
+                )?;
+                Ok(())
+            })?;
+            Ok(RootPageTable::new(cptr))
+        }
+    }
+
     pub fn ipc_is_blocked(&self) -> KernelResult<bool> {
         unsafe {
             self.cap
@@ -238,7 +282,7 @@ pub fn allocate_cptr<T, F: FnOnce(&CPtr) -> KernelResult<T>>(
 
         if state.current_level1 == MAX_LEVEL1 {
             let new_base = (state.current_level0 + 1) << LEAF_BITS;
-            ROOT_CAPSET.lock().make_leaf(new_base)?;
+            ROOT_CAPSET.make_leaf(new_base)?;
             state.current_level0 += 1;
             state.current_level1 = 0;
         } else {
@@ -264,7 +308,6 @@ pub fn allocate_cptr<T, F: FnOnce(&CPtr) -> KernelResult<T>>(
 pub(crate) unsafe fn release_cptr(cptr: &mut CPtr) {
     let mut state = CAP_ALLOC_STATE.lock();
     ROOT_CAPSET
-        .lock()
         .trivial_drop_cap(cptr.index())
         .expect("trivial_drop_cap failed");
     push_release_pool(&mut state, cptr);

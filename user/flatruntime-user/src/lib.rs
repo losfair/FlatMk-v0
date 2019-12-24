@@ -22,6 +22,7 @@ pub mod root;
 pub mod syscall;
 pub mod task;
 pub mod thread;
+pub mod allocator;
 
 extern "C" {
     fn user_start() -> !;
@@ -57,6 +58,7 @@ pub unsafe extern "C" fn _start() -> ! {
 #[no_mangle]
 #[inline(never)]
 unsafe extern "C" fn early_start() -> ! {
+    crate::allocator::init();
     crate::thread::init_startup_thread();
     user_start();
 }

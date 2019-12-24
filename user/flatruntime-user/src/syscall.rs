@@ -1,5 +1,4 @@
 use crate::error::*;
-use alloc::boxed::Box;
 use core::convert::TryFrom;
 use core::intrinsics::abort;
 use core::mem::MaybeUninit;

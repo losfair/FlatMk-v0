@@ -1,6 +1,5 @@
 use crate::error::*;
 use crate::syscall::CPtr;
-use alloc::boxed::Box;
 use core::convert::TryFrom;
 
 pub struct RootPageTable {
@@ -19,15 +18,34 @@ impl RootPageTable {
         RootPageTable { cap }
     }
 
-    pub unsafe fn make_leaf(&self, vaddr: u64) -> KernelResult<()> {
-        self.cap
-            .call_result(
-                RootPageTableRequest::MakeLeaf as u32 as i64,
-                vaddr as i64,
-                0,
-                0,
-            )
-            .map(|_| ())
+    pub fn cptr(&self) -> &CPtr {
+        &self.cap
+    }
+
+    pub fn make_leaf(&self, vaddr: u64) -> KernelResult<()> {
+        unsafe {
+            self.cap
+                .call_result(
+                    RootPageTableRequest::MakeLeaf as u32 as i64,
+                    vaddr as i64,
+                    0,
+                    0,
+                )
+                .map(|_| ())
+        }
+    }
+
+    pub fn alloc_leaf(&self, vaddr: u64) -> KernelResult<()> {
+        unsafe {
+            self.cap
+                .call_result(
+                    RootPageTableRequest::AllocLeaf as u32 as i64,
+                    vaddr as i64,
+                    0,
+                    0,
+                )
+                .map(|_| ())
+        }
     }
 }
 
