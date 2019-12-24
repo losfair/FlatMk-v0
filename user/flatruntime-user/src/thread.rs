@@ -45,7 +45,7 @@ fn map_ipc_cap_range_leaky(task: &Task, ipc_base: u64) {
 
 impl Thread {
     pub fn new(ipc_base: u64) -> Thread {
-        let task = Box::new(this_task().deep_clone().unwrap());
+        let task = Box::new(this_task().shallow_clone().unwrap());
         let mut stack: Box<ThreadStack> = unsafe { Box::new_uninit().assume_init() };
         let stack_end = unsafe { (&mut *stack as *mut ThreadStack).offset(1) };
         let tls_indirect = ManuallyDrop::new(Box::new(LowlevelTls {

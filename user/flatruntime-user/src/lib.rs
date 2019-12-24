@@ -13,6 +13,7 @@ extern crate alloc;
 #[macro_use]
 extern crate lazy_static;
 
+pub mod allocator;
 pub mod capset;
 pub mod error;
 pub mod io;
@@ -22,7 +23,6 @@ pub mod root;
 pub mod syscall;
 pub mod task;
 pub mod thread;
-pub mod allocator;
 
 extern "C" {
     fn user_start() -> !;

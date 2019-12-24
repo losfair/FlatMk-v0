@@ -21,7 +21,7 @@ use flatruntime_user::{
     mm::{Mmio, RootPageTable},
     syscall::{CPtr, INVALID_CAP},
     thread::{this_ipc_base, this_task, Thread},
-    task::{ROOT_PAGE_TABLE},
+    task::{ROOT_PAGE_TABLE, ROOT_CAPSET},
 };
 
 lazy_static! {
@@ -88,8 +88,8 @@ pub unsafe extern "C" fn user_start() -> ! {
     drop(new_thread);
     println!("init: Dropped child thread.");
 
-    benchmark(500000, "task deep clone", || {
-        this_task().deep_clone().unwrap();
+    benchmark(500000, "task shallow clone", || {
+        this_task().shallow_clone().unwrap();
     });
 
     benchmark(500000, "thread creation", || {
@@ -106,6 +106,14 @@ pub unsafe extern "C" fn user_start() -> ! {
         let rpt = this_task().make_root_page_table().unwrap();
         rpt.make_leaf(0x100000).unwrap();
         rpt.alloc_leaf(0x100000).unwrap();
+    });
+
+    benchmark(1000, "capset clone", || {
+        ROOT_CAPSET.deep_clone().unwrap();
+    });
+
+    benchmark(1000, "VM clone", || {
+        ROOT_PAGE_TABLE.deep_clone().unwrap();
     });
 
     println!("Benchmark done.");

@@ -52,7 +52,7 @@ pub struct Task {
 #[repr(u32)]
 #[derive(Debug, Copy, Clone)]
 enum BasicTaskRequest {
-    FetchDeepClone = 1,
+    FetchShallowClone = 1,
     FetchCapSet = 2,
     FetchRootPageTable = 3,
     GetRegister = 4,
@@ -161,11 +161,11 @@ impl Task {
         }
     }
 
-    pub fn deep_clone(&self) -> KernelResult<Task> {
+    pub fn shallow_clone(&self) -> KernelResult<Task> {
         let (cptr, _) = allocate_cptr(|cptr| {
             unsafe {
                 self.cap.call_result(
-                    BasicTaskRequest::FetchDeepClone as u32 as i64,
+                    BasicTaskRequest::FetchShallowClone as u32 as i64,
                     cptr.index() as i64,
                     0,
                     0,
@@ -201,7 +201,8 @@ impl Task {
     pub fn unblock_ipc(&self) -> KernelResult<()> {
         unsafe {
             self.cap
-                .call_result(BasicTaskRequest::UnblockIpc as u32 as i64, 0, 0, 0).map(|_| ())
+                .call_result(BasicTaskRequest::UnblockIpc as u32 as i64, 0, 0, 0)
+                .map(|_| ())
         }
     }
 
@@ -262,7 +263,8 @@ impl Task {
     pub fn ipc_is_blocked(&self) -> KernelResult<bool> {
         unsafe {
             self.cap
-                .call_result(BasicTaskRequest::IpcIsBlocked as u32 as i64, 0, 0, 0).map(|x| x != 0)
+                .call_result(BasicTaskRequest::IpcIsBlocked as u32 as i64, 0, 0, 0)
+                .map(|x| x != 0)
         }
     }
 }
