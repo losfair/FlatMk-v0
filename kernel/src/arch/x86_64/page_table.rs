@@ -126,12 +126,11 @@ impl PageTableEntry {
         self.entry = self.addr().0 | flags.bits();
     }
 
-    pub fn set_addr_rw(&mut self, addr: PhysAddr) {
-        self.set_addr(addr, PageTableFlags::PRESENT | PageTableFlags::WRITABLE);
-    }
-
-    pub fn is_huge_page(&self) -> bool {
-        self.test_flag(PageTableFlags::HUGE_PAGE)
+    pub fn set_addr_rwxu(&mut self, addr: PhysAddr) {
+        self.set_addr(
+            addr,
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
+        );
     }
 
     fn test_flag(&self, flag: PageTableFlags) -> bool {
@@ -152,8 +151,8 @@ impl PageTableEntry {
         self.set_flags(current_flags);
     }
 
-    pub fn set_user_accessible(&mut self, accessible: bool) {
-        self.toggle_flag(PageTableFlags::USER_ACCESSIBLE, accessible);
+    pub fn is_huge_page(&self) -> bool {
+        self.test_flag(PageTableFlags::HUGE_PAGE)
     }
 
     pub fn set_no_cache(&mut self, no_cache: bool) {

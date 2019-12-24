@@ -13,7 +13,6 @@ x86_64 = "0.8"
 spin = "0.5"
 pic8259_simple = "0.1"
 bitflags = "1.2"
-goblin = { version = "0.1", features = ["elf64"], default-features = false}
 num_enum = { version = "0.4", default-features = false }
 lazy_static = { version = "1.4", features = ["spin_no_std"] }
 bit_field = { version = "0.10" }

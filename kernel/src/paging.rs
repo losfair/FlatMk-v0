@@ -132,8 +132,7 @@ impl PageTableObject {
             if let Some(mut old) = entry.as_level() {
                 old.as_mut().drop_and_release_assuming_leaf();
             }
-            entry.set_addr_rw(backing);
-            entry.set_user_accessible(true);
+            entry.set_addr_rwxu(backing);
             entry.set_no_cache(true);
             entry.set_unowned(true); // Direct physical page mappings are always unowned.
         })?;

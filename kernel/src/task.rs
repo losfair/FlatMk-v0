@@ -5,7 +5,7 @@ use crate::arch::{
         arch_enter_user_mode, arch_enter_user_mode_syscall, arch_get_kernel_tls,
         arch_init_kernel_tls_for_cpu, arch_set_kernel_tls, TaskRegisters, TlsIndirect,
     },
-    PAGE_SIZE,
+    Page, PAGE_SIZE,
 };
 use crate::capability::{CapabilitySet, INVALID_CAP};
 use crate::error::*;
@@ -18,8 +18,17 @@ use spin::Mutex;
 
 pub const ROOT_TASK_FULL_MAP_BASE: u64 = 0x20000000u64;
 
-static ROOT_IMAGE: &'static [u8] =
-    include_bytes!("../../user/init/target/x86_64-flatmk/release/init");
+#[repr(C)]
+struct AlignTo<T, U: ?Sized> {
+    _align: [T; 0],
+    value: U,
+}
+
+include!("../generated/user_init.decl.rs");
+static ROOT_IMAGE: &'static AlignTo<Page, RootImageBytes> = &AlignTo {
+    _align: [],
+    value: *include_bytes!("../generated/user_init.img"),
+};
 
 #[derive(Clone, Debug)]
 pub enum TaskFaultState {
@@ -142,28 +151,28 @@ impl Task {
     }
 
     pub fn load_root_image(&self) -> u64 {
-        let map_begin = ROOT_TASK_FULL_MAP_BASE;
-        let map_end = map_begin + 1048576 * 32;
+        // Aligned and properly sized. Should already be checked during compilation.
+        assert!(
+            ROOT_IMAGE.value.len() % PAGE_SIZE == 0
+                && ((ROOT_IMAGE as *const _ as usize) & (PAGE_SIZE - 1)) == 0
+        );
 
         let pt = self.page_table_root.get();
 
-        // TODO: fix this
-        for i in (map_begin..map_end).step_by(PAGE_SIZE) {
-            let uaddr = UserAddr::new(i).unwrap();
-            pt.make_leaf_entry(uaddr).unwrap();
-            pt.map_anonymous(uaddr).unwrap();
-        }
-        with_serial_port(|p| writeln!(p, "Mapped memory for initial task.").unwrap());
+        for i in (0..ROOT_IMAGE.value.len()).step_by(PAGE_SIZE) {
+            let phys = PhysAddr::from_virt(&*pt, VirtAddr::from_ref(&ROOT_IMAGE.value[i])).expect(
+                "load_root_image: Failed to lookup physical address for kernel root image data.",
+            );
+            let uaddr = UserAddr::new(ROOT_TASK_FULL_MAP_BASE + i as u64).unwrap();
 
-        let user_view = unsafe {
-            core::slice::from_raw_parts_mut(map_begin as *mut u8, (map_end - map_begin) as usize)
-        };
-        match crate::elf::load(ROOT_IMAGE, user_view, map_begin) {
-            Some(x) => x,
-            None => {
-                panic!("Unable to load root image");
-            }
+            pt.make_leaf_entry(uaddr).unwrap();
+            pt.0.lookup_leaf_entry(uaddr.get(), |entry| {
+                entry.set_addr_rwxu(phys);
+            })
+            .expect("load_root_image: Leaf entry not found");
         }
+        with_serial_port(|p| writeln!(p, "Mapped memory image for initial task.").unwrap());
+        ROOT_ENTRY
     }
 
     #[inline]
