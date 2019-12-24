@@ -11,6 +11,7 @@ use crate::arch::{
 use crate::multilevel::*;
 use crate::pagealloc::*;
 use bootloader::bootinfo::MemoryRegionType;
+use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 
 pub(crate) static mut PHYSICAL_OFFSET: u64 = 0;
@@ -92,6 +93,21 @@ pub unsafe fn init() {
 }
 
 impl PageTableObject {
+    // FIXME: Fix this when we add multicore support.
+    pub fn is_current(&self) -> bool {
+        self.0.with_root(|root| {
+            // Multiple mutable aliases?
+            let cell = UnsafeCell::new(root as *mut PageTableLevel);
+            unsafe { *cell.get() == _active_level_4_table() }
+        })
+    }
+
+    pub fn flush_tlb_if_current(&self, target: UserAddr) {
+        if self.is_current() {
+            tlb::flush(target);
+        }
+    }
+
     pub unsafe fn copy_kernel_range_from_level(&self, src: &PageTableLevel) {
         self.0.with_root(|this| {
             for (i, entry) in src
@@ -118,7 +134,7 @@ impl PageTableObject {
         }
         self.0
             .attach_leaf(target.get(), unsafe { page.assume_init() })?;
-        tlb::flush(target);
+        self.flush_tlb_if_current(target);
         Ok(())
     }
 
@@ -136,7 +152,7 @@ impl PageTableObject {
             entry.set_no_cache(true);
             entry.set_unowned(true); // Direct physical page mappings are always unowned.
         })?;
-        tlb::flush(target);
+        self.flush_tlb_if_current(target);
         Ok(())
     }
 }
