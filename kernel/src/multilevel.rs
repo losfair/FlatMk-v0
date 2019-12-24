@@ -3,10 +3,11 @@
 use crate::arch;
 use crate::error::*;
 use crate::pagealloc::KernelPageRef;
+use bit_field::BitField;
+use core::marker::PhantomData;
 use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ptr::NonNull;
 use spin::Mutex;
-
 pub enum OpaqueCacheElement {}
 
 pub struct GenericLeafCache {
@@ -64,12 +65,25 @@ pub trait LeafCache: Sized + Send {
     fn invalidate(&mut self, ptr: u64);
 }
 
+pub trait EntryFilter {
+    fn is_valid(depth: u8, index: usize) -> bool;
+}
+
+pub struct NullEntryFilter;
+impl EntryFilter for NullEntryFilter {
+    #[inline]
+    fn is_valid(_depth: u8, _index: usize) -> bool {
+        true
+    }
+}
+
 /// A multilevel table object (MTO) is an abstraction for pagetable-like structures and is used
 /// for page tables and capability tables.
 pub struct MultilevelTableObject<
     T: Send,
     P: AsLevel<T, TABLE_SIZE> + Send,
     C: LeafCache,
+    L: EntryFilter,
     const BITS: u8,
     const LEVELS: u8,
     const START_BIT: u8,
@@ -77,17 +91,19 @@ pub struct MultilevelTableObject<
 > {
     root: Mutex<KernelPageRef<Level<T, P, TABLE_SIZE>>>,
     cache: Mutex<C>,
+    _phantom: PhantomData<L>,
 }
 
 unsafe impl<
         T: Send,
         P: AsLevel<T, TABLE_SIZE> + Send,
         C: LeafCache,
+        L: EntryFilter,
         const BITS: u8,
         const LEVELS: u8,
         const START_BIT: u8,
         const TABLE_SIZE: usize,
-    > Send for MultilevelTableObject<T, P, C, BITS, LEVELS, START_BIT, TABLE_SIZE>
+    > Send for MultilevelTableObject<T, P, C, L, BITS, LEVELS, START_BIT, TABLE_SIZE>
 {
 }
 
@@ -95,11 +111,12 @@ unsafe impl<
         T: Send,
         P: AsLevel<T, TABLE_SIZE> + Send,
         C: LeafCache,
+        L: EntryFilter,
         const BITS: u8,
         const LEVELS: u8,
         const START_BIT: u8,
         const TABLE_SIZE: usize,
-    > Sync for MultilevelTableObject<T, P, C, BITS, LEVELS, START_BIT, TABLE_SIZE>
+    > Sync for MultilevelTableObject<T, P, C, L, BITS, LEVELS, START_BIT, TABLE_SIZE>
 {
 }
 
@@ -121,33 +138,36 @@ impl<T: Send, P: AsLevel<T, TABLE_SIZE> + Send, const TABLE_SIZE: usize> Level<T
     /// Looks up an entry by a pointer.
     ///
     /// O(levels).
-    pub unsafe fn lookup_entry<F: FnOnce(u8, &mut P) -> R, R>(
+    pub unsafe fn lookup_entry<L: EntryFilter, F: FnOnce(u8, &mut P) -> R, R>(
         &mut self,
         ptr: u64,
         levels: u8,
         start_bit: u8,
         bits: u8,
         cb: F,
-    ) -> R {
+    ) -> Option<R> {
         assert!(levels > 0);
         let mut current = NonNull::from(self);
 
         for i in 0..levels {
             let index = ptr_to_index(ptr, i, start_bit, bits);
+            if !L::is_valid(i, index) {
+                return None;
+            }
             let entry = &mut current.as_mut().table[index];
             if i == levels - 1 {
-                return cb(i, entry);
+                return Some(cb(i, entry));
             }
             current = match entry.as_level() {
                 Some(x) => x,
-                None => return cb(i, entry),
+                None => return Some(cb(i, entry)),
             }
         }
 
         unreachable!()
     }
 
-    pub unsafe fn lookup_leaf_entry<F: FnOnce(&mut P) -> R, R>(
+    pub unsafe fn lookup_leaf_entry<L: EntryFilter, F: FnOnce(&mut P) -> R, R>(
         &mut self,
         ptr: u64,
         levels: u8,
@@ -155,17 +175,17 @@ impl<T: Send, P: AsLevel<T, TABLE_SIZE> + Send, const TABLE_SIZE: usize> Level<T
         bits: u8,
         cb: F,
     ) -> Option<R> {
-        self.lookup_entry(ptr, levels, start_bit, bits, |depth, entry| {
+        self.lookup_entry::<L, _, _>(ptr, levels, start_bit, bits, |depth, entry| {
             if depth == levels - 1 {
                 Some(cb(entry))
             } else {
                 None
             }
-        })
+        })?
     }
 
     /// Convenience function for looking up a leaf entry. Internally calls `lookup_entry`.
-    pub unsafe fn lookup<F: FnOnce(&mut T) -> R, R>(
+    pub unsafe fn lookup<L: EntryFilter, F: FnOnce(&mut T) -> R, R>(
         &mut self,
         ptr: u64,
         levels: u8,
@@ -173,16 +193,14 @@ impl<T: Send, P: AsLevel<T, TABLE_SIZE> + Send, const TABLE_SIZE: usize> Level<T
         bits: u8,
         cb: F,
     ) -> Option<R> {
-        Some(self.lookup_leaf_entry(
-            ptr,
-            levels,
-            start_bit,
-            bits,
-            |entry| match entry.as_level() {
+        Some(
+            self.lookup_leaf_entry::<L, _, _>(ptr, levels, start_bit, bits, |entry| match entry
+                .as_level()
+            {
                 Some(mut x) => Some(cb(&mut *x.as_mut().value)),
                 None => None,
-            },
-        )??)
+            })??,
+        )
     }
 }
 
@@ -200,14 +218,15 @@ impl<
         T: Send,
         P: AsLevel<T, TABLE_SIZE> + Send,
         C: LeafCache,
+        L: EntryFilter,
         const BITS: u8,
         const LEVELS: u8,
         const START_BIT: u8,
         const TABLE_SIZE: usize,
-    > Drop for MultilevelTableObject<T, P, C, BITS, LEVELS, START_BIT, TABLE_SIZE>
+    > Drop for MultilevelTableObject<T, P, C, L, BITS, LEVELS, START_BIT, TABLE_SIZE>
 {
     fn drop(&mut self) {
-        self.foreach_entry(|depth, entry| {
+        self.foreach_entry(|depth, _, entry| {
             if let Some(mut level) = entry.as_level() {
                 // If this is a leaf node, it contains a value of type T and we should drop it.
                 // Otherwise, it contains a table and should have been cleaned up in previous iterations,
@@ -236,11 +255,12 @@ impl<
         T: Send,
         P: AsLevel<T, TABLE_SIZE> + Send,
         C: LeafCache,
+        L: EntryFilter,
         const BITS: u8,
         const LEVELS: u8,
         const START_BIT: u8,
         const TABLE_SIZE: usize,
-    > MultilevelTableObject<T, P, C, BITS, LEVELS, START_BIT, TABLE_SIZE>
+    > MultilevelTableObject<T, P, C, L, BITS, LEVELS, START_BIT, TABLE_SIZE>
 {
     /// Checks that the constant type parameters are correct.
     const fn check() {
@@ -258,49 +278,63 @@ impl<
         ptr_to_index(ptr, current_level, START_BIT, BITS)
     }
 
-    /// Recursive foreach implementation.
-    unsafe fn inner_foreach<F: FnMut(u8, &mut P) -> KernelResult<()>>(
+    #[inline]
+    fn index_to_ptr(prev_ptr: u64, current_level: u8, current_index: usize) -> u64 {
+        index_to_ptr(prev_ptr, current_level, current_index, START_BIT, BITS)
+    }
+
+    /// Recursive foreach implementation. (post-order)
+    unsafe fn inner_foreach_postorder<F: FnMut(u8, u64, &mut P) -> KernelResult<()>>(
         mut current: NonNull<Level<T, P, TABLE_SIZE>>,
         cb: &mut F,
         depth: u8,
+        partial_ptr: u64,
     ) -> KernelResult<()> {
         assert!(depth < LEVELS);
-        for entry in current.as_mut().table.iter_mut() {
+        for (i, entry) in current.as_mut().table.iter_mut().enumerate() {
+            if !L::is_valid(depth, i) {
+                continue;
+            }
+            let new_ptr = Self::index_to_ptr(partial_ptr, depth, i);
             if depth != LEVELS - 1 {
                 if let Some(inner) = entry.as_level() {
-                    Self::inner_foreach(inner, cb, depth + 1)?;
+                    Self::inner_foreach_postorder(inner, cb, depth + 1, new_ptr)?;
                 }
             }
-            cb(depth, entry)?;
+            cb(depth, new_ptr, entry)?;
         }
         Ok(())
     }
 
-    /// Iterates over all entries in the current MTO except the root table, in post-order.
-    pub fn foreach_entry<F: FnMut(u8, &mut P) -> KernelResult<()>>(
+    /// Iterates over all entries in the current MTO except the root table itself. (in post-order)
+    pub fn foreach_entry<F: FnMut(u8, u64, &mut P) -> KernelResult<()>>(
         &self,
         mut cb: F,
     ) -> KernelResult<()> {
         let mut root = self.root.lock();
-        unsafe { Self::inner_foreach(root.as_nonnull(), &mut cb, 0) }
+        unsafe { Self::inner_foreach_postorder(root.as_nonnull(), &mut cb, 0, 0) }
     }
 
     /// Looks up an entry by a pointer in this MTO.
     ///
     /// O(LEVELS).
-    pub fn lookup_entry<F: FnOnce(u8, &mut P) -> R, R>(&self, ptr: u64, cb: F) -> R {
+    pub fn lookup_entry<F: FnOnce(u8, &mut P) -> R, R>(&self, ptr: u64, cb: F) -> Option<R> {
         let mut root = self.root.lock();
-        unsafe { root.lookup_entry(ptr, LEVELS, START_BIT, BITS, cb) }
+        unsafe { root.lookup_entry::<L, _, _>(ptr, LEVELS, START_BIT, BITS, cb) }
     }
 
-    pub fn lookup_leaf_entry<F: FnOnce(&mut P) -> R, R>(&self, ptr: u64, cb: F) -> Option<R> {
+    pub fn lookup_leaf_entry_with_filter<L2: EntryFilter, F: FnOnce(&mut P) -> R, R>(
+        &self,
+        ptr: u64,
+        cb: F,
+    ) -> Option<R> {
         let mut root = self.root.lock();
         let mut cache = self.cache.lock();
         if let Some(x) = cache.lookup(ptr) {
             Some(cb(unsafe { &mut *(x.as_ptr() as *mut P) }))
         } else {
             unsafe {
-                root.lookup_leaf_entry(ptr, LEVELS, START_BIT, BITS, |x| {
+                root.lookup_leaf_entry::<L2, _, _>(ptr, LEVELS, START_BIT, BITS, |x| {
                     cache.insert(
                         ptr,
                         NonNull::new_unchecked(x as *mut P as *mut OpaqueCacheElement),
@@ -309,6 +343,10 @@ impl<
                 })
             }
         }
+    }
+
+    pub fn lookup_leaf_entry<F: FnOnce(&mut P) -> R, R>(&self, ptr: u64, cb: F) -> Option<R> {
+        self.lookup_leaf_entry_with_filter::<L, _, _>(ptr, cb)
     }
 
     /// Convenience function for looking up a leaf entry in this MTO. Internally calls `lookup_entry`.
@@ -326,14 +364,44 @@ impl<
 }
 
 impl<
-        T: Send,
+        T: Clone + Send,
         P: AsLevel<T, TABLE_SIZE> + Default + Send,
         C: LeafCache,
+        L: EntryFilter,
         const BITS: u8,
         const LEVELS: u8,
         const START_BIT: u8,
         const TABLE_SIZE: usize,
-    > MultilevelTableObject<T, P, C, BITS, LEVELS, START_BIT, TABLE_SIZE>
+    > MultilevelTableObject<T, P, C, L, BITS, LEVELS, START_BIT, TABLE_SIZE>
+{
+    pub fn deep_clone(&self) -> KernelResult<Self> {
+        let clone = Self::new()?;
+        self.foreach_entry(|depth, ptr, entry| {
+            if depth == LEVELS - 1 {
+                clone.make_leaf_entry(ptr)?;
+                if let Some(inner) = entry.as_level() {
+                    clone.attach_leaf(
+                        ptr,
+                        KernelPageRef::new(unsafe { (*inner.as_ref().value).clone() })?,
+                    )?;
+                }
+            }
+            Ok(())
+        })?;
+        Ok(clone)
+    }
+}
+
+impl<
+        T: Send,
+        P: AsLevel<T, TABLE_SIZE> + Default + Send,
+        C: LeafCache,
+        L: EntryFilter,
+        const BITS: u8,
+        const LEVELS: u8,
+        const START_BIT: u8,
+        const TABLE_SIZE: usize,
+    > MultilevelTableObject<T, P, C, L, BITS, LEVELS, START_BIT, TABLE_SIZE>
 {
     fn default_level_table() -> KernelResult<KernelPageRef<Level<T, P, TABLE_SIZE>>> {
         unsafe {
@@ -353,6 +421,7 @@ impl<
         Ok(MultilevelTableObject {
             root: Mutex::new(root),
             cache: Mutex::new(C::new()),
+            _phantom: PhantomData,
         })
     }
 
@@ -367,7 +436,7 @@ impl<
             entry.attach_level(KernelPageRef::into_raw(next_level));
 
             Ok(true)
-        })? {}
+        })?? {}
         Ok(())
     }
 
@@ -388,8 +457,24 @@ impl<
 
 #[inline]
 fn ptr_to_index(ptr: u64, current_level: u8, start_bit: u8, bits: u8) -> usize {
-    let start = start_bit + 1 - current_level * bits;
-    ((ptr << (64 - start as usize)) >> (64 - bits as usize)) as usize
+    let start = start_bit - current_level * bits;
+    ptr.get_bits((start + 1 - bits) as usize..=start as usize) as usize
+}
+
+#[inline]
+fn index_to_ptr(
+    mut prev_ptr: u64,
+    current_level: u8,
+    current_index: usize,
+    start_bit: u8,
+    bits: u8,
+) -> u64 {
+    let start = start_bit - current_level * bits;
+    prev_ptr.set_bits(
+        (start + 1 - bits) as usize..=start as usize,
+        current_index as u64,
+    );
+    prev_ptr
 }
 
 const fn _check_size(size: usize, limit: usize) {

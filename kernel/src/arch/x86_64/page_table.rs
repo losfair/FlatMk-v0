@@ -5,6 +5,7 @@ use core::fmt;
 use core::ptr::NonNull;
 
 #[repr(align(4096))]
+#[derive(Clone)]
 pub struct Page(pub [u8; PAGE_SIZE]);
 
 pub const PAGE_SIZE: usize = 4096;

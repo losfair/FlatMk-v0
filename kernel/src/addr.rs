@@ -2,6 +2,7 @@ use crate::arch::{
     arch_translate_phys_mapped_virt, arch_validate_virtual_address, PAGE_SIZE, PAGE_TABLE_SIZE,
 };
 use crate::error::*;
+use crate::multilevel::NullEntryFilter;
 use crate::paging::{PageTableMto, PageTableObject};
 use core::ptr::NonNull;
 
@@ -55,14 +56,16 @@ impl PhysAddr {
         arch_translate_phys_mapped_virt(virt)
     }
 
-    pub fn from_virt(pt: &PageTableObject, virt: VirtAddr) -> KernelResult<PhysAddr> {
-        Ok(pt.0.lookup_leaf_entry(virt.0, |entry| {
-            if entry.is_unused() {
-                None
-            } else {
-                Some(entry.addr())
-            }
-        })??)
+    pub fn from_virt_null_filter(pt: &PageTableObject, virt: VirtAddr) -> KernelResult<PhysAddr> {
+        Ok(pt
+            .0
+            .lookup_leaf_entry_with_filter::<NullEntryFilter, _, _>(virt.0, |entry| {
+                if entry.is_unused() {
+                    None
+                } else {
+                    Some(entry.addr())
+                }
+            })??)
     }
 }
 

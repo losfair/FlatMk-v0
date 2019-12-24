@@ -16,11 +16,24 @@ use core::mem::MaybeUninit;
 
 pub(crate) static mut PHYSICAL_OFFSET: u64 = 0;
 
+pub struct PageTableEntryFilter;
+impl EntryFilter for PageTableEntryFilter {
+    #[inline]
+    fn is_valid(depth: u8, index: usize) -> bool {
+        if depth == 0 && index >= 256 {
+            false
+        } else {
+            true
+        }
+    }
+}
+
 // Alignment comes from Page.
 pub type PageTableMto = MultilevelTableObject<
     Page,
     PageTableEntry,
     GenericLeafCache,
+    PageTableEntryFilter,
     PAGE_TABLE_LEVEL_BITS,
     PAGE_TABLE_LEVELS,
     PAGE_TABLE_INDEX_START,
@@ -68,7 +81,7 @@ pub unsafe fn init() {
     {
         // Save the physical address of BootInfo structure.
         let boot_info_kvaddr = l4_table
-            .lookup(
+            .lookup::<NullEntryFilter, _, _>(
                 crate::boot::boot_info() as *const _ as u64,
                 PAGE_TABLE_LEVELS,
                 PAGE_TABLE_INDEX_START,
@@ -119,6 +132,11 @@ impl PageTableObject {
                 this.table[i] = entry.clone();
             }
         })
+    }
+
+    pub fn copy_kernel_range_from(&self, src: &PageTableObject) {
+        src.0
+            .with_root(|root| unsafe { self.copy_kernel_range_from_level(root) })
     }
 
     pub fn make_leaf_entry(&self, target: UserAddr) -> KernelResult<()> {

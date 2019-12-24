@@ -51,6 +51,7 @@ pub type CapabilityTable = MultilevelTableObject<
     CapabilityEndpointSet,
     CapabilityTableNode,
     GenericLeafCache,
+    NullEntryFilter,
     9,
     4,
     43,
@@ -72,6 +73,7 @@ impl AsLevel<CapabilityEndpointSet, 512> for CapabilityTableNode {
     }
 }
 
+#[derive(Clone)]
 pub struct CapabilityEndpointSet {
     pub endpoints: [CapabilityEndpoint; N_ENDPOINT_SLOTS],
 }
@@ -230,7 +232,7 @@ impl CapabilityEndpointObject {
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, TryFromPrimitive)]
 enum BasicTaskRequest {
-    FetchDeepClone = 1,
+    FetchShallowClone = 1,
     FetchCapSet = 2,
     FetchRootPageTable = 3,
     GetRegister = 4,
@@ -254,9 +256,9 @@ fn invoke_cap_basic_task(
 
     let req = BasicTaskRequest::try_from(invocation.arg(0)? as u32)?;
     match req {
-        BasicTaskRequest::FetchDeepClone => {
+        BasicTaskRequest::FetchShallowClone => {
             let cptr = CapPtr(invocation.arg(1)? as u64);
-            let clone = task.deep_clone()?;
+            let clone = task.shallow_clone()?;
             current
                 .capabilities
                 .get()
@@ -354,6 +356,7 @@ fn invoke_cap_basic_task(
         BasicTaskRequest::MakeRootPageTable => {
             let cptr = CapPtr(invocation.arg(1)? as u64);
             let pto = KernelObjectRef::new(PageTableObject(PageTableMto::new()?))?;
+            pto.copy_kernel_range_from(&*current.page_table_root.get());
             task.capabilities.get().entry_endpoint(cptr, |endpoint| {
                 endpoint.object = CapabilityEndpointObject::RootPageTable(pto);
             })?;
@@ -448,6 +451,7 @@ fn invoke_cap_x86_io_port(invocation: &CapabilityInvocation, port: u16) -> Kerne
 enum RootPageTableRequest {
     MakeLeaf = 0,
     AllocLeaf = 1,
+    FetchDeepClone = 2,
 }
 
 fn invoke_cap_root_page_table(
@@ -455,6 +459,7 @@ fn invoke_cap_root_page_table(
     pt: KernelObjectRef<PageTableObject>,
 ) -> KernelResult<i64> {
     let req = RootPageTableRequest::try_from(invocation.arg(0)? as u32)?;
+    let current = Task::current();
 
     match req {
         RootPageTableRequest::MakeLeaf => {
@@ -465,6 +470,15 @@ fn invoke_cap_root_page_table(
         RootPageTableRequest::AllocLeaf => {
             let target = UserAddr::new(invocation.arg(1)? as u64)?;
             pt.map_anonymous(target)?;
+            Ok(0)
+        }
+        RootPageTableRequest::FetchDeepClone => {
+            let dst = CapPtr(invocation.arg(1)? as u64);
+            let clone = KernelObjectRef::new(PageTableObject(pt.0.deep_clone()?))?;
+            clone.copy_kernel_range_from(&*pt);
+            current.capabilities.get().entry_endpoint(dst, |endpoint| {
+                endpoint.object = CapabilityEndpointObject::RootPageTable(clone);
+            })?;
             Ok(0)
         }
     }
@@ -618,6 +632,7 @@ enum CapSetRequest {
     DropCap = 2,
     FetchCap = 3,
     PutCap = 4,
+    FetchDeepClone = 5,
 }
 
 fn invoke_cap_capability_set(
@@ -669,6 +684,14 @@ fn invoke_cap_capability_set(
                 .entry_endpoint(src, |endpoint| endpoint.object.clone())?;
             set.entry_endpoint(dst, |endpoint| {
                 endpoint.object = cap;
+            })?;
+            Ok(0)
+        }
+        CapSetRequest::FetchDeepClone => {
+            let dst = CapPtr(invocation.arg(1)? as u64);
+            let clone = KernelObjectRef::new(CapabilitySet(set.0.deep_clone()?))?;
+            current.capabilities.get().entry_endpoint(dst, |endpoint| {
+                endpoint.object = CapabilityEndpointObject::CapabilitySet(clone);
             })?;
             Ok(0)
         }

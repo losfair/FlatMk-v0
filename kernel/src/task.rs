@@ -160,7 +160,11 @@ impl Task {
         let pt = self.page_table_root.get();
 
         for i in (0..ROOT_IMAGE.value.len()).step_by(PAGE_SIZE) {
-            let phys = PhysAddr::from_virt(&*pt, VirtAddr::from_ref(&ROOT_IMAGE.value[i])).expect(
+            let phys = PhysAddr::from_virt_null_filter(
+                &*pt,
+                VirtAddr::from_ref(&ROOT_IMAGE.value[i]),
+            )
+            .expect(
                 "load_root_image: Failed to lookup physical address for kernel root image data.",
             );
             let uaddr = UserAddr::new(ROOT_TASK_FULL_MAP_BASE + i as u64).unwrap();
@@ -193,7 +197,7 @@ impl Task {
         self as *const Task == inner
     }
 
-    pub fn deep_clone(&self) -> KernelResult<KernelObjectRef<Task>> {
+    pub fn shallow_clone(&self) -> KernelResult<KernelObjectRef<Task>> {
         KernelObjectRef::new(Task {
             page_table_root: AtomicKernelObjectRef::new(self.page_table_root.get()),
             capabilities: AtomicKernelObjectRef::new(self.capabilities.get()),
