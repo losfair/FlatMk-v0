@@ -15,20 +15,10 @@ impl Port {
     }
 
     pub unsafe fn outb(&self, x: u8) -> KernelResult<()> {
-        let result = self.cap.call(PORT_WRITE, 1, x as _, 0);
-        if result < 0 {
-            Err(KernelError::try_from(result as i32).unwrap())
-        } else {
-            Ok(())
-        }
+        self.cap.call_result(PORT_WRITE, 1, x as _, 0).map(|_| ())
     }
 
     pub unsafe fn inb(&self) -> KernelResult<u8> {
-        let result = self.cap.call(PORT_READ, 1, 0, 0);
-        if result < 0 {
-            Err(KernelError::try_from(result as i32).unwrap())
-        } else {
-            Ok(result as u8)
-        }
+        self.cap.call_result(PORT_READ, 1, 0, 0).map(|x| x as u8)
     }
 }

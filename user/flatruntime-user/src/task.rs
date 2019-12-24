@@ -182,12 +182,9 @@ impl Task {
     }
 
     pub fn unblock_ipc(&self) -> KernelResult<()> {
-        match unsafe {
+        unsafe {
             self.cap
-                .call(BasicTaskRequest::UnblockIpc as u32 as i64, 0, 0, 0)
-        } {
-            x if x < 0 => Err(KernelError::try_from(x as i32).unwrap()),
-            _ => Ok(()),
+                .call_result(BasicTaskRequest::UnblockIpc as u32 as i64, 0, 0, 0).map(|_| ())
         }
     }
 
@@ -219,14 +216,9 @@ impl Task {
     }
 
     pub fn ipc_is_blocked(&self) -> KernelResult<bool> {
-        match unsafe {
+        unsafe {
             self.cap
-                .call(BasicTaskRequest::IpcIsBlocked as u32 as i64, 0, 0, 0)
-        } {
-            x if x < 0 => Err(KernelError::try_from(x as i32).unwrap()),
-            0 => Ok(false),
-            1 => Ok(true),
-            _ => panic!("ipc_is_blocked: unexpected result from kernel"),
+                .call_result(BasicTaskRequest::IpcIsBlocked as u32 as i64, 0, 0, 0).map(|x| x != 0)
         }
     }
 }
