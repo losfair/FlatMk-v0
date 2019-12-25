@@ -12,6 +12,24 @@ use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 use num_enum::TryFromPrimitive;
 
+bitflags! {
+    pub struct TaskEndpointFlags: u32 {
+        /// Whether this endpoint preserves all general-purpose registers and capabilities when switched to.
+        const STATE_TRANSPARENT = 1 << 0;
+
+        /// Whether this endpoint is a reply endpoint.
+        ///
+        /// A reply endpoint has the following properties:
+        ///
+        /// - Can only be used once.
+        /// - Will not create another reply endpoint in the target task.
+        const REPLY = 1 << 1;
+
+        /// Whether capability transfer is performed for this endpoint.
+        const CAP_TRANSFER = 1 << 2;
+    }
+}
+
 pub const N_ENDPOINT_SLOTS: usize = 32;
 pub const INVALID_CAP: u64 = core::u64::MAX;
 
@@ -132,38 +150,26 @@ pub struct CapTaskEndpoint {
     /// Entry point information.
     pub entry: IpcEntry,
 
-    /// Whether this endpoint is a reply endpoint.
-    ///
-    /// A reply endpoint has the following properties:
-    ///
-    /// - Can only be used once.
-    /// - Will not create another reply endpoint in the target task.
-    pub reply: bool,
-
-    /// Whether this endpoint is created by a non-cooperative preemption (e.g. interrupts, faults).
-    ///
-    /// Full state recovery will be performed if this is set to true.
-    pub was_preempted: bool,
+    /// Flags.
+    pub flags: TaskEndpointFlags,
 }
 
 impl Clone for CapTaskEndpoint {
     fn clone(&self) -> CapTaskEndpoint {
-        if self.reply {
+        if self.flags.contains(TaskEndpointFlags::REPLY) {
             CapTaskEndpoint {
                 task: None,
                 entry: IpcEntry {
                     pc: 0,
                     user_context: core::u64::MAX,
                 },
-                reply: true,
-                was_preempted: false,
+                flags: self.flags,
             }
         } else {
             CapTaskEndpoint {
                 task: self.task.clone(),
                 entry: self.entry.clone(),
-                reply: self.reply,
-                was_preempted: self.was_preempted,
+                flags: self.flags,
             }
         }
     }
@@ -247,8 +253,10 @@ enum BasicTaskRequest {
     SetRegister = 5,
     FetchNewUserPageSet = 6,
     FetchTaskEndpoint = 7,
+    FetchTaskTransparentEndpoint = 8,
     SetIpcBase = 9,
     PutCapSet = 10,
+    FetchTaskCapTransferEndpoint = 11,
     MakeCapSet = 12,
     MakeRootPageTable = 13,
     PutRootPageTable = 14,
@@ -303,10 +311,20 @@ fn invoke_cap_basic_task(
             Ok(0)
         }
         BasicTaskRequest::FetchNewUserPageSet => Err(KernelError::NotImplemented),
-        BasicTaskRequest::FetchTaskEndpoint => {
+        BasicTaskRequest::FetchTaskEndpoint
+        | BasicTaskRequest::FetchTaskTransparentEndpoint
+        | BasicTaskRequest::FetchTaskCapTransferEndpoint => {
             let cptr = CapPtr(invocation.arg(1)? as u64);
             let entry_pc = invocation.arg(2)? as u64;
             let user_context = invocation.arg(3)? as u64;
+
+            let flags = match req {
+                BasicTaskRequest::FetchTaskTransparentEndpoint => {
+                    TaskEndpointFlags::STATE_TRANSPARENT
+                }
+                BasicTaskRequest::FetchTaskCapTransferEndpoint => TaskEndpointFlags::CAP_TRANSFER,
+                _ => TaskEndpointFlags::empty(),
+            };
             current
                 .capabilities
                 .get()
@@ -317,8 +335,7 @@ fn invoke_cap_basic_task(
                             pc: entry_pc,
                             user_context,
                         },
-                        reply: false,
-                        was_preempted: false,
+                        flags,
                     });
                 })?;
             Ok(0)
@@ -542,47 +559,51 @@ fn invoke_cap_mmio(invocation: &CapabilityInvocation, mmio: CapMmio) -> KernelRe
 #[derive(Debug, Copy, Clone, TryFromPrimitive)]
 enum IpcRequest {
     SwitchTo = 0,
+    IsTransparent = 1,
 }
 
 fn invoke_cap_task_endpoint(
     invocation: &mut CapabilityInvocation,
     endpoint: CapTaskEndpoint,
 ) -> KernelResult<i64> {
-    let current = Task::current();
-    let endpoint = if endpoint.reply {
-        // The `endpoint` we received as an argument is cloned.
-        // The `Clone` implementation should not produce a valid clone of reply endpoints.
-        assert!(endpoint.task.is_none());
-        drop(endpoint);
-        match current
-            .capabilities
-            .get()
-            .lookup_cptr_take(invocation.cptr())?
-            .object
-        {
-            CapabilityEndpointObject::TaskEndpoint(x) => x,
-            _ => return Err(KernelError::InvalidState),
-        }
-    } else {
-        endpoint
-    };
-
     let req = IpcRequest::try_from(invocation.arg(0)? as u32)?;
-    let task: KernelObjectRef<Task> = match endpoint.task {
-        Some(ref t) => t.clone(),
-        None => return Err(KernelError::InvalidArgument),
-    };
 
     match req {
         IpcRequest::SwitchTo => {
+            let current = Task::current();
+            let endpoint = if endpoint.flags.contains(TaskEndpointFlags::REPLY) {
+                // The `endpoint` we received as an argument is cloned.
+                // The `Clone` implementation should not produce a valid clone of reply endpoints.
+                assert!(endpoint.task.is_none());
+                drop(endpoint);
+                match current
+                    .capabilities
+                    .get()
+                    .lookup_cptr_take(invocation.cptr())?
+                    .object
+                {
+                    CapabilityEndpointObject::TaskEndpoint(x) => x,
+                    _ => return Err(KernelError::InvalidState),
+                }
+            } else {
+                endpoint
+            };
+            let task: KernelObjectRef<Task> = match endpoint.task {
+                Some(ref t) => t.clone(),
+                None => return Err(KernelError::InvalidArgument),
+            };
+
             drop(current.unblock_interrupt());
 
             // Only transfer capabilities if the remote task wasn't preempted out.
-            if !endpoint.was_preempted {
+            let reply_endpoint = if !endpoint
+                .flags
+                .contains(TaskEndpointFlags::STATE_TRANSPARENT)
+            {
                 let remote_base = task.ipc_base.load(Ordering::SeqCst);
 
                 // Swap CapabilityEndpointSet of local and remote tasks.
-                {
+                if endpoint.flags.contains(TaskEndpointFlags::CAP_TRANSFER) {
                     let current_capabilities = current.capabilities.get();
                     let remote_capabilities = task.capabilities.get();
                     if &*current_capabilities as *const CapabilitySet
@@ -607,27 +628,34 @@ fn invoke_cap_task_endpoint(
                     }
                 }
 
-                if !endpoint.reply && remote_base != INVALID_CAP {
-                    task.capabilities.get().0.lookup(remote_base, |entry| {
-                        entry.endpoints[0] = CapabilityEndpoint {
-                            object: CapabilityEndpointObject::TaskEndpoint(CapTaskEndpoint {
-                                task: Some(current.clone()),
-                                entry: IpcEntry {
-                                    pc: *invocation.registers.pc_mut(),
-                                    user_context: core::u64::MAX,
-                                },
-                                reply: true,
-                                was_preempted: false,
-                            }),
-                        };
-                    })?;
+                if !endpoint.flags.contains(TaskEndpointFlags::REPLY) && remote_base != INVALID_CAP
+                {
+                    Some((
+                        CapPtr(remote_base),
+                        CapTaskEndpoint {
+                            task: Some(current.clone()),
+                            entry: IpcEntry {
+                                pc: *invocation.registers.pc_mut(),
+                                user_context: core::u64::MAX,
+                            },
+                            flags: TaskEndpointFlags::REPLY
+                                | (endpoint.flags & TaskEndpointFlags::CAP_TRANSFER),
+                        },
+                    ))
+                } else {
+                    None
                 }
-            }
+            } else {
+                None
+            };
 
             *invocation.registers.return_value_mut() = 0;
 
             let entry = endpoint.entry.clone();
-            let mode = if endpoint.was_preempted {
+            let mode = if endpoint
+                .flags
+                .contains(TaskEndpointFlags::STATE_TRANSPARENT)
+            {
                 StateRestoreMode::Full
             } else {
                 StateRestoreMode::Syscall
@@ -636,9 +664,19 @@ fn invoke_cap_task_endpoint(
             drop(current);
             drop(endpoint);
 
-            let (_, e) = Task::invoke_ipc(task, entry, &invocation.registers, mode);
-            return Err(e);
+            let (_, e) = Task::invoke_ipc(task, entry, &invocation.registers, mode, reply_endpoint);
+            Err(e)
         }
+        IpcRequest::IsTransparent => Ok(
+            if endpoint
+                .flags
+                .contains(TaskEndpointFlags::STATE_TRANSPARENT)
+            {
+                1
+            } else {
+                0
+            },
+        ),
     }
 }
 
@@ -652,6 +690,14 @@ enum CapSetRequest {
     PutCap = 4,
     FetchDeepClone = 5,
     MoveCap = 6,
+    GetCapType = 7,
+}
+
+#[repr(u32)]
+#[derive(Debug, Copy, Clone)]
+enum CapType {
+    Other = 0,
+    TaskEndpoint = 1,
 }
 
 fn invoke_cap_capability_set(
@@ -722,6 +768,14 @@ fn invoke_cap_capability_set(
                 *endpoint = src_endpoint;
             })?;
             Ok(0)
+        }
+        CapSetRequest::GetCapType => {
+            let cptr = CapPtr(invocation.arg(1)? as u64);
+            let ty = set.entry_endpoint(cptr, |endpoint| match endpoint.object {
+                CapabilityEndpointObject::TaskEndpoint(_) => CapType::TaskEndpoint,
+                _ => CapType::Other,
+            })?;
+            Ok(ty as u32 as _)
         }
     }
 }

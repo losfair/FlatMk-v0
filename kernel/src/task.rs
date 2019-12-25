@@ -9,7 +9,8 @@ use crate::arch::{
     Page, PAGE_SIZE,
 };
 use crate::capability::{
-    CapPtr, CapTaskEndpoint, CapabilityEndpointObject, CapabilitySet, INVALID_CAP,
+    CapPtr, CapTaskEndpoint, CapabilityEndpointObject, CapabilitySet, TaskEndpointFlags,
+    INVALID_CAP,
 };
 use crate::error::*;
 use crate::kobj::*;
@@ -207,6 +208,7 @@ impl Task {
         entry: IpcEntry,
         old_registers: &TaskRegisters,
         mode: StateRestoreMode,
+        reply_endpoint: Option<(CapPtr, CapTaskEndpoint)>,
     ) -> (KernelObjectRef<Task>, KernelError) {
         match switch_to(task.clone(), Some(old_registers)) {
             Ok(()) => {}
@@ -221,6 +223,11 @@ impl Task {
             *target_regs.pc_mut() = entry.pc;
             if entry.user_context != core::u64::MAX {
                 *target_regs.usermode_arg_mut(0).unwrap() = entry.user_context;
+            }
+            if let Some((base, reply_endpoint)) = reply_endpoint {
+                drop(current.capabilities.get().entry_endpoint(base, |endpoint| {
+                    endpoint.object = CapabilityEndpointObject::TaskEndpoint(reply_endpoint);
+                }));
             }
         }
 
@@ -268,32 +275,34 @@ impl Task {
     ) -> (KernelObjectRef<Task>, KernelError) {
         let remote_base = task.ipc_base.load(Ordering::SeqCst);
 
-        if remote_base != INVALID_CAP {
-            if let Err(e) =
-                task.capabilities
-                    .get()
-                    .entry_endpoint(CapPtr(remote_base), |endpoint| {
-                        endpoint.object = CapabilityEndpointObject::TaskEndpoint(CapTaskEndpoint {
-                            task: Some(Task::current()),
-                            entry: IpcEntry {
-                                pc: old_registers.pc(),
-                                user_context: core::u64::MAX,
-                            },
-                            reply: true,
-                            was_preempted: true,
-                        });
-                    })
-            {
-                return (task, e);
-            }
-        }
+        let reply_endpoint = if remote_base != INVALID_CAP {
+            Some((
+                CapPtr(remote_base),
+                CapTaskEndpoint {
+                    task: Some(Task::current()),
+                    entry: IpcEntry {
+                        pc: old_registers.pc(),
+                        user_context: core::u64::MAX,
+                    },
+                    flags: TaskEndpointFlags::REPLY | TaskEndpointFlags::STATE_TRANSPARENT,
+                },
+            ))
+        } else {
+            None
+        };
 
         if let Some(code) = code {
             let mut target_regs = task.registers.lock();
             *target_regs.usermode_arg_mut(1).unwrap() = code; // argument 0 is used in invoke_ipc
         }
 
-        Self::invoke_ipc(task, entry, old_registers, StateRestoreMode::Syscall)
+        Self::invoke_ipc(
+            task,
+            entry,
+            old_registers,
+            StateRestoreMode::Syscall,
+            reply_endpoint,
+        )
     }
 }
 
@@ -301,16 +310,16 @@ pub fn switch_to(
     task: KernelObjectRef<Task>,
     old_registers: Option<&TaskRegisters>,
 ) -> KernelResult<()> {
+    // Switching to the same task is not allowed.
+    if task.is_current() {
+        return Err(KernelError::InvalidState);
+    }
+
     if let Some(old_regs) = old_registers {
         let current = Task::current();
         let mut regs = current.registers.lock();
         *regs = old_regs.clone();
         regs.lazy_read();
-    }
-
-    // Do nothing if we are switching to the same task.
-    if task.is_current() {
-        return Ok(());
     }
 
     let root = task.page_table_root.get();
