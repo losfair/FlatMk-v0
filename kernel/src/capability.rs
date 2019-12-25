@@ -222,7 +222,7 @@ impl CapabilityEndpointObject {
             CapabilityEndpointObject::CapabilitySet(set) => {
                 invoke_cap_capability_set(invocation, set)
             }
-            CapabilityEndpointObject::WaitForInterrupt => wait_for_interrupt(),
+            CapabilityEndpointObject::WaitForInterrupt => invoke_cap_wait_for_interrupt(invocation),
             CapabilityEndpointObject::Interrupt(index) => invoke_cap_interrupt(invocation, index),
         }
     }
@@ -247,10 +247,8 @@ enum BasicTaskRequest {
     SetRegister = 5,
     FetchNewUserPageSet = 6,
     FetchTaskEndpoint = 7,
-    UnblockIpc = 8,
     SetIpcBase = 9,
     PutCapSet = 10,
-    IpcIsBlocked = 11,
     MakeCapSet = 12,
     MakeRootPageTable = 13,
     PutRootPageTable = 14,
@@ -325,10 +323,6 @@ fn invoke_cap_basic_task(
                 })?;
             Ok(0)
         }
-        BasicTaskRequest::UnblockIpc => {
-            task.unblock_ipc()?;
-            Ok(0)
-        }
         BasicTaskRequest::SetIpcBase => {
             task.ipc_base
                 .store(invocation.arg(1)? as u64, Ordering::SeqCst);
@@ -346,13 +340,6 @@ fn invoke_cap_basic_task(
                     })??;
             task.capabilities.swap(capset);
             Ok(0)
-        }
-        BasicTaskRequest::IpcIsBlocked => {
-            if task.ipc_blocked.load(Ordering::SeqCst) {
-                Ok(1)
-            } else {
-                Ok(0)
-            }
         }
         BasicTaskRequest::MakeCapSet => {
             let cptr = CapPtr(invocation.arg(1)? as u64);
@@ -554,10 +541,7 @@ fn invoke_cap_mmio(invocation: &CapabilityInvocation, mmio: CapMmio) -> KernelRe
 #[allow(non_camel_case_types)]
 #[derive(Debug, Copy, Clone, TryFromPrimitive)]
 enum IpcRequest {
-    SwitchToBlocking = 0,
-    SwitchToNonblocking = 1,
-    SwitchToBlocking_UnblockLocalIpc = 2,
-    SwitchToNonblocking_UnblockLocalIpc = 3,
+    SwitchTo = 0,
 }
 
 fn invoke_cap_task_endpoint(
@@ -590,93 +574,70 @@ fn invoke_cap_task_endpoint(
     };
 
     match req {
-        IpcRequest::SwitchToBlocking
-        | IpcRequest::SwitchToNonblocking
-        | IpcRequest::SwitchToBlocking_UnblockLocalIpc
-        | IpcRequest::SwitchToNonblocking_UnblockLocalIpc => {
-            match req {
-                IpcRequest::SwitchToBlocking_UnblockLocalIpc
-                | IpcRequest::SwitchToNonblocking_UnblockLocalIpc => {
-                    Task::current().unblock_ipc()?;
-                }
-                _ => {}
-            }
+        IpcRequest::SwitchTo => {
+            drop(current.unblock_interrupt());
 
-            // Only modify the remote task's IPC blocking state if the remote task is "aware of" it.
-            // This means the remote task wasn't preempted out.
-            if !endpoint.was_preempted && task.block_ipc().is_err() {
-                match req {
-                    IpcRequest::SwitchToBlocking | IpcRequest::SwitchToBlocking_UnblockLocalIpc => {
-                        task.raise_fault(TaskFaultState::IpcBlocked);
-                    }
-                    IpcRequest::SwitchToNonblocking
-                    | IpcRequest::SwitchToNonblocking_UnblockLocalIpc => {
-                        return Err(KernelError::WouldBlock);
-                    }
-                }
-            } else {
-                // Only transfer capabilities if the remote task wasn't preempted out.
-                if !endpoint.was_preempted {
-                    let remote_base = task.ipc_base.load(Ordering::SeqCst);
+            // Only transfer capabilities if the remote task wasn't preempted out.
+            if !endpoint.was_preempted {
+                let remote_base = task.ipc_base.load(Ordering::SeqCst);
 
-                    // Swap CapabilityEndpointSet of local and remote tasks.
+                // Swap CapabilityEndpointSet of local and remote tasks.
+                {
+                    let current_capabilities = current.capabilities.get();
+                    let remote_capabilities = task.capabilities.get();
+                    if &*current_capabilities as *const CapabilitySet
+                        != &*remote_capabilities as *const CapabilitySet
                     {
-                        let current_capabilities = current.capabilities.get();
-                        let remote_capabilities = task.capabilities.get();
-                        if &*current_capabilities as *const CapabilitySet
-                            != &*remote_capabilities as *const CapabilitySet
-                        {
-                            let local_base = current.ipc_base.load(Ordering::SeqCst);
-                            if local_base != INVALID_CAP && remote_base != INVALID_CAP {
-                                current_capabilities.0.lookup_leaf_entry(
-                                    local_base,
-                                    |local_entry| {
-                                        remote_capabilities.0.lookup_leaf_entry(
-                                            remote_base,
-                                            |remote_entry| {
-                                                let remote_next = remote_entry.next;
-                                                remote_entry.next = local_entry.next;
-                                                local_entry.next = remote_next;
-                                            },
-                                        )
-                                    },
-                                )??;
-                            }
+                        let local_base = current.ipc_base.load(Ordering::SeqCst);
+                        if local_base != INVALID_CAP && remote_base != INVALID_CAP {
+                            current_capabilities.0.lookup_leaf_entry(
+                                local_base,
+                                |local_entry| {
+                                    remote_capabilities.0.lookup_leaf_entry(
+                                        remote_base,
+                                        |remote_entry| {
+                                            let remote_next = remote_entry.next;
+                                            remote_entry.next = local_entry.next;
+                                            local_entry.next = remote_next;
+                                        },
+                                    )
+                                },
+                            )??;
                         }
                     }
-
-                    if !endpoint.reply && remote_base != INVALID_CAP {
-                        task.capabilities.get().0.lookup(remote_base, |entry| {
-                            entry.endpoints[0] = CapabilityEndpoint {
-                                object: CapabilityEndpointObject::TaskEndpoint(CapTaskEndpoint {
-                                    task: Some(current.clone()),
-                                    entry: IpcEntry {
-                                        pc: *invocation.registers.pc_mut(),
-                                        user_context: core::u64::MAX,
-                                    },
-                                    reply: true,
-                                    was_preempted: false,
-                                }),
-                            };
-                        })?;
-                    }
                 }
 
-                *invocation.registers.return_value_mut() = 0;
-
-                let entry = endpoint.entry.clone();
-                let mode = if endpoint.was_preempted {
-                    StateRestoreMode::Full
-                } else {
-                    StateRestoreMode::Syscall
-                };
-
-                drop(current);
-                drop(endpoint);
-
-                let e = Task::invoke_ipc(task, entry, &invocation.registers, mode);
-                return Err(e);
+                if !endpoint.reply && remote_base != INVALID_CAP {
+                    task.capabilities.get().0.lookup(remote_base, |entry| {
+                        entry.endpoints[0] = CapabilityEndpoint {
+                            object: CapabilityEndpointObject::TaskEndpoint(CapTaskEndpoint {
+                                task: Some(current.clone()),
+                                entry: IpcEntry {
+                                    pc: *invocation.registers.pc_mut(),
+                                    user_context: core::u64::MAX,
+                                },
+                                reply: true,
+                                was_preempted: false,
+                            }),
+                        };
+                    })?;
+                }
             }
+
+            *invocation.registers.return_value_mut() = 0;
+
+            let entry = endpoint.entry.clone();
+            let mode = if endpoint.was_preempted {
+                StateRestoreMode::Full
+            } else {
+                StateRestoreMode::Syscall
+            };
+
+            drop(current);
+            drop(endpoint);
+
+            let (_, e) = Task::invoke_ipc(task, entry, &invocation.registers, mode);
+            return Err(e);
         }
     }
 }
@@ -690,6 +651,7 @@ enum CapSetRequest {
     FetchCap = 3,
     PutCap = 4,
     FetchDeepClone = 5,
+    MoveCap = 6,
 }
 
 fn invoke_cap_capability_set(
@@ -752,6 +714,15 @@ fn invoke_cap_capability_set(
             })?;
             Ok(0)
         }
+        CapSetRequest::MoveCap => {
+            let src = CapPtr(invocation.arg(1)? as u64);
+            let dst = CapPtr(invocation.arg(2)? as u64);
+            let src_endpoint = set.lookup_cptr_take(src)?;
+            set.entry_endpoint(dst, |endpoint| {
+                *endpoint = src_endpoint;
+            })?;
+            Ok(0)
+        }
     }
 }
 
@@ -792,4 +763,9 @@ fn invoke_cap_interrupt(invocation: &mut CapabilityInvocation, index: u8) -> Ker
             Ok(0)
         }
     }
+}
+
+fn invoke_cap_wait_for_interrupt(_: &mut CapabilityInvocation) -> KernelResult<i64> {
+    drop(Task::current().unblock_interrupt());
+    wait_for_interrupt();
 }

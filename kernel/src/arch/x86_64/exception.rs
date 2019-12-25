@@ -298,7 +298,7 @@ fn handle_external_interrupt(
     unsafe {
         set_hlt(false);
         invoke_interrupt(index, registers, None);
-        // If fails, silently discard the error and continues execution in the current task...
+        // If fails, ignore this interrupt.
         super::task::arch_enter_user_mode(registers);
     }
 }
