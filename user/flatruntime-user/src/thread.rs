@@ -64,10 +64,10 @@ impl Thread {
         map_ipc_cap_range(&*task, ipc_base);
         Thread { task, tls_indirect }
     }
-    pub unsafe fn task_endpoint(&self, pc: u64) -> TaskEndpoint {
+    pub unsafe fn task_endpoint(&self, pc: u64, context: u64) -> TaskEndpoint {
         self
             .task
-            .fetch_task_endpoint(pc)
+            .fetch_task_endpoint(pc, context)
             .expect("fetch_task_endpoint failed")
     }
     pub unsafe fn task(&self) -> &Task {

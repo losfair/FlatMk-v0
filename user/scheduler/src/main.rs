@@ -12,9 +12,10 @@ use flatruntime_user::{
     syscall::CPtr,
     io::Port,
     interrupt::{Interrupt, WaitForInterrupt},
-    ipc::{TaskEndpoint, FastIpcPayload, ipc_return, ipc_return_to, fastipc_read},
+    ipc::{TaskEndpoint, FastIpcPayload, ipc_return, ipc_return_to, fastipc_read, fastipc_write, ipc_endpoint_is_transparent},
     task::{ROOT_TASK, ROOT_CAPSET},
     thread::ROOT_IPC_BASE,
+    capset::CapType,
 };
 use alloc::boxed::Box;
 use core::mem::MaybeUninit;
@@ -43,6 +44,14 @@ struct SchedEntity {
 #[no_mangle]
 pub unsafe extern "C" fn user_start() -> ! {
     PIC_INTERRUPT_TIMER.bind(&*ROOT_TASK, handle_timer_interrupt_begin as u64, 0).unwrap();
+    ROOT_CAPSET.put_cap(
+        ROOT_TASK.fetch_task_endpoint(handle_yield_begin as u64, 0).unwrap().cptr(),
+        ROOT_IPC_BASE + 1,
+    ).unwrap();
+    ROOT_CAPSET.put_cap(
+        ROOT_TASK.fetch_task_cap_transfer_endpoint(handle_add_begin as u64, 0).unwrap().cptr(),
+        ROOT_IPC_BASE + 2,
+    ).unwrap();
     ipc_return();
 }
 
@@ -86,6 +95,43 @@ unsafe extern "C" fn handle_yield() -> ! {
         _ => {}
     }
     resched();
+}
+
+#[naked]
+unsafe extern "C" fn handle_add_begin() -> ! {
+    asm!(
+        r#"
+            mov %gs:8, %rsp
+            jmp handle_add
+        "# :::: "volatile"
+    );
+    loop {}
+}
+
+#[no_mangle]
+unsafe extern "C" fn handle_add() -> ! {
+    let mut payload = FastIpcPayload::default();
+
+    let incoming_cap = ROOT_CAPSET.take_ipc_cap(ROOT_IPC_BASE + 1).unwrap();
+    if ROOT_CAPSET.get_cap_type(&incoming_cap).unwrap() != CapType::TaskEndpoint as u32
+        || !ipc_endpoint_is_transparent(&incoming_cap) {
+
+        drop(incoming_cap);
+        
+        payload.data[0] = -1i64 as u64;
+        fastipc_write(&payload);
+        
+        ipc_return();
+    }
+
+    SCHED_QUEUE.lock().push_back(
+        SchedEntity {
+            endpoint: incoming_cap,
+            xsave: Box::new(core::mem::zeroed()),
+        }
+    );
+
+    ipc_return();
 }
 
 unsafe fn save_sched_entity() {

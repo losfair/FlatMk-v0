@@ -45,6 +45,7 @@ pub struct FastIpcPayload {
 #[derive(Debug, Copy, Clone)]
 pub enum IpcRequest {
     SwitchTo = 0,
+    IsTransparent = 1,
 }
 
 pub struct TaskEndpoint {
@@ -92,4 +93,12 @@ pub unsafe fn ipc_return_to(cptr: CPtr) -> ! {
         0, 0, 0,
     ).expect("ipc_return_to: cannot send reply");
     unreachable!()
+}
+
+pub unsafe fn ipc_endpoint_is_transparent(cptr: &CPtr) -> bool {
+    let result = cptr.call_result(
+        IpcRequest::IsTransparent as u32 as i64,
+        0, 0, 0,
+    ).expect("ipc_endpoint_is_transparent: call_result returned error");
+    result == 1
 }

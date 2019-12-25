@@ -118,7 +118,7 @@ pub fn create_process(image: &[u8], caps: &[(u64, &CPtr)]) -> KernelResult<(Task
     task.set_ipc_base(ROOT_IPC_BASE)?;
 
     task.set_register(SP_INDEX, layout::STACK_END)?;
-    let endpoint = task.fetch_task_endpoint(entry_pc)?;
+    let endpoint = task.fetch_task_cap_transfer_endpoint(entry_pc, 0)?;
 
     // Initialize.
     endpoint.call(&mut FastIpcPayload::default())?;

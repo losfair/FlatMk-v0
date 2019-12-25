@@ -16,6 +16,14 @@ enum CapSetRequest {
     PutCap = 4,
     FetchDeepClone = 5,
     MoveCap = 6,
+    GetCapType = 7,
+}
+
+#[repr(u32)]
+#[derive(Debug, Copy, Clone)]
+pub enum CapType {
+    Other = 0,
+    TaskEndpoint = 1,
 }
 
 impl CapSet {
@@ -114,5 +122,20 @@ impl CapSet {
             self.trivial_move_cap(src, cptr.index())
         })?;
         Ok(cptr)
+    }
+
+    pub fn trivial_get_cap_type(&self, target: u64) -> KernelResult<u32> {
+        unsafe {
+            self.cap.call_result(
+                CapSetRequest::GetCapType as u32 as i64,
+                target as i64,
+                0,
+                0,
+            ).map(|x| x as u32)
+        }
+    }
+
+    pub fn get_cap_type(&self, target: &CPtr) -> KernelResult<u32> {
+        self.trivial_get_cap_type(target.index())
     }
 }

@@ -60,8 +60,10 @@ enum BasicTaskRequest {
     SetRegister = 5,
     FetchNewUserPageSet = 6,
     FetchTaskEndpoint = 7,
+    FetchTaskTransparentEndpoint = 8,
     SetIpcBase = 9,
     PutCapSet = 10,
+    FetchTaskCapTransferEndpoint = 11,
     MakeCapSet = 12,
     MakeRootPageTable = 13,
     PutRootPageTable = 14,
@@ -183,14 +185,42 @@ impl Task {
         }
     }
 
-    pub fn fetch_task_endpoint(&self, pc: u64) -> KernelResult<TaskEndpoint> {
+    pub fn fetch_task_endpoint(&self, pc: u64, context: u64) -> KernelResult<TaskEndpoint> {
         let (cptr, _) = allocate_cptr(|cptr| unsafe {
             self.cap
                 .call_result(
                     BasicTaskRequest::FetchTaskEndpoint as u32 as i64,
                     cptr.index() as _,
                     pc as _,
-                    0,
+                    context as _,
+                )
+                .map(|_| ())
+        })?;
+        Ok(unsafe { TaskEndpoint::new(cptr) })
+    }
+
+    pub fn fetch_task_transparent_endpoint(&self, pc: u64, context: u64) -> KernelResult<TaskEndpoint> {
+        let (cptr, _) = allocate_cptr(|cptr| unsafe {
+            self.cap
+                .call_result(
+                    BasicTaskRequest::FetchTaskTransparentEndpoint as u32 as i64,
+                    cptr.index() as _,
+                    pc as _,
+                    context as _,
+                )
+                .map(|_| ())
+        })?;
+        Ok(unsafe { TaskEndpoint::new(cptr) })
+    }
+
+    pub fn fetch_task_cap_transfer_endpoint(&self, pc: u64, context: u64) -> KernelResult<TaskEndpoint> {
+        let (cptr, _) = allocate_cptr(|cptr| unsafe {
+            self.cap
+                .call_result(
+                    BasicTaskRequest::FetchTaskCapTransferEndpoint as u32 as i64,
+                    cptr.index() as _,
+                    pc as _,
+                    context as _,
                 )
                 .map(|_| ())
         })?;

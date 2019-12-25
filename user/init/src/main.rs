@@ -17,7 +17,7 @@ use alloc::boxed::Box;
 use core::arch::x86_64::_rdtsc;
 use core::fmt::Write;
 use flatruntime_user::{
-    capset::CapSet,
+    capset::{CapType, CapSet},
     io::Port,
     ipc::*,
     mm::{Mmio, RootPageTable},
@@ -60,13 +60,21 @@ pub unsafe extern "C" fn user_start() -> ! {
     writeln!(SERIAL_PORT.handle(), "Resources initialized.");
     println!("init: FlatMK init task started.");
 
+    let sched_yield;
+    let sched_add;
+
     {
         use flatruntime_user::root;
         create_process(image::SCHEDULER, &[
             (1, root::new_interrupt(32).unwrap().cptr()),
             (2, root::new_wait_for_interrupt().unwrap().cptr()),
         ]).unwrap();
+        sched_yield = ROOT_CAPSET.take_ipc_cap(ROOT_IPC_BASE + 1).unwrap();
+        sched_add = ROOT_CAPSET.take_ipc_cap(ROOT_IPC_BASE + 2).unwrap();
     }
+
+    assert_eq!(ROOT_CAPSET.get_cap_type(&sched_yield).unwrap(), CapType::TaskEndpoint as u32);
+    assert_eq!(ROOT_CAPSET.get_cap_type(&sched_add).unwrap(), CapType::TaskEndpoint as u32);
     println!("init: Scheduler created.");
 
     run_benchmark();
@@ -86,7 +94,7 @@ unsafe fn run_benchmark() -> ! {
     let new_thread = Thread::new(0x300100);
     println!("init: Created thread.");
 
-    let endpoint = unsafe { new_thread.task_endpoint(handle_ipc_begin as _) };
+    let endpoint = unsafe { new_thread.task_endpoint(handle_ipc_begin as _, 0) };
     println!("init: Fetched IPC endpoint.");
 
     let mut payload = FastIpcPayload::default();
