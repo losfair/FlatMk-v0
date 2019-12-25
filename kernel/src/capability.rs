@@ -645,7 +645,7 @@ fn invoke_cap_task_endpoint(
                         }
                     }
 
-                    if !endpoint.reply {
+                    if !endpoint.reply && remote_base != INVALID_CAP {
                         task.capabilities.get().0.lookup(remote_base, |entry| {
                             entry.endpoints[0] = CapabilityEndpoint {
                                 object: CapabilityEndpointObject::TaskEndpoint(CapTaskEndpoint {
