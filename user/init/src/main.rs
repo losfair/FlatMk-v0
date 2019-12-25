@@ -9,8 +9,10 @@ extern crate alloc;
 
 mod serial;
 mod vga;
+mod image;
 
 use crate::serial::SerialPort;
+use core::mem::ManuallyDrop;
 use alloc::boxed::Box;
 use core::arch::x86_64::_rdtsc;
 use core::fmt::Write;
@@ -20,8 +22,9 @@ use flatruntime_user::{
     ipc::*,
     mm::{Mmio, RootPageTable},
     syscall::{CPtr, INVALID_CAP},
-    thread::{this_ipc_base, this_task, Thread},
+    thread::{this_ipc_base, this_task, setup_ipc, ROOT_IPC_BASE, Thread},
     task::{ROOT_PAGE_TABLE, ROOT_CAPSET},
+    elf::create_process,
 };
 
 lazy_static! {
@@ -47,6 +50,7 @@ lazy_static! {
 unsafe fn resource_init() {
     ROOT_PAGE_TABLE.make_leaf(0x1b8000).unwrap();
     VGA_MMIO.alloc_at(0x1b8000).unwrap();
+    setup_ipc(ROOT_IPC_BASE).unwrap();
 }
 
 #[no_mangle]
@@ -56,6 +60,19 @@ pub unsafe extern "C" fn user_start() -> ! {
     writeln!(SERIAL_PORT.handle(), "Resources initialized.");
     println!("init: FlatMK init task started.");
 
+    {
+        use flatruntime_user::root;
+        create_process(image::SCHEDULER, &[
+            (1, root::new_interrupt(32).unwrap().cptr()),
+            (2, root::new_wait_for_interrupt().unwrap().cptr()),
+        ]).unwrap();
+    }
+    println!("init: Scheduler created.");
+
+    run_benchmark();
+}
+
+unsafe fn run_benchmark() -> ! {
     benchmark(1000000, "syscall", || unsafe {
         let cptr = CPtr::new(INVALID_CAP);
         cptr.call(0, 0, 0, 0);
@@ -68,10 +85,6 @@ pub unsafe extern "C" fn user_start() -> ! {
 
     let new_thread = Thread::new(0x300100);
     println!("init: Created thread.");
-
-    unsafe {
-        new_thread.task().unblock_ipc().unwrap();
-    }
 
     let endpoint = unsafe { new_thread.task_endpoint(handle_ipc_begin as _) };
     println!("init: Fetched IPC endpoint.");
@@ -116,6 +129,33 @@ pub unsafe extern "C" fn user_start() -> ! {
         ROOT_PAGE_TABLE.deep_clone().unwrap();
     });
 
+    {
+        let rpt = this_task().make_root_page_table().unwrap();
+        #[repr(align(4096))]
+        struct Page([u8; 4096]);
+        let mut page = Box::new(Page([0; 4096]));
+        page.0[0] = 42;
+        rpt.make_leaf(0x100000).unwrap();
+        benchmark(100000, "PutPage", || {
+            rpt.put_page(&mut *page as *mut Page as u64, 0x100000).unwrap();
+        });
+        ROOT_PAGE_TABLE.make_leaf(0xd0100000).unwrap();
+
+        benchmark(100000, "FetchPage", || {
+            rpt.fetch_page(0x100000, 0xd0100000).unwrap();
+        });
+        unsafe {
+            assert_eq!(* (0xd0100000 as *mut u8), 42);
+        }
+        ROOT_PAGE_TABLE.drop_page(0xd0100000).unwrap();
+
+        benchmark(100000, "PutPage + FetchPage + DropPage", || {
+            rpt.put_page(&mut *page as *mut Page as u64, 0x100000).unwrap();
+            rpt.fetch_page(0x100000, 0xd0100000).unwrap();
+            ROOT_PAGE_TABLE.drop_page(0xd0100000).unwrap();
+        });
+    }
+
     println!("Benchmark done.");
 
     loop {}
@@ -151,10 +191,8 @@ extern "C" fn handle_ipc() -> ! {
     fastipc_write(&payload);
     let code = unsafe {
         peer_endpoint.leaky_call(
-            IpcRequest::SwitchToBlocking_UnblockLocalIpc as u32 as i64,
-            INVALID_CAP as _,
-            INVALID_CAP as _,
-            INVALID_CAP as _,
+            IpcRequest::SwitchTo as u32 as i64,
+            0, 0, 0,
         )
     };
     panic!("handle_ipc: {}", code);

@@ -13,6 +13,9 @@ enum RootPageTableRequest {
     MakeLeaf = 0,
     AllocLeaf = 1,
     FetchDeepClone = 2,
+    PutPage = 3,
+    FetchPage = 4,
+    DropPage = 5,
 }
 
 impl RootPageTable {
@@ -62,6 +65,35 @@ impl RootPageTable {
                     0,
                 )
                 .map(|_| ())
+        }
+    }
+
+    pub unsafe fn put_page(&self, src: u64, dst: u64) -> KernelResult<()> {
+        self.cap.call_result(
+            RootPageTableRequest::PutPage as u32 as i64,
+            src as _,
+            dst as _,
+            0,
+        ).map(|_| ())
+    }
+
+    pub unsafe fn fetch_page(&self, src: u64, dst: u64) -> KernelResult<()> {
+        self.cap.call_result(
+            RootPageTableRequest::FetchPage as u32 as i64,
+            src as _,
+            dst as _,
+            0,
+        ).map(|_| ())
+    }
+
+    pub fn drop_page(&self, target: u64) -> KernelResult<()> {
+        unsafe {
+            self.cap.call_result(
+                RootPageTableRequest::DropPage as u32 as i64,
+                target as _,
+                0,
+                0,
+            ).map(|_| ())
         }
     }
 }

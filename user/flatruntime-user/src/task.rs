@@ -6,6 +6,7 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use core::convert::TryFrom;
 use spin::Mutex;
+use crate::ipc::TaskEndpoint;
 
 pub const LOCAL_CAP_INDEX_CAPSET: u64 = 4;
 pub const LOCAL_CAP_INDEX_RPT: u64 = 5;
@@ -59,10 +60,8 @@ enum BasicTaskRequest {
     SetRegister = 5,
     FetchNewUserPageSet = 6,
     FetchTaskEndpoint = 7,
-    UnblockIpc = 8,
     SetIpcBase = 9,
     PutCapSet = 10,
-    IpcIsBlocked = 11,
     MakeCapSet = 12,
     MakeRootPageTable = 13,
     PutRootPageTable = 14,
@@ -184,7 +183,7 @@ impl Task {
         }
     }
 
-    pub fn fetch_task_endpoint(&self, pc: u64) -> KernelResult<CPtr> {
+    pub fn fetch_task_endpoint(&self, pc: u64) -> KernelResult<TaskEndpoint> {
         let (cptr, _) = allocate_cptr(|cptr| unsafe {
             self.cap
                 .call_result(
@@ -195,15 +194,7 @@ impl Task {
                 )
                 .map(|_| ())
         })?;
-        Ok(cptr)
-    }
-
-    pub fn unblock_ipc(&self) -> KernelResult<()> {
-        unsafe {
-            self.cap
-                .call_result(BasicTaskRequest::UnblockIpc as u32 as i64, 0, 0, 0)
-                .map(|_| ())
-        }
+        Ok(unsafe { TaskEndpoint::new(cptr) })
     }
 
     pub fn put_capset(&self, capset: &CapSet) -> KernelResult<()> {
@@ -257,14 +248,6 @@ impl Task {
                 Ok(())
             })?;
             Ok(RootPageTable::new(cptr))
-        }
-    }
-
-    pub fn ipc_is_blocked(&self) -> KernelResult<bool> {
-        unsafe {
-            self.cap
-                .call_result(BasicTaskRequest::IpcIsBlocked as u32 as i64, 0, 0, 0)
-                .map(|x| x != 0)
         }
     }
 }

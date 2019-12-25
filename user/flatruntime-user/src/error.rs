@@ -1,4 +1,5 @@
 use num_enum::TryFromPrimitive;
+use core::option::NoneError;
 
 #[repr(i32)]
 #[derive(Copy, Clone, Debug, TryFromPrimitive)]
@@ -13,14 +14,16 @@ pub enum KernelError {
     InvalidAddress = -4,
     /// Some object is empty when processing invocation request.
     EmptyObject = -5,
-    /// An IPC operation would block, but non-blocking mode is requested.
-    WouldBlock = -6,
     /// An empty capability is invoked.
     EmptyCapability = -7,
-    /// A race condition is detected.
-    RaceRetry = -8,
     /// No available memory.
     OutOfMemory = -9,
 }
 
 pub type KernelResult<T> = Result<T, KernelError>;
+
+impl From<NoneError> for KernelError {
+    fn from(_: NoneError) -> KernelError {
+        KernelError::EmptyObject
+    }
+}

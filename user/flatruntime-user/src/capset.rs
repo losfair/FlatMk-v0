@@ -15,6 +15,7 @@ enum CapSetRequest {
     FetchCap = 3,
     PutCap = 4,
     FetchDeepClone = 5,
+    MoveCap = 6,
 }
 
 impl CapSet {
@@ -92,6 +93,25 @@ impl CapSet {
                 )?;
             }
             Ok(())
+        })?;
+        Ok(cptr)
+    }
+
+    pub fn trivial_move_cap(&self, src: u64, dst: u64) -> KernelResult<()> {
+        unsafe {
+            self.cap.call_result(
+                CapSetRequest::MoveCap as u32 as i64,
+                src as i64,
+                dst as i64,
+                0,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn take_ipc_cap(&self, src: u64) -> KernelResult<CPtr> {
+        let (cptr, _) = allocate_cptr(|cptr| {
+            self.trivial_move_cap(src, cptr.index())
         })?;
         Ok(cptr)
     }

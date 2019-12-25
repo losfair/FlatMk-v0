@@ -10,8 +10,12 @@ pub struct Port {
 }
 
 impl Port {
-    pub unsafe fn new(cap: CPtr) -> Port {
+    pub const unsafe fn new(cap: CPtr) -> Port {
         Port { cap }
+    }
+
+    pub fn cptr(&self) -> &CPtr {
+        &self.cap
     }
 
     pub unsafe fn outb(&self, x: u8) -> KernelResult<()> {

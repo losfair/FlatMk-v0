@@ -1,6 +1,7 @@
 use crate::error::*;
 use crate::syscall::{CPtr, INVALID_CAP};
 use core::convert::TryFrom;
+use crate::thread::this_ipc_base;
 
 pub fn fastipc_read(out: &mut FastIpcPayload) {
     unsafe {
@@ -37,17 +38,13 @@ pub fn fastipc_write(data: &FastIpcPayload) {
 #[derive(Copy, Clone, Default)]
 #[repr(C)]
 pub struct FastIpcPayload {
-    pub user_context: u64,
-    pub data: [u64; 7],
+    pub data: [u64; 8],
 }
 
 #[repr(u32)]
 #[derive(Debug, Copy, Clone)]
 pub enum IpcRequest {
-    SwitchToBlocking = 0,
-    SwitchToNonblocking = 1,
-    SwitchToBlocking_UnblockLocalIpc = 2,
-    SwitchToNonblocking_UnblockLocalIpc = 3,
+    SwitchTo = 0,
 }
 
 pub struct TaskEndpoint {
@@ -59,12 +56,16 @@ impl TaskEndpoint {
         TaskEndpoint { cap }
     }
 
+    pub fn cptr(&self) -> &CPtr {
+        &self.cap
+    }
+
     pub fn call(&self, payload: &mut FastIpcPayload) -> KernelResult<()> {
         fastipc_write(payload);
 
         match unsafe {
             self.cap.call(
-                IpcRequest::SwitchToBlocking_UnblockLocalIpc as u32 as i64,
+                IpcRequest::SwitchTo as u32 as i64,
                 INVALID_CAP as _,
                 INVALID_CAP as _,
                 INVALID_CAP as _,
@@ -77,4 +78,18 @@ impl TaskEndpoint {
             }
         }
     }
+}
+
+pub fn ipc_return() -> ! {
+    unsafe {
+        ipc_return_to(CPtr::new(this_ipc_base()))
+    }
+}
+
+pub unsafe fn ipc_return_to(cptr: CPtr) -> ! {
+    cptr.call_result(
+        IpcRequest::SwitchTo as u32 as i64,
+        0, 0, 0,
+    ).expect("ipc_return_to: cannot send reply");
+    unreachable!()
 }

@@ -11,3 +11,7 @@ wee_alloc = { git = "https://github.com/losfair/wee_alloc_ck", features = ["size
 lazy_static = { version = "1.4", features = ["spin_no_std"] }
 spin = "0.5"
 num_enum = { version = "0.4", default-features = false }
+goblin = { version = "0.1", default-features = false, features = ["elf64"] }
+
+[features]
+static_stack = []
