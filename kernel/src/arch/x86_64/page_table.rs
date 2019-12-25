@@ -16,6 +16,7 @@ unsafe impl DirectCopy for Page {
 }
 
 pub const PAGE_SIZE: usize = 4096;
+pub const PAGE_SIZE_BITS: usize = 12;
 pub const PAGE_TABLE_LEVEL_BITS: u8 = 9;
 pub const PAGE_TABLE_LEVELS: u8 = 4;
 pub const PAGE_TABLE_INDEX_START: u8 = 47;
@@ -139,6 +140,10 @@ impl PageTableEntry {
             addr,
             PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
         );
+    }
+
+    pub fn set_addr_rwxk(&mut self, addr: PhysAddr) {
+        self.set_addr(addr, PageTableFlags::PRESENT | PageTableFlags::WRITABLE);
     }
 
     fn test_flag(&self, flag: PageTableFlags) -> bool {

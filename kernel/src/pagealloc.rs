@@ -6,10 +6,13 @@ use crate::error::*;
 use core::mem::{size_of, MaybeUninit};
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 /// This number is chosen to ensure size_of::<AllocFrame>() == size_of::<Page>() .
 pub const PAGES_PER_ALLOC_FRAME: usize = PAGE_SIZE / size_of::<usize>() - 3;
+
+pub const PHYSICAL_PAGE_METADATA_BASE: u64 = 0xFFFFFFC000000000;
 
 /// A NonNull pointer to `AllocFrame` that implements `Send`.
 #[derive(Copy, Clone)]
@@ -53,8 +56,13 @@ pub unsafe fn init_clear_and_push_alloc_frame(mut frame: NonNull<AllocFrame>) {
     *current = Some(AllocFramePtr(frame));
 }
 
+/// Pushes a physical page. Used during paging initialization.
+pub unsafe fn init_push_physical_page(addr: PhysAddr) {
+    push_physical_page(addr)
+}
+
 /// Pushes a physical page.
-pub unsafe fn push_physical_page(addr: PhysAddr) {
+unsafe fn push_physical_page(addr: PhysAddr) {
     let mut current_locked = ALLOC_CURRENT.lock();
     let mut current = current_locked.unwrap();
 
@@ -71,7 +79,7 @@ pub unsafe fn push_physical_page(addr: PhysAddr) {
 }
 
 /// Pops a physical page.
-pub unsafe fn pop_physical_page() -> KernelResult<PhysAddr> {
+unsafe fn pop_physical_page() -> KernelResult<PhysAddr> {
     let mut current_locked = ALLOC_CURRENT.lock();
     let mut current = current_locked.unwrap();
 
@@ -99,10 +107,26 @@ pub unsafe fn pop_physical_page() -> KernelResult<PhysAddr> {
 #[repr(transparent)]
 pub struct KernelPageRef<T>(NonNull<T>);
 
+unsafe impl<T: Send> Send for KernelPageRef<T> {}
+unsafe impl<T: Sync> Sync for KernelPageRef<T> {}
+
+impl<T> Clone for KernelPageRef<T> {
+    fn clone(&self) -> Self {
+        let phys = PhysAddr::from_phys_mapped_virt(VirtAddr::from_nonnull(self.0)).unwrap();
+        unsafe {
+            inc_refcount(phys);
+        }
+        KernelPageRef(self.0)
+    }
+}
+
 impl<T> KernelPageRef<T> {
     pub fn new(inner: T) -> KernelResult<Self> {
         assert!(size_of::<T>() <= PAGE_SIZE);
         let phys = unsafe { pop_physical_page()? };
+        unsafe {
+            inc_refcount(phys);
+        }
         let virt = VirtAddr::from_phys(phys);
         let ptr = virt.as_nonnull().unwrap();
         unsafe {
@@ -114,6 +138,9 @@ impl<T> KernelPageRef<T> {
     pub fn new_uninit() -> KernelResult<MaybeUninit<Self>> {
         assert!(size_of::<T>() <= PAGE_SIZE);
         let phys = unsafe { pop_physical_page()? };
+        unsafe {
+            inc_refcount(phys);
+        }
         let virt = VirtAddr::from_phys(phys);
         let ptr = virt.as_nonnull().unwrap();
         Ok(MaybeUninit::new(KernelPageRef(ptr)))
@@ -134,14 +161,31 @@ impl<T> KernelPageRef<T> {
     }
 }
 
+// TODO: Better atomic ordering?
+unsafe fn inc_refcount(phys: PhysAddr) -> u64 {
+    let metadata = phys.page_metadata().as_nonnull().unwrap();
+    let metadata: &AtomicU64 = metadata.as_ref();
+    metadata.fetch_add(1, Ordering::SeqCst)
+}
+
+// TODO: Better atomic ordering?
+unsafe fn dec_refcount(phys: PhysAddr) -> u64 {
+    let metadata = phys.page_metadata().as_nonnull().unwrap();
+    let metadata: &AtomicU64 = metadata.as_ref();
+    metadata.fetch_sub(1, Ordering::SeqCst)
+}
+
 impl<T> Drop for KernelPageRef<T> {
     fn drop(&mut self) {
-        unsafe {
-            core::ptr::drop_in_place(self.0.as_ptr());
-        }
         let phys = PhysAddr::from_phys_mapped_virt(VirtAddr::from_nonnull(self.0)).unwrap();
         unsafe {
-            push_physical_page(phys);
+            let old_value = dec_refcount(phys);
+            if old_value == 1 {
+                core::ptr::drop_in_place(self.0.as_ptr());
+                push_physical_page(phys);
+            } else if old_value == 0 {
+                panic!("pagealloc::dec_refcount: old refcount is zero");
+            }
         }
     }
 }

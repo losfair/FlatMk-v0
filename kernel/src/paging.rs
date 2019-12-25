@@ -43,10 +43,9 @@ pub type PageTableLevel = Level<Page, PageTableEntry, PAGE_TABLE_SIZE>;
 
 pub struct PageTableObject(pub PageTableMto);
 
-unsafe fn populate_available_pages() {
-    let phys_mappings = &crate::boot::boot_info().memory_map;
-
-    let phys_iterator = phys_mappings
+fn iter_physical_pages() -> impl Iterator<Item = PhysAddr> {
+    crate::boot::boot_info()
+        .memory_map
         .iter()
         .filter_map(|x| match x.region_type {
             MemoryRegionType::Usable | MemoryRegionType::Bootloader => Some(
@@ -56,13 +55,53 @@ unsafe fn populate_available_pages() {
             ),
             _ => None,
         })
-        .flatten();
+        .flatten()
+}
+
+/// Populates metadata (only refcounts for now).
+unsafe fn populate_physical_mem_metadata(remaining: &mut impl Iterator<Item = PhysAddr>) {
+    let l4_table = &mut *_active_level_4_table();
+    let all_phys = iter_physical_pages();
+    for page in all_phys {
+        let md_vaddr = page.page_metadata();
+
+        while l4_table
+            .lookup_entry::<NullEntryFilter, _, _>(
+                md_vaddr.0,
+                PAGE_TABLE_LEVELS,
+                PAGE_TABLE_INDEX_START,
+                PAGE_TABLE_LEVEL_BITS,
+                |depth, entry| {
+                    if depth == PAGE_TABLE_LEVELS - 1 && !entry.is_unused() {
+                        false
+                    } else {
+                        let frame = remaining
+                            .next()
+                            .expect("populate_physical_mem_metadata: No physical memory left.");
+                        let page: *mut Page = VirtAddr::from_phys(frame).as_mut_ptr();
+                        core::ptr::write(page, core::mem::zeroed());
+                        entry.set_addr_rwxk(frame);
+                        true
+                    }
+                },
+            )
+            .expect("populate_physical_mem_metadata: lookup_entry failed. Incorrect filter?")
+        {
+        }
+    }
+    tlb::flush_all();
+}
+
+unsafe fn populate_available_pages() {
+    let mut phys_iterator = iter_physical_pages();
+    populate_physical_mem_metadata(&mut phys_iterator);
+
     let mut next: usize = 0;
     for addr in phys_iterator {
         if next == 0 {
             init_clear_and_push_alloc_frame(VirtAddr::from_phys(addr).as_nonnull().unwrap());
         } else {
-            push_physical_page(addr);
+            init_push_physical_page(addr);
         }
         // Each group consists of one `AllocFrame` + `PAGES_PER_ALLOC_FRAME` normal pages.
         if next + 1 == 1 + PAGES_PER_ALLOC_FRAME {
@@ -119,6 +158,10 @@ impl PageTableObject {
         if self.is_current() {
             tlb::flush(target);
         }
+    }
+
+    pub fn flush_tlb_assume_current(&self, target: UserAddr) {
+        tlb::flush(target);
     }
 
     pub unsafe fn copy_kernel_range_from_level(&self, src: &PageTableLevel) {

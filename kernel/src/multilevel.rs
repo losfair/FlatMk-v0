@@ -363,6 +363,34 @@ impl<
         let mut root = self.root.lock();
         cb(&mut **root)
     }
+
+    /// Attaches a leaf.
+    pub fn attach_leaf(&self, ptr: u64, leaf: KernelPageRef<T>) -> KernelResult<()> {
+        self.lookup_leaf_entry(ptr, |entry| {
+            // Release the old leaf, if any.
+            if let Some(mut old) = entry.as_level() {
+                unsafe {
+                    old.as_mut().drop_and_release_assuming_leaf();
+                }
+            }
+            entry.attach_level(KernelPageRef::into_raw(leaf).cast::<_>());
+        })?;
+        Ok(())
+    }
+
+    /// Clones and returns the reference to a given leaf.
+    pub fn get_leaf(&self, ptr: u64) -> KernelResult<KernelPageRef<T>> {
+        Ok(self.lookup_leaf_entry(ptr, |entry| {
+            if let Some(level) = entry.as_level() {
+                let level = unsafe { KernelPageRef::from_raw(level.cast::<T>()) };
+                let ret = level.clone();
+                KernelPageRef::into_raw(level); // don't drop
+                Some(ret)
+            } else {
+                None
+            }
+        })??)
+    }
 }
 
 impl<
@@ -447,7 +475,7 @@ impl<
         }
     }
 
-    /// Creates a MTO with root taken from userspace.
+    /// Creates an MTO.
     pub fn new() -> KernelResult<Self> {
         Self::check();
         let root = Self::default_level_table()?;
@@ -470,20 +498,6 @@ impl<
 
             Ok(true)
         })?? {}
-        Ok(())
-    }
-
-    /// Attaches a leaf.
-    pub fn attach_leaf(&self, ptr: u64, leaf: KernelPageRef<T>) -> KernelResult<()> {
-        self.lookup_leaf_entry(ptr, |entry| {
-            // Release the old leaf, if any.
-            if let Some(mut old) = entry.as_level() {
-                unsafe {
-                    old.as_mut().drop_and_release_assuming_leaf();
-                }
-            }
-            entry.attach_level(KernelPageRef::into_raw(leaf).cast::<_>());
-        })?;
         Ok(())
     }
 }

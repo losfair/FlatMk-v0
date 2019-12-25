@@ -1,8 +1,10 @@
 use crate::arch::{
-    arch_translate_phys_mapped_virt, arch_validate_virtual_address, PAGE_SIZE, PAGE_TABLE_SIZE,
+    arch_translate_phys_mapped_virt, arch_validate_virtual_address, PAGE_SIZE, PAGE_SIZE_BITS,
+    PAGE_TABLE_SIZE,
 };
 use crate::error::*;
 use crate::multilevel::NullEntryFilter;
+use crate::pagealloc::PHYSICAL_PAGE_METADATA_BASE;
 use crate::paging::{PageTableMto, PageTableObject};
 use core::ptr::NonNull;
 
@@ -66,6 +68,19 @@ impl PhysAddr {
                     Some(entry.addr())
                 }
             })??)
+    }
+
+    pub fn page_id(&self) -> u64 {
+        self.0 >> PAGE_SIZE_BITS
+    }
+
+    pub fn page_metadata(&self) -> VirtAddr {
+        // 8 bytes
+        VirtAddr(
+            PHYSICAL_PAGE_METADATA_BASE
+                .checked_add(self.page_id() << 3)
+                .expect("PhysAddr::metadata_vaddr: Add overflow. Invalid physical address?"),
+        )
     }
 }
 

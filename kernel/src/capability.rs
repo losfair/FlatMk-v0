@@ -480,6 +480,8 @@ enum RootPageTableRequest {
     MakeLeaf = 0,
     AllocLeaf = 1,
     FetchDeepClone = 2,
+    PutPage = 3,
+    FetchPage = 4,
 }
 
 fn invoke_cap_root_page_table(
@@ -507,6 +509,23 @@ fn invoke_cap_root_page_table(
             current.capabilities.get().entry_endpoint(dst, |endpoint| {
                 endpoint.object = CapabilityEndpointObject::RootPageTable(clone);
             })?;
+            Ok(0)
+        }
+        RootPageTableRequest::PutPage => {
+            let src = UserAddr::new(invocation.arg(1)? as u64)?;
+            let dst = UserAddr::new(invocation.arg(2)? as u64)?;
+            let page = current.page_table_root.get().0.get_leaf(src.get())?;
+            pt.0.attach_leaf(dst.get(), page)?;
+            pt.flush_tlb_if_current(dst);
+            Ok(0)
+        }
+        RootPageTableRequest::FetchPage => {
+            let src = UserAddr::new(invocation.arg(1)? as u64)?;
+            let dst = UserAddr::new(invocation.arg(2)? as u64)?;
+            let page = pt.0.get_leaf(src.get())?;
+            let current_pt = current.page_table_root.get();
+            current_pt.0.attach_leaf(dst.get(), page)?;
+            current_pt.flush_tlb_assume_current(dst);
             Ok(0)
         }
     }
