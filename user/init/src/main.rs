@@ -24,7 +24,7 @@ use flatruntime_user::{
     syscall::{CPtr, INVALID_CAP},
     thread::{this_ipc_base, this_task, setup_ipc, ROOT_IPC_BASE, Thread},
     task::{ROOT_PAGE_TABLE, ROOT_CAPSET},
-    elf::create_process,
+    elf,
 };
 
 lazy_static! {
@@ -65,7 +65,7 @@ pub unsafe extern "C" fn user_start() -> ! {
 
     {
         use flatruntime_user::root;
-        create_process(image::SCHEDULER, &[
+        elf::create_and_initialize_early_process(image::SCHEDULER, &[
             (1, root::new_interrupt(32).unwrap().cptr()),
             (2, root::new_wait_for_interrupt().unwrap().cptr()),
         ]).unwrap();
@@ -76,6 +76,9 @@ pub unsafe extern "C" fn user_start() -> ! {
     assert_eq!(ROOT_CAPSET.get_cap_type(&sched_yield).unwrap(), CapType::TaskEndpoint as u32);
     assert_eq!(ROOT_CAPSET.get_cap_type(&sched_add).unwrap(), CapType::TaskEndpoint as u32);
     println!("init: Scheduler created.");
+
+    let sched_yield = TaskEndpoint::new(sched_yield);
+    let sched_add = TaskEndpoint::new(sched_add);
 
     run_benchmark();
 }

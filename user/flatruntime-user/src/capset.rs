@@ -70,6 +70,13 @@ impl CapSet {
         Ok(())
     }
 
+    pub fn clone_cap(&self, src: &CPtr) -> KernelResult<CPtr> {
+        let (cptr, _) = allocate_cptr(|cptr| {
+            self.trivial_clone_cap(src.index(), cptr.index())
+        })?;
+        Ok(cptr)
+    }
+
     pub fn trivial_drop_cap(&self, cap: u64) -> KernelResult<()> {
         unsafe {
             self.cap

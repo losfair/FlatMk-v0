@@ -93,7 +93,7 @@ pub fn load(image: &[u8], out: &RootPageTable) -> KernelResult<u64> {
     }
 }
 
-pub fn create_process(image: &[u8], caps: &[(u64, &CPtr)]) -> KernelResult<(Task, TaskEndpoint)> {
+pub fn create_process(image: &[u8], caps: &[(u64, &CPtr)]) -> KernelResult<(Task, u64)> {
     let task = this_task().shallow_clone()?;
 
     // Initialize page table.
@@ -118,10 +118,19 @@ pub fn create_process(image: &[u8], caps: &[(u64, &CPtr)]) -> KernelResult<(Task
     task.set_ipc_base(ROOT_IPC_BASE)?;
 
     task.set_register(SP_INDEX, layout::STACK_END)?;
+
+    Ok((task, entry_pc))
+}
+
+pub fn create_and_initialize_early_process(image: &[u8], caps: &[(u64, &CPtr)]) -> KernelResult<()> {
+    let (task, entry_pc) = create_process(image, caps)?;
     let endpoint = task.fetch_task_cap_transfer_endpoint(entry_pc, 0)?;
-
-    // Initialize.
     endpoint.call(&mut FastIpcPayload::default())?;
+    Ok(())
+}
 
-    Ok((task, endpoint))
+pub fn create_and_prepare_normal_process(image: &[u8], caps: &[(u64, &CPtr)]) -> KernelResult<TaskEndpoint> {
+    let (task, entry_pc) = create_process(image, caps)?;
+    let endpoint = task.fetch_task_transparent_endpoint(entry_pc, 0)?;
+    Ok(endpoint)
 }
