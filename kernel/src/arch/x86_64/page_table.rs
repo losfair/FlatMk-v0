@@ -222,6 +222,10 @@ impl AsLevel<Page, 512> for PageTableEntry {
             PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
         );
     }
+
+    fn clear_level(&mut self) {
+        self.set_unused();
+    }
 }
 
 pub unsafe fn arch_set_current_page_table(phys: PhysAddr) {

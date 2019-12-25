@@ -53,8 +53,8 @@ pub type CapabilityTable = MultilevelTableObject<
     GenericLeafCache,
     NullEntryFilter,
     9,
-    4,
-    43,
+    3,
+    34,
     512,
 >;
 
@@ -70,6 +70,10 @@ impl AsLevel<CapabilityEndpointSet, 512> for CapabilityTableNode {
         level: NonNull<Level<CapabilityEndpointSet, CapabilityTableNode, 512>>,
     ) {
         self.next = Some(level);
+    }
+
+    fn clear_level(&mut self) {
+        self.next = None;
     }
 }
 
@@ -482,6 +486,7 @@ enum RootPageTableRequest {
     FetchDeepClone = 2,
     PutPage = 3,
     FetchPage = 4,
+    DropPage = 5,
 }
 
 fn invoke_cap_root_page_table(
@@ -526,6 +531,12 @@ fn invoke_cap_root_page_table(
             let current_pt = current.page_table_root.get();
             current_pt.0.attach_leaf(dst.get(), page)?;
             current_pt.flush_tlb_assume_current(dst);
+            Ok(0)
+        }
+        RootPageTableRequest::DropPage => {
+            let target = UserAddr::new(invocation.arg(1)? as u64)?;
+            pt.0.drop_leaf(target.get())?;
+            pt.flush_tlb_if_current(target);
             Ok(0)
         }
     }

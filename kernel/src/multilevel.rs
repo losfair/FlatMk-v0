@@ -133,8 +133,7 @@ pub union Level<T: Send, P: AsLevel<T, TABLE_SIZE> + Send, const TABLE_SIZE: usi
 impl<T: Send, P: AsLevel<T, TABLE_SIZE> + Send, const TABLE_SIZE: usize> Level<T, P, TABLE_SIZE> {
     /// Assuming this is a leaf level, call drop on the inner value and release its memory.
     pub unsafe fn drop_and_release_assuming_leaf(&mut self) {
-        ManuallyDrop::drop(&mut self.value);
-        KernelPageRef::from_raw(NonNull::from(self));
+        KernelPageRef::from_raw(NonNull::from(self).cast::<T>());
     }
 
     /// Looks up an entry by a pointer.
@@ -214,6 +213,7 @@ impl<T: Send, P: AsLevel<T, TABLE_SIZE> + Send, const TABLE_SIZE: usize> Level<T
 pub trait AsLevel<T: Send, const TABLE_SIZE: usize>: Sized + Send {
     fn as_level(&mut self) -> Option<NonNull<Level<T, Self, TABLE_SIZE>>>;
     fn attach_level(&mut self, level: NonNull<Level<T, Self, TABLE_SIZE>>);
+    fn clear_level(&mut self);
 }
 
 impl<
@@ -390,6 +390,20 @@ impl<
                 None
             }
         })??)
+    }
+
+    /// Drops a leaf entry.
+    ///
+    /// This does not currently drop non-leaf levels and should be fixed.
+    pub fn drop_leaf(&self, ptr: u64) -> KernelResult<()> {
+        Ok(self.lookup_leaf_entry(ptr, |entry| {
+            if let Some(mut level) = entry.as_level() {
+                unsafe {
+                    level.as_mut().drop_and_release_assuming_leaf();
+                }
+                entry.clear_level();
+            }
+        })?)
     }
 }
 
