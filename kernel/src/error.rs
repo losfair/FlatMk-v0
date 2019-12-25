@@ -14,12 +14,8 @@ pub enum KernelError {
     InvalidAddress = -4,
     /// Some object is empty when processing invocation request.
     EmptyObject = -5,
-    /// An IPC operation would block, but non-blocking mode is requested.
-    WouldBlock = -6,
     /// An empty capability is invoked.
     EmptyCapability = -7,
-    /// A race condition is detected.
-    RaceRetry = -8,
     /// No available memory.
     OutOfMemory = -9,
 }

@@ -27,11 +27,6 @@ impl VirtAddr {
     }
 
     #[inline]
-    pub fn from_ptr<T>(x: *const T) -> VirtAddr {
-        VirtAddr(x as u64)
-    }
-
-    #[inline]
     pub fn from_phys(phys: PhysAddr) -> VirtAddr {
         VirtAddr(unsafe { crate::paging::PHYSICAL_OFFSET } + phys.0)
     }
