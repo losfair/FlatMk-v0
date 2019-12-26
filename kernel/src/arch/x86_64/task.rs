@@ -311,8 +311,8 @@ pub unsafe fn arch_init_syscall() {
 
     IA32_LSTAR.write(arch_lowlevel_syscall_entry as usize as u64);
 
-    // Disable interrupts during syscall.
-    IA32_FMASK.write(RFlags::INTERRUPT_FLAG.bits());
+    // Mask usermode rflags on entry to syscalls.
+    IA32_FMASK.write(RFlags::all().bits());
 
     let selectors = super::exception::get_selectors();
     IA32_STAR.write(
