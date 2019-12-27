@@ -361,16 +361,16 @@ pub fn switch_to(
     task: KernelObjectRef<Task>,
     old_registers: Option<&TaskRegisters>,
 ) -> KernelResult<()> {
-    // Switching to the same task is not allowed.
-    if task.is_current() {
-        return Err(KernelError::InvalidState);
-    }
-
     if let Some(old_regs) = old_registers {
         let current = Task::current();
         let mut regs = current.registers.lock();
         *regs = old_regs.clone();
         regs.lazy_read();
+    }
+
+    // We are already on the target task.
+    if task.is_current() {
+        return Ok(());
     }
 
     let root = task.page_table_root.get();
