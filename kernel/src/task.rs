@@ -15,8 +15,6 @@ use crate::capability::{
 use crate::error::*;
 use crate::kobj::*;
 use crate::paging::{PageTableLevel, PageTableObject};
-use crate::serial::with_serial_port;
-use core::fmt::Write;
 use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use spin::Mutex;
@@ -185,7 +183,7 @@ impl Task {
             })
             .expect("load_root_image: Leaf entry not found");
         }
-        with_serial_port(|p| writeln!(p, "Mapped memory image for initial task.").unwrap());
+        println!("Mapped memory image for initial task.");
         ROOT_ENTRY
     }
 

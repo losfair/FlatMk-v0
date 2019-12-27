@@ -4,7 +4,7 @@ use crate::error::*;
 use crate::kobj::*;
 use crate::multilevel::*;
 use crate::pagealloc::*;
-use crate::paging::{PageTableMto, PageTableObject};
+use crate::paging::{PageTableMto, PageTableObject, UserPteFlags};
 use crate::task::{IpcEntry, StateRestoreMode, Task, TaskFaultState};
 use core::convert::TryFrom;
 use core::mem::MaybeUninit;
@@ -89,6 +89,7 @@ impl AsLevel<CapabilityEndpointSet, 512> for CapabilityTableNode {
     fn attach_level(
         &mut self,
         level: NonNull<Level<CapabilityEndpointSet, CapabilityTableNode, 512>>,
+        _leaf: bool,
     ) {
         self.next = Some(level);
     }
@@ -523,6 +524,7 @@ enum RootPageTableRequest {
     PutPage = 3,
     FetchPage = 4,
     DropPage = 5,
+    SetProtection = 6,
 }
 
 fn invoke_cap_root_page_table(
@@ -540,7 +542,8 @@ fn invoke_cap_root_page_table(
         }
         RootPageTableRequest::AllocLeaf => {
             let target = UserAddr::new(invocation.arg(1)? as u64)?;
-            pt.map_anonymous(target)?;
+            let protection = UserPteFlags::from_bits(invocation.arg(2)? as u64)?;
+            pt.map_anonymous(target, protection)?;
             Ok(0)
         }
         RootPageTableRequest::FetchDeepClone => {
@@ -555,17 +558,25 @@ fn invoke_cap_root_page_table(
         RootPageTableRequest::PutPage => {
             let src = UserAddr::new(invocation.arg(1)? as u64)?;
             let dst = UserAddr::new(invocation.arg(2)? as u64)?;
+            let protection = UserPteFlags::from_bits(invocation.arg(3)? as u64)?;
             let page = current.page_table_root.get().0.get_leaf(src.get())?;
             pt.0.attach_leaf(dst.get(), page)?;
+            pt.0.lookup_leaf_entry(dst.get(), |entry| {
+                entry.set_protection(protection);
+            });
             pt.flush_tlb_if_current(dst);
             Ok(0)
         }
         RootPageTableRequest::FetchPage => {
             let src = UserAddr::new(invocation.arg(1)? as u64)?;
             let dst = UserAddr::new(invocation.arg(2)? as u64)?;
+            let protection = UserPteFlags::from_bits(invocation.arg(3)? as u64)?;
             let page = pt.0.get_leaf(src.get())?;
             let current_pt = current.page_table_root.get();
             current_pt.0.attach_leaf(dst.get(), page)?;
+            current_pt.0.lookup_leaf_entry(dst.get(), |entry| {
+                entry.set_protection(protection);
+            })?;
             current_pt.flush_tlb_assume_current(dst);
             Ok(0)
         }
@@ -575,13 +586,28 @@ fn invoke_cap_root_page_table(
             pt.flush_tlb_if_current(target);
             Ok(0)
         }
+        RootPageTableRequest::SetProtection => {
+            let target = UserAddr::new(invocation.arg(1)? as u64)?;
+            let protection = UserPteFlags::from_bits(invocation.arg(2)? as u64)?;
+            pt.0.lookup_leaf_entry(target.get(), |entry| {
+                if entry.is_unused() {
+                    Err(KernelError::InvalidState)
+                } else {
+                    entry.set_protection(protection);
+                    Ok(())
+                }
+            })??;
+            pt.flush_tlb_if_current(target);
+            Ok(0)
+        }
     }
 }
 
 fn invoke_cap_mmio(invocation: &CapabilityInvocation, mmio: CapMmio) -> KernelResult<i64> {
     let target = UserAddr::new(invocation.arg(0)? as u64)?;
+    let protection = UserPteFlags::from_bits(invocation.arg(1)? as u64)?;
     unsafe {
-        mmio.page_table.map_physical_page(target, mmio.page_addr)?;
+        mmio.page_table.map_physical_page(target, mmio.page_addr, protection)?;
     }
     Ok(0)
 }

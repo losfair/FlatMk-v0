@@ -4,6 +4,7 @@ use crate::error::*;
 use crate::multilevel::*;
 use core::fmt;
 use core::ptr::NonNull;
+use crate::paging::UserPteFlags;
 
 #[repr(align(4096))]
 #[derive(Clone)]
@@ -142,8 +143,22 @@ impl PageTableEntry {
         );
     }
 
+    pub fn set_addr_ronxu(&mut self, addr: PhysAddr) {
+        self.set_addr(
+            addr,
+            PageTableFlags::PRESENT | PageTableFlags::NO_EXECUTE | PageTableFlags::USER_ACCESSIBLE,
+        );
+    }
+
     pub fn set_addr_rwxk(&mut self, addr: PhysAddr) {
         self.set_addr(addr, PageTableFlags::PRESENT | PageTableFlags::WRITABLE);
+    }
+
+    pub fn set_protection(&mut self, user_flags: UserPteFlags) {
+        let mut flags = self.flags();
+        flags.set(PageTableFlags::WRITABLE, user_flags.contains(UserPteFlags::WRITABLE));
+        flags.set(PageTableFlags::NO_EXECUTE, !user_flags.contains(UserPteFlags::EXECUTABLE));
+        self.set_flags(flags);
     }
 
     fn test_flag(&self, flag: PageTableFlags) -> bool {
@@ -215,12 +230,14 @@ impl AsLevel<Page, 512> for PageTableEntry {
         }
     }
 
-    fn attach_level(&mut self, level: NonNull<Level<Page, PageTableEntry, 512>>) {
-        self.set_addr(
-            PhysAddr::from_phys_mapped_virt(VirtAddr::from_nonnull(level))
-                .expect("PageTableEntry::attach_level: Invalid level pointer"),
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
-        );
+    fn attach_level(&mut self, level: NonNull<Level<Page, PageTableEntry, 512>>, leaf: bool) {
+        let addr = PhysAddr::from_phys_mapped_virt(VirtAddr::from_nonnull(level))
+            .expect("PageTableEntry::attach_level: Invalid level pointer");
+        if leaf {
+            self.set_addr_ronxu(addr);
+        } else {
+            self.set_addr_rwxu(addr);
+        }
     }
 
     fn clear_level(&mut self) {

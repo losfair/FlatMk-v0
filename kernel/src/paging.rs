@@ -16,6 +16,13 @@ use core::mem::MaybeUninit;
 
 pub(crate) static mut PHYSICAL_OFFSET: u64 = 0;
 
+bitflags! {
+    pub struct UserPteFlags: u64 {
+        const WRITABLE = 1 << 0;
+        const EXECUTABLE = 1 << 1;
+    }
+}
+
 pub struct PageTableEntryFilter;
 impl EntryFilter for PageTableEntryFilter {
     #[inline]
@@ -187,7 +194,7 @@ impl PageTableObject {
         self.0.make_leaf_entry(target.get())
     }
 
-    pub fn map_anonymous(&self, target: UserAddr) -> KernelResult<()> {
+    pub fn map_anonymous(&self, target: UserAddr, prot: UserPteFlags) -> KernelResult<()> {
         target.check_page_alignment()?;
         let mut page: MaybeUninit<KernelPageRef<Page>> = KernelPageRef::new_uninit()?;
         for b in unsafe { (*page.as_mut_ptr()).0.iter_mut() } {
@@ -195,6 +202,9 @@ impl PageTableObject {
         }
         self.0
             .attach_leaf(target.get(), unsafe { page.assume_init() })?;
+        self.0.lookup_leaf_entry(target.get(), |entry| {
+            entry.set_protection(prot);
+        })?;
         self.flush_tlb_if_current(target);
         Ok(())
     }
@@ -203,6 +213,7 @@ impl PageTableObject {
         &self,
         target: UserAddr,
         backing: PhysAddr,
+        prot: UserPteFlags,
     ) -> KernelResult<()> {
         target.check_page_alignment()?;
         self.0.lookup_leaf_entry(target.get(), |entry| {
@@ -212,6 +223,7 @@ impl PageTableObject {
             entry.set_addr_rwxu(backing);
             entry.set_no_cache(true);
             entry.set_unowned(true); // Direct physical page mappings are always unowned.
+            entry.set_protection(prot);
         })?;
         self.flush_tlb_if_current(target);
         Ok(())

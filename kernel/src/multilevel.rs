@@ -216,7 +216,7 @@ impl<T: Send, P: AsLevel<T, TABLE_SIZE> + Send, const TABLE_SIZE: usize> Level<T
 /// fields of Level. Recursive cleanup on all levels is managed by the caller.
 pub trait AsLevel<T: Send, const TABLE_SIZE: usize>: Sized + Send {
     fn as_level(&mut self) -> Option<NonNull<Level<T, Self, TABLE_SIZE>>>;
-    fn attach_level(&mut self, level: NonNull<Level<T, Self, TABLE_SIZE>>);
+    fn attach_level(&mut self, level: NonNull<Level<T, Self, TABLE_SIZE>>, leaf: bool);
     fn clear_level(&mut self);
 }
 
@@ -377,7 +377,7 @@ impl<
                     old.as_mut().drop_and_release_assuming_leaf();
                 }
             }
-            entry.attach_level(KernelPageRef::into_raw(leaf).cast::<_>());
+            entry.attach_level(KernelPageRef::into_raw(leaf).cast::<_>(), true);
         })?;
         Ok(())
     }
@@ -512,7 +512,7 @@ impl<
             }
 
             let next_level = Self::default_level_table()?;
-            entry.attach_level(KernelPageRef::into_raw(next_level));
+            entry.attach_level(KernelPageRef::into_raw(next_level), false);
 
             Ok(true)
         })?? {}
