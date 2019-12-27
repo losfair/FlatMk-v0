@@ -21,6 +21,9 @@ extern crate lazy_static;
 #[macro_use]
 extern crate bitflags;
 
+#[macro_use]
+mod serial;
+
 mod addr;
 mod arch;
 mod boot;
@@ -32,7 +35,6 @@ mod kobj;
 mod multilevel;
 mod pagealloc;
 mod paging;
-mod serial;
 mod syscall;
 mod task;
 mod user;

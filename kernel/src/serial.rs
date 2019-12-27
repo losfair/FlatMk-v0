@@ -5,16 +5,13 @@ use x86::io::{inb, outb};
 static SERIAL_PORT: Once<Mutex<SerialPort>> = Once::new();
 
 pub fn with_serial_port<F: FnOnce(&mut SerialPort) -> T, T>(f: F) -> T {
-    use x86_64::instructions::interrupts;
-    interrupts::without_interrupts(|| {
-        let sp = SERIAL_PORT.call_once(|| unsafe {
-            let mut sp = SerialPort::new(0x3f8);
-            sp.init();
-            Mutex::new(sp)
-        });
-        let mut sp = sp.lock();
-        f(&mut *sp)
-    })
+    let sp = SERIAL_PORT.call_once(|| unsafe {
+        let mut sp = SerialPort::new(0x3f8);
+        sp.init();
+        Mutex::new(sp)
+    });
+    let mut sp = sp.lock();
+    f(&mut *sp)
 }
 
 pub struct SerialPort {
@@ -70,4 +67,11 @@ impl Write for SerialPort {
         }
         Ok(())
     }
+}
+
+macro_rules! println {
+    ($($arg:tt)*) => {
+        use core::fmt::Write;
+        $crate::serial::with_serial_port(|p| writeln!(p, "{}", format_args!($($arg)*))).unwrap();
+    };
 }
