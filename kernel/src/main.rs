@@ -46,8 +46,6 @@ use crate::paging::{PageTableMto, PageTableObject};
 use crate::task::StateRestoreMode;
 use bootloader::BootInfo;
 use capability::{CapabilityEndpointObject, CapabilityEndpointSet, CapabilitySet, CapabilityTable};
-use core::fmt::Write;
-use serial::with_serial_port;
 use task::Task;
 
 lazy_static! {
@@ -66,9 +64,7 @@ lazy_static! {
 
 #[no_mangle]
 pub extern "C" fn kstart(boot_info: &'static BootInfo) -> ! {
-    with_serial_port(|p| {
-        writeln!(p, "Starting FlatMK.").unwrap();
-    });
+    println!("Starting FlatMK.");
 
     // Early init.
     unsafe {
@@ -86,9 +82,7 @@ pub extern "C" fn kstart(boot_info: &'static BootInfo) -> ! {
     task::switch_to(ROOT_TASK.clone(), None).unwrap();
     let initial_ip = ROOT_TASK.load_root_image();
     ROOT_TASK.registers.lock().rip = initial_ip;
-    with_serial_port(|p| {
-        writeln!(p, "Dropping to user mode at {:p}.", initial_ip as *mut u8).unwrap();
-    });
+    println!("Dropping to user mode at {:p}.", initial_ip as *mut u8);
     task::enter_user_mode(StateRestoreMode::Full);
 }
 
@@ -109,15 +103,11 @@ unsafe fn setup_initial_caps() {
 
 #[panic_handler]
 fn on_panic(info: &core::panic::PanicInfo) -> ! {
-    use x86_64::instructions::interrupts;
-    interrupts::without_interrupts(|| {
-        with_serial_port(|p| {
-            writeln!(p, "Kernel panic: {:#?}", info).unwrap();
-        });
-        loop {
-            x86_64::instructions::hlt();
-        }
-    })
+    println!("Kernel panic: {:#?}", info);
+
+    // Print task id in another println in case the current task is null.
+    println!("Task ID = {}", Task::current().id);
+    loop {}
 }
 
 #[lang = "eh_personality"]

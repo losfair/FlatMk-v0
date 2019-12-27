@@ -102,6 +102,8 @@ pub unsafe fn init_idt() {
         .set_handler_fn(core::mem::transmute(intr_page_fault as usize));
     IDT.general_protection_fault
         .set_handler_fn(core::mem::transmute(intr_gpf as usize));
+    IDT.stack_segment_fault
+        .set_handler_fn(core::mem::transmute(intr_stack_segment_fault as usize));
     include!("../../../generated/interrupts_idt.rs");
     IDT.load();
 }
@@ -280,6 +282,29 @@ interrupt_with_code!(
         });
         if !is_user_fault(frame) {
             panic!("Kernel page fault");
+        }
+        Task::current().raise_fault(TaskFaultState::PageFault);
+    }
+);
+
+interrupt_with_code!(
+    intr_stack_segment_fault,
+    __intr_stack_segment_fault,
+    frame,
+    _registers,
+    code,
+    {
+        with_serial_port(|p| {
+            writeln!(
+                p,
+                "Stack segment fault. code = {} {:#?}",
+                code,
+                frame
+            )
+            .unwrap();
+        });
+        if !is_user_fault(frame) {
+            panic!("Kernel stack segment fault");
         }
         Task::current().raise_fault(TaskFaultState::PageFault);
     }

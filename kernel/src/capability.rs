@@ -14,14 +14,16 @@ use num_enum::TryFromPrimitive;
 
 bitflags! {
     pub struct TaskEndpointFlags: u32 {
-        /// Whether this endpoint preserves all general-purpose registers and capabilities when switched to.
+        /// An endpoint with the `STATE_TRANSPARENT` flag appears transparent when being invoked.
+        /// `ipc_blocked` is not checked, `IpcEntry` is not applied to the registers, and no reply endpoint is created.
+        /// `CAP_TRANSFER` is ignored if `STATE_TRANSPARENT` is set.
         const STATE_TRANSPARENT = 1 << 0;
 
         /// Whether this endpoint is a reply endpoint.
         ///
         /// A reply endpoint has the following properties:
         ///
-        /// - Can only be used once.
+        /// - Can only be used once, and cannot be cloned.
         /// - Will not create another reply endpoint in the target task.
         const REPLY = 1 << 1;
 
@@ -697,14 +699,13 @@ fn invoke_cap_task_endpoint(
 
             *invocation.registers.return_value_mut() = 0;
 
-            let entry = endpoint.entry;
-            let mode = if endpoint
+            let (entry, mode) = if endpoint
                 .flags
                 .contains(TaskEndpointFlags::STATE_TRANSPARENT)
             {
-                StateRestoreMode::Full
+                (None, StateRestoreMode::Full)
             } else {
-                StateRestoreMode::Syscall
+                (Some(endpoint.entry), StateRestoreMode::Syscall)
             };
 
             drop(current);
@@ -769,6 +770,7 @@ enum CapSetRequest {
 enum CapType {
     Other = 0,
     TaskEndpoint = 1,
+    RootPageTable = 2,
 }
 
 fn invoke_cap_capability_set(
@@ -844,6 +846,7 @@ fn invoke_cap_capability_set(
             let cptr = CapPtr(invocation.arg(1)? as u64);
             let ty = set.entry_endpoint(cptr, |endpoint| match endpoint.object {
                 CapabilityEndpointObject::TaskEndpoint(_) => CapType::TaskEndpoint,
+                CapabilityEndpointObject::RootPageTable(_) => CapType::RootPageTable,
                 _ => CapType::Other,
             })?;
             Ok(ty as u32 as _)

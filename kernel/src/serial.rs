@@ -70,8 +70,8 @@ impl Write for SerialPort {
 }
 
 macro_rules! println {
-    ($($arg:tt)*) => {
+    ($($arg:tt)*) => {{
         use core::fmt::Write;
         $crate::serial::with_serial_port(|p| writeln!(p, "{}", format_args!($($arg)*))).unwrap();
-    };
+    }};
 }

@@ -230,7 +230,7 @@ impl Task {
     /// This function never returns if succeeded.
     pub fn invoke_ipc(
         task: KernelObjectRef<Task>,
-        entry: IpcEntry,
+        entry: Option<IpcEntry>,
         old_registers: &TaskRegisters,
         mode: StateRestoreMode,
         reply_endpoint: Option<(CapPtr, CapTaskEndpoint)>,
@@ -242,7 +242,7 @@ impl Task {
 
         drop(task);
 
-        {
+        if let Some(entry) = entry {
             let current = Task::current();
             let mut target_regs = current.registers.lock();
             *target_regs.pc_mut() = entry.pc;
@@ -254,6 +254,8 @@ impl Task {
                     endpoint.object = CapabilityEndpointObject::TaskEndpoint(reply_endpoint);
                 }));
             }
+        } else {
+            assert!(reply_endpoint.is_none());
         }
 
         enter_user_mode(mode);
@@ -317,7 +319,7 @@ impl Task {
 
         Self::invoke_ipc(
             task,
-            entry,
+            Some(entry),
             old_registers,
             StateRestoreMode::Syscall,
             reply_endpoint,
