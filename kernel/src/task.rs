@@ -4,13 +4,12 @@ use crate::arch::{
     task::{
         arch_enter_user_mode, arch_enter_user_mode_syscall, arch_get_kernel_tls,
         arch_init_kernel_tls_for_cpu, arch_set_kernel_tls, arch_unblock_interrupt, TaskRegisters,
-        TlsIndirect,
+        TlsIndirect, wait_for_interrupt,
     },
     Page, PAGE_SIZE,
 };
 use crate::capability::{
-    CapPtr, CapTaskEndpoint, CapabilityEndpointObject, CapabilitySet, TaskEndpointFlags,
-    INVALID_CAP,
+    CapabilityEndpoint, CapabilityEndpointObject, CapabilitySet,
 };
 use crate::error::*;
 use crate::kobj::*;
@@ -63,11 +62,19 @@ pub struct Task {
     /// Root capability set.
     pub capabilities: AtomicKernelObjectRef<CapabilitySet>,
 
-    /// IPC base capability address.
-    pub ipc_base: AtomicU64,
+    /// IPC capability buffer.
+    pub ipc_caps: Mutex<[CapabilityEndpoint; 4]>,
 
     /// Indicates whether this task is currently running (being the current task for any CPU).
     pub running: AtomicBool,
+
+    /// Indicates whether there exists exactly one reply endpoint to this task.
+    /// 
+    /// It is a logic error to have more than one reply endpoints to a same task.
+    pub ipc_blocked: AtomicBool,
+
+    /// Indicates that this is an idle task.
+    pub idle: AtomicBool,
 
     /// Indicates whether this task is handling an interrupt.
     pub interrupt_blocked: AtomicU8,
@@ -103,13 +110,63 @@ pub struct FaultHandler {
     pub entry: IpcEntry,
 }
 
-#[derive(Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct IpcEntry {
     /// Instruction pointer.
     pub pc: u64,
 
     /// Context provided by the user.
     pub user_context: u64,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum EntryType {
+    Call(IpcEntry),
+    CooperativeReply,
+    PreemptiveReply,
+}
+
+#[derive(Clone)]
+pub struct TaskEndpoint {
+    /// Task object to send IPC messages to.
+    pub task: KernelObjectRef<Task>,
+
+    /// Entry point information.
+    pub entry: EntryType,
+
+    /// Flags.
+    pub flags: TaskEndpointFlags,
+}
+
+bitflags! {
+    pub struct TaskEndpointFlags: u16 {
+        /// Whether capability transfer is performed for this endpoint.
+        const CAP_TRANSFER = 1 << 0;
+
+        /// Whether this endpoint can be used to add tags.
+        const TAGGABLE = 1 << 1;
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum IpcReason {
+    Interrupt,
+    CapInvoke,
+}
+
+impl EntryType {
+    pub fn direction(&self) -> EntryDirection {
+        match *self {
+            EntryType::Call(_) => EntryDirection::Push,
+            EntryType::CooperativeReply | EntryType::PreemptiveReply => EntryDirection::Pop,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum EntryDirection {
+    Push,
+    Pop,
 }
 
 fn set_current_task(t: KernelObjectRef<Task>) {
@@ -148,12 +205,14 @@ impl Task {
             id: alloc_task_id(),
             page_table_root: AtomicKernelObjectRef::new(page_table_root),
             capabilities: AtomicKernelObjectRef::new(cap_root),
-            ipc_base: AtomicU64::new(INVALID_CAP),
+            ipc_caps: Mutex::new(Default::default()),
             pending_fault: Mutex::new(TaskFaultState::NoFault),
             registers: Mutex::new(TaskRegisters::new()),
             fault_handlers: Mutex::new(FaultHandlerTable::default()),
             running: AtomicBool::new(false),
             interrupt_blocked: AtomicU8::new(0),
+            ipc_blocked: AtomicBool::new(true),
+            idle: AtomicBool::new(false),
             tags: Mutex::new(Default::default()),
         }
     }
@@ -210,12 +269,14 @@ impl Task {
             id: alloc_task_id(),
             page_table_root: AtomicKernelObjectRef::new(self.page_table_root.get()),
             capabilities: AtomicKernelObjectRef::new(self.capabilities.get()),
-            ipc_base: AtomicU64::new(INVALID_CAP),
+            ipc_caps: Mutex::new(Default::default()),
             pending_fault: Mutex::new(TaskFaultState::NoFault),
             registers: Mutex::new(TaskRegisters::new()),
             fault_handlers: Mutex::new(self.fault_handlers.lock().clone()),
             running: AtomicBool::new(false),
             interrupt_blocked: AtomicU8::new(0),
+            ipc_blocked: AtomicBool::new(false),
+            idle: AtomicBool::new(false),
             tags: Mutex::new(Default::default()),
         })
     }
@@ -226,39 +287,104 @@ impl Task {
     }
 
     /// Invokes IPC on this task.
-    ///
+    /// 
     /// This function never returns if succeeded.
     pub fn invoke_ipc(
-        task: KernelObjectRef<Task>,
-        entry: Option<IpcEntry>,
+        target: TaskEndpoint,
+        reason: IpcReason,
         old_registers: &TaskRegisters,
-        mode: StateRestoreMode,
-        reply_endpoint: Option<(CapPtr, CapTaskEndpoint)>,
-    ) -> (KernelObjectRef<Task>, KernelError) {
-        match switch_to(task.clone(), Some(old_registers)) {
-            Ok(()) => {}
-            Err(e) => return (task, e),
+    ) -> (TaskEndpoint, KernelError) {
+        let prev = Task::current();
+
+        // Attempts to block IPC for the target task, before switching to it.
+        if target.entry.direction() == EntryDirection::Push {
+            // Check invariant (stack-like structure).
+            assert_eq!(prev.ipc_blocked.load(Ordering::SeqCst), true);
+
+            if target.task.block_ipc().is_err() {
+                // We are trying to re-enter a task whose IPC is already blocked. This is not allowed.
+                return (target, KernelError::InvalidState);
+            }
         }
 
-        drop(task);
+        // Here switch_to should always succeed, since we have checked ipc_blocked before.
+        switch_to(target.task.clone(), Some(old_registers)).expect("invoke_ipc: switch_to failed.");
 
-        if let Some(entry) = entry {
-            let current = Task::current();
-            let mut target_regs = current.registers.lock();
-            *target_regs.pc_mut() = entry.pc;
-            if entry.user_context != core::u64::MAX {
-                *target_regs.usermode_arg_mut(0).unwrap() = entry.user_context;
-            }
-            if let Some((base, reply_endpoint)) = reply_endpoint {
-                drop(current.capabilities.get().entry_endpoint(base, |endpoint| {
-                    endpoint.object = CapabilityEndpointObject::TaskEndpoint(reply_endpoint);
-                }));
-            }
-        } else {
-            assert!(reply_endpoint.is_none());
+        // If CAP_TRANSFER is set, transfer capabilities before pop to avoid race conditions.
+        if target.flags.contains(TaskEndpointFlags::CAP_TRANSFER) {
+            let caps = core::mem::replace(&mut *prev.ipc_caps.lock(), Default::default());
+            *target.task.ipc_caps.lock() = caps;
         }
 
-        enter_user_mode(mode);
+        // A task always has `ipc_blocked == true` if it is successfully switched to. Since we are on the CPU that
+        // switches out the task, we have the unique "ownership" for unblocking its IPC.
+        if target.entry.direction() == EntryDirection::Pop {
+            prev.unblock_ipc().expect("invoke_ipc: Unable to unblock IPC for the previous task.");
+
+            // Check invariant (stack-like structure).
+            assert_eq!(target.task.ipc_blocked.load(Ordering::SeqCst), true);
+
+            // Unblock interrupt on the previous task, if it was running an interrupt handler.
+            // We can safely ignore the return value, since it's okay if the task wasn't running an interrupt handler.
+            drop(prev.unblock_interrupt());
+        }
+
+        let state_restore_mode: StateRestoreMode;
+
+        // For the `Call` entry type, initialize program counter and the reply endpoint.
+        match target.entry {
+            EntryType::Call(entrypoint) => {
+                // Determine the entry type from the provided IPC reason.
+                // Just use the same flags as the target endpoint for now.
+                let (entry_type, flags) = match reason {
+                    IpcReason::Interrupt => (EntryType::PreemptiveReply, target.flags),
+                    IpcReason::CapInvoke => (EntryType::CooperativeReply, target.flags),
+                };
+
+                let reply_endpoint = TaskEndpoint {
+                    // Return to the previous task.
+                    task: prev.clone(),
+        
+                    // Use the entry type and flags we determined just now.
+                    entry: entry_type,
+                    flags,
+                };
+
+                target.task.ipc_caps.lock()[0] = CapabilityEndpoint {
+                    object: CapabilityEndpointObject::TaskEndpoint(reply_endpoint),
+                };
+
+                // Set registers.
+                let mut regs = target.task.registers.lock();
+                *regs.pc_mut() = entrypoint.pc;
+                *regs.usermode_arg_mut(0).unwrap() = entrypoint.user_context;
+                *regs.usermode_arg_mut(1).unwrap() = prev.get_tag(target.task.id).unwrap_or(0);
+
+                // Use syscall mode, since the target task is aware of the switch.
+                state_restore_mode = StateRestoreMode::Syscall;
+            }
+            EntryType::PreemptiveReply => {
+                // Check invariant.
+                assert_eq!(reason, IpcReason::CapInvoke);
+
+                // Preemptive switch requires full state restore.
+                state_restore_mode = StateRestoreMode::Full;
+            }
+            EntryType::CooperativeReply => {
+                // Check invariant.
+                assert_eq!(reason, IpcReason::CapInvoke);
+
+                // Use syscall mode.
+                state_restore_mode = StateRestoreMode::Syscall;
+            }
+        }
+
+        // Drop reference-counted values.
+        drop(target);
+        drop(prev);
+
+        // Enter user mode.
+        enter_user_mode(state_restore_mode);
     }
 
     pub fn unblock_interrupt(&self) -> KernelResult<u8> {
@@ -293,37 +419,18 @@ impl Task {
         }
     }
 
-    /// Invokes asynchronous preemption to this task.
-    pub fn invoke_async_preemption(
-        task: KernelObjectRef<Task>,
-        entry: IpcEntry,
-        old_registers: &TaskRegisters,
-    ) -> (KernelObjectRef<Task>, KernelError) {
-        let remote_base = task.ipc_base.load(Ordering::SeqCst);
+    /// Atomically cmpxchg `ipc_blocked` from true to false.
+    /// 
+    /// Should ONLY be called on the current task.
+    pub fn unblock_ipc(&self) -> KernelResult<()> {
+        self.ipc_blocked.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).map_err(|_| KernelError::InvalidState).map(|_| ())
+    }
 
-        let reply_endpoint = if remote_base != INVALID_CAP {
-            Some((
-                CapPtr(remote_base),
-                CapTaskEndpoint {
-                    task: Task::current(),
-                    entry: IpcEntry {
-                        pc: old_registers.pc(),
-                        user_context: core::u64::MAX,
-                    },
-                    flags: TaskEndpointFlags::REPLY | TaskEndpointFlags::STATE_TRANSPARENT | TaskEndpointFlags::TAGGABLE,
-                },
-            ))
-        } else {
-            None
-        };
-
-        Self::invoke_ipc(
-            task,
-            Some(entry),
-            old_registers,
-            StateRestoreMode::Syscall,
-            reply_endpoint,
-        )
+    /// Atomically cmpxchg `ipc_blocked` from false to true.
+    /// 
+    /// Should ONLY be called on the current task.
+    pub fn block_ipc(&self) -> KernelResult<()> {
+        self.ipc_blocked.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).map_err(|_| KernelError::InvalidState).map(|_| ())
     }
 
     pub fn set_tag(&self, owner: u64, tag: u64) -> KernelResult<()> {
@@ -354,6 +461,10 @@ impl Task {
             }
         }
         None
+    }
+
+    pub fn is_idle(&self) -> bool {
+        self.idle.load(Ordering::SeqCst)
     }
 }
 
@@ -411,26 +522,29 @@ pub enum StateRestoreMode {
 /// Switches out of kernel mode and enters user mode.
 pub fn enter_user_mode(mode: StateRestoreMode) -> ! {
     let task = Task::current();
-
-    let registers: *const TaskRegisters = {
-        let registers = task.registers.lock();
-        &*registers as *const _
-    };
-    // Here we won't get a dangling `registers` pointer after drop because we know that
-    // the TLS won't be dropped now.
-    drop(task);
-
-    unsafe {
-        match mode {
-            StateRestoreMode::Full => arch_enter_user_mode(registers),
-            StateRestoreMode::Syscall => arch_enter_user_mode_syscall(registers),
+    if task.is_idle() {
+        wait_for_interrupt();
+    } else {
+        let registers: *const TaskRegisters = {
+            let registers = task.registers.lock();
+            &*registers as *const _
+        };
+        // Here we won't get a dangling `registers` pointer after drop because we know that
+        // the TLS won't be dropped now.
+        drop(task);
+    
+        unsafe {
+            match mode {
+                StateRestoreMode::Full => arch_enter_user_mode(registers),
+                StateRestoreMode::Syscall => arch_enter_user_mode_syscall(registers),
+            }
         }
     }
 }
 
 lazy_static! {
-    static ref INTERRUPT_BINDINGS: Mutex<[Option<InterruptEntry>; 256]> = Mutex::new(unsafe {
-        let mut result: MaybeUninit<[Option<InterruptEntry>; 256]> = MaybeUninit::uninit();
+    static ref INTERRUPT_BINDINGS: Mutex<[Option<TaskEndpoint>; 256]> = Mutex::new(unsafe {
+        let mut result: MaybeUninit<[Option<TaskEndpoint>; 256]> = MaybeUninit::uninit();
         for entry in (*result.as_mut_ptr()).iter_mut() {
             core::ptr::write(entry, None);
         }
@@ -438,16 +552,11 @@ lazy_static! {
     });
 }
 
-#[derive(Clone)]
-struct InterruptEntry {
-    task: KernelObjectRef<Task>,
-    entry: IpcEntry,
-}
-
 pub fn bind_interrupt(index: u8, handler: KernelObjectRef<Task>, entry: IpcEntry) {
-    INTERRUPT_BINDINGS.lock()[index as usize] = Some(InterruptEntry {
+    INTERRUPT_BINDINGS.lock()[index as usize] = Some(TaskEndpoint {
         task: handler,
-        entry,
+        entry: EntryType::Call(entry),
+        flags: TaskEndpointFlags::TAGGABLE,
     });
 }
 
@@ -459,15 +568,18 @@ pub fn invoke_interrupt(
     index: u8,
     old_registers: &TaskRegisters,
 ) -> KernelError {
-    let entry = INTERRUPT_BINDINGS.lock()[index as usize].clone();
-    if let Some(entry) = entry {
-        if let Err(e) = entry.task.block_interrupt(index) {
+    let endpoint = INTERRUPT_BINDINGS.lock()[index as usize].clone();
+    if let Some(endpoint) = endpoint {
+        if let Err(e) = endpoint.task.block_interrupt(index) {
+            println!("WARNING: invoke_interrupt/block_interrupt: {:?}", e);
             return e;
         }
-        let (task, e) = Task::invoke_async_preemption(entry.task, entry.entry, old_registers);
-        task.unblock_interrupt().expect(
-            "invoke_interrupt: invoke_async_preemption returned error but unblock_interrupt failed",
+        let (endpoint, e) = Task::invoke_ipc(endpoint, IpcReason::Interrupt, old_registers);
+        // FIXME: This needs to be fixed for multicore support.
+        endpoint.task.unblock_interrupt().expect(
+            "invoke_interrupt: invoke_ipc returned error but unblock_interrupt failed",
         );
+        println!("WARNING: invoke_interrupt: {:?}", e);
         e
     } else {
         unsafe {

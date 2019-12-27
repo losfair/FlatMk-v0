@@ -318,18 +318,21 @@ fn handle_external_interrupt(
     index: u8,
 ) -> ! {
     let hlt = get_hlt();
-    if !is_user_fault(frame) && hlt.is_null() {
+    if !is_user_fault(frame) && hlt == 0 {
         panic!("External interrupt in kernel mode");
     }
+    if hlt != 0 {
+        unsafe {
+            set_hlt(0);
+        }
+    }
     unsafe {
-        let registers: &TaskRegisters = if hlt.is_null() {
-            registers
-        } else {
-            set_hlt(core::ptr::null());
-            &*hlt
-        };
         invoke_interrupt(index, registers);
         // If fails, ignore this interrupt.
-        super::task::arch_enter_user_mode(registers);
+        if Task::current().is_idle() {
+            super::task::wait_for_interrupt();
+        } else {
+            super::task::arch_enter_user_mode(registers);
+        }
     }
 }

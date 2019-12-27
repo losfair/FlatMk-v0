@@ -118,11 +118,6 @@ impl TaskRegisters {
         &mut self.rip
     }
 
-    #[inline]
-    pub fn pc(&self) -> u64 {
-        self.rip
-    }
-
     /// Loads part of the register set that are not touched by the kernel
     /// but can be used by the userspace.
     pub fn lazy_read(&mut self) {
@@ -145,7 +140,7 @@ pub struct TlsIndirect {
     pub kernel_stack: u64,
     pub user_stack: u64,
     pub context: u64,
-    pub(super) hlt: *const TaskRegisters,
+    pub(super) hlt: u64,
 }
 
 impl TlsIndirect {
@@ -154,7 +149,7 @@ impl TlsIndirect {
             kernel_stack,
             user_stack: 0,
             context: 0,
-            hlt: core::ptr::null(),
+            hlt: 0,
         }
     }
 }
@@ -177,12 +172,12 @@ pub unsafe fn arch_set_kernel_tls(value: u64) {
     asm!("mov $0, %gs:16" :: "r"(value) :: "volatile");
 }
 
-pub(super) unsafe fn set_hlt(hlt_user_regs: *const TaskRegisters) {
-    asm!("mov $0, %gs:24" :: "r"(hlt_user_regs) :: "volatile");
+pub(super) unsafe fn set_hlt(value: u64) {
+    asm!("mov $0, %gs:24" :: "r"(value) :: "volatile");
 }
 
-pub(super) fn get_hlt() -> *const TaskRegisters {
-    let result: *const TaskRegisters;
+pub(super) fn get_hlt() -> u64 {
+    let result: u64;
     unsafe {
         asm!("mov %gs:24, $0" : "=r"(result) ::);
     }
@@ -321,11 +316,12 @@ pub unsafe fn arch_init_syscall() {
 }
 
 /// Waits for an interrupt. Never returns because the interrupt handler will return to usermode.
-pub fn wait_for_interrupt(registers: &TaskRegisters) -> ! {
+pub fn wait_for_interrupt() -> ! {
     unsafe {
-        set_hlt(registers as *const _);
+        set_hlt(1);
         asm!(
             r#"
+                mov %gs:0, %rsp // In case we recursively enter wait_for_interrupt without going through ring 3.
                 swapgs
                 sti
                 hlt

@@ -1,39 +1,17 @@
 use crate::addr::*;
-use crate::arch::task::{wait_for_interrupt, TaskRegisters};
+use crate::arch::task::TaskRegisters;
 use crate::error::*;
 use crate::kobj::*;
 use crate::multilevel::*;
 use crate::pagealloc::*;
 use crate::paging::{PageTableMto, PageTableObject, UserPteFlags};
-use crate::task::{IpcEntry, StateRestoreMode, Task, TaskFaultState};
+use crate::task::{IpcEntry, EntryType, StateRestoreMode, Task, TaskEndpoint, TaskEndpointFlags, EntryDirection, IpcReason, TaskFaultState, enter_user_mode};
 use core::convert::TryFrom;
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 use num_enum::TryFromPrimitive;
-
-bitflags! {
-    pub struct TaskEndpointFlags: u32 {
-        /// An endpoint with the `STATE_TRANSPARENT` flag appears transparent when being invoked.
-        /// `ipc_blocked` is not checked, `IpcEntry` is not applied to the registers, and no reply endpoint is created.
-        /// `CAP_TRANSFER` is ignored if `STATE_TRANSPARENT` is set.
-        const STATE_TRANSPARENT = 1 << 0;
-
-        /// Whether this endpoint is a reply endpoint.
-        ///
-        /// A reply endpoint has the following properties:
-        ///
-        /// - Can only be used once, and cannot be cloned.
-        /// - Will not create another reply endpoint in the target task.
-        const REPLY = 1 << 1;
-
-        /// Whether capability transfer is performed for this endpoint.
-        const CAP_TRANSFER = 1 << 2;
-
-        /// Whether this endpoint can be used to add tags.
-        const TAGGABLE = 1 << 3;
-    }
-}
+use bit_field::BitField;
 
 pub const N_ENDPOINT_SLOTS: usize = 32;
 pub const INVALID_CAP: u64 = core::u64::MAX;
@@ -154,22 +132,9 @@ pub enum CapabilityEndpointObject {
     X86IoPort(u16),
     Mmio(CapMmio),
     RootPageTable(KernelObjectRef<PageTableObject>),
-    TaskEndpoint(CapTaskEndpoint),
+    TaskEndpoint(TaskEndpoint),
     CapabilitySet(KernelObjectRef<CapabilitySet>),
-    WaitForInterrupt,
     Interrupt(u8),
-}
-
-#[derive(Clone)]
-pub struct CapTaskEndpoint {
-    /// Task object to send IPC messages to.
-    pub task: KernelObjectRef<Task>,
-
-    /// Entry point information.
-    pub entry: IpcEntry,
-
-    /// Flags.
-    pub flags: TaskEndpointFlags,
 }
 
 #[derive(Clone)]
@@ -221,10 +186,9 @@ impl CapabilityEndpointObject {
     pub fn allow_clone(&self) -> bool {
         match *self {
             CapabilityEndpointObject::TaskEndpoint(ref endpoint) => {
-                if endpoint.flags.contains(TaskEndpointFlags::REPLY) {
-                    false
-                } else {
-                    true
+                match endpoint.entry.direction() {
+                    EntryDirection::Push => true,
+                    EntryDirection::Pop => false,
                 }
             },
             _ => true
@@ -248,7 +212,6 @@ impl CapabilityEndpointObject {
             CapabilityEndpointObject::CapabilitySet(set) => {
                 invoke_cap_capability_set(invocation, set)
             }
-            CapabilityEndpointObject::WaitForInterrupt => invoke_cap_wait_for_interrupt(invocation),
             CapabilityEndpointObject::Interrupt(index) => invoke_cap_interrupt(invocation, index),
         }
     }
@@ -271,16 +234,14 @@ enum BasicTaskRequest {
     FetchRootPageTable = 3,
     GetRegister = 4,
     SetRegister = 5,
-    FetchNewUserPageSet = 6,
     FetchTaskEndpoint = 7,
-    FetchTaskTransparentEndpoint = 8,
-    SetIpcBase = 9,
+    FetchIpcCap = 8,
+    PutIpcCap = 9,
     PutCapSet = 10,
-    FetchTaskCapTransferEndpoint = 11,
     MakeCapSet = 12,
     MakeRootPageTable = 13,
     PutRootPageTable = 14,
-    FetchTaskTransparentTaggableEndpoint = 15,
+    IpcReturn = 15,
 }
 
 fn invoke_cap_basic_task(
@@ -331,43 +292,66 @@ fn invoke_cap_basic_task(
             }
             Ok(0)
         }
-        BasicTaskRequest::FetchNewUserPageSet => Err(KernelError::NotImplemented),
-        BasicTaskRequest::FetchTaskEndpoint
-        | BasicTaskRequest::FetchTaskTransparentEndpoint
-        | BasicTaskRequest::FetchTaskCapTransferEndpoint
-        | BasicTaskRequest::FetchTaskTransparentTaggableEndpoint => {
-            let cptr = CapPtr(invocation.arg(1)? as u64);
+        BasicTaskRequest::FetchTaskEndpoint => {
+            let mixed_arg1 = invocation.arg(1)? as u64;
+            let cptr = CapPtr(mixed_arg1.get_bits(0..=47));
+            let flags = TaskEndpointFlags::from_bits(mixed_arg1.get_bits(48..=62) as u16)?;
+            let reply = mixed_arg1.get_bit(63);
+
             let entry_pc = invocation.arg(2)? as u64;
             let user_context = invocation.arg(3)? as u64;
 
-            let flags = match req {
-                BasicTaskRequest::FetchTaskTransparentTaggableEndpoint => {
-                    TaskEndpointFlags::STATE_TRANSPARENT | TaskEndpointFlags::TAGGABLE
-                }
-                BasicTaskRequest::FetchTaskTransparentEndpoint => {
-                    TaskEndpointFlags::STATE_TRANSPARENT
-                }
-                BasicTaskRequest::FetchTaskCapTransferEndpoint => TaskEndpointFlags::CAP_TRANSFER,
-                _ => TaskEndpointFlags::empty(),
-            };
             current
                 .capabilities
                 .get()
-                .entry_endpoint(cptr, |endpoint| {
-                    endpoint.object = CapabilityEndpointObject::TaskEndpoint(CapTaskEndpoint {
-                        task: task.clone(),
-                        entry: IpcEntry {
+                .entry_endpoint(cptr, |endpoint| -> KernelResult<()> {
+                    let entry = if reply {
+                        // In the call tree, attempt to assign the current task as the parent node of `task`.
+                        task.block_ipc()?;
+                        EntryType::CooperativeReply
+                    } else {
+                        EntryType::Call(IpcEntry {
                             pc: entry_pc,
-                            user_context,
-                        },
+                            user_context
+                        })
+                    };
+                    endpoint.object = CapabilityEndpointObject::TaskEndpoint(TaskEndpoint {
+                        task: task.clone(),
+                        entry,
                         flags,
                     });
-                })?;
+                    Ok(())
+                })??;
             Ok(0)
         }
-        BasicTaskRequest::SetIpcBase => {
-            task.ipc_base
-                .store(invocation.arg(1)? as u64, Ordering::SeqCst);
+        BasicTaskRequest::FetchIpcCap => {
+            let cptr = CapPtr(invocation.arg(1)? as u64);
+            let index = invocation.arg(2)? as usize;
+            let cap = {
+                let mut caps = task.ipc_caps.lock();
+                if index >= caps.len() {
+                    return Err(KernelError::InvalidArgument);
+                }
+                core::mem::replace(&mut caps[index], CapabilityEndpoint::default())
+            };
+            current.capabilities.get().entry_endpoint(cptr, |endpoint| {
+                *endpoint = cap;
+            })?;
+            Ok(0)
+        }
+        BasicTaskRequest::PutIpcCap => {
+            let cptr = CapPtr(invocation.arg(1)? as u64);
+            let index = invocation.arg(2)? as usize;
+            let cap = current.capabilities.get().entry_endpoint(cptr, |endpoint| {
+                core::mem::replace(endpoint, CapabilityEndpoint::default())
+            })?;
+            {
+                let mut caps = task.ipc_caps.lock();
+                if index >= caps.len() {
+                    return Err(KernelError::InvalidArgument);
+                }
+                caps[index] = cap;
+            }
             Ok(0)
         }
         BasicTaskRequest::PutCapSet => {
@@ -413,6 +397,20 @@ fn invoke_cap_basic_task(
             task.page_table_root.swap(pto);
             Ok(0)
         }
+        BasicTaskRequest::IpcReturn => {
+            let cap = core::mem::replace(&mut current.ipc_caps.lock()[0], Default::default());
+            if let CapabilityEndpointObject::TaskEndpoint(endpoint) = cap.object {
+                drop(current);
+                let (_, e) = Task::invoke_ipc(
+                    endpoint,
+                    IpcReason::CapInvoke,
+                    &invocation.registers,
+                );
+                Err(e)
+            } else {
+                Err(KernelError::InvalidArgument)
+            }
+        }
     }
 }
 
@@ -421,7 +419,7 @@ fn invoke_cap_basic_task(
 enum RootTaskCapRequest {
     X86IoPort = 0,
     Mmio = 1,
-    WaitForInterrupt = 2,
+    MakeIdle = 2,
     Interrupt = 3,
 }
 
@@ -466,15 +464,12 @@ fn invoke_cap_root_task(invocation: &CapabilityInvocation) -> KernelResult<i64> 
                 })?;
             Ok(0)
         }
-        RootTaskCapRequest::WaitForInterrupt => {
-            let cptr = CapPtr(invocation.arg(1)? as u64);
-            current
-                .capabilities
-                .get()
-                .entry_endpoint(cptr, |endpoint| {
-                    endpoint.object = CapabilityEndpointObject::WaitForInterrupt;
-                })?;
-            Ok(0)
+        RootTaskCapRequest::MakeIdle => {
+            current.idle.store(true, Ordering::SeqCst);
+            drop(current);
+
+            // Use enter_user_mode instead of the fast syscall return routine to enter idle mode.
+            enter_user_mode(StateRestoreMode::Syscall);
         }
         RootTaskCapRequest::Interrupt => {
             let cptr = CapPtr(invocation.arg(1)? as u64);
@@ -619,104 +614,32 @@ fn invoke_cap_mmio(invocation: &CapabilityInvocation, mmio: CapMmio) -> KernelRe
 #[derive(Debug, Copy, Clone, TryFromPrimitive)]
 enum IpcRequest {
     SwitchTo = 0,
-    IsTransparent = 1,
+    IsCapTransfer = 1,
     IsTaggable = 2,
-    SetTag = 3,
-    GetTag = 4,
+    IsReply = 3,
+    SetTag = 4,
+    GetTag = 5,
 }
 
 fn invoke_cap_task_endpoint(
     invocation: &mut CapabilityInvocation,
-    endpoint: CapTaskEndpoint,
+    endpoint: TaskEndpoint,
 ) -> KernelResult<i64> {
     let req = IpcRequest::try_from(invocation.arg(0)? as u32)?;
 
     match req {
         IpcRequest::SwitchTo => {
-            let current = Task::current();
-            let task = endpoint.task; // `task` is the only field in `endpoint` that requires drop.
-
-            if endpoint.flags.contains(TaskEndpointFlags::REPLY) {
-                // This also handles possible race condition during two parallel `invoke_cap_task_endpoint`s.
-                current.capabilities.get().lookup_cptr_take(invocation.cptr())?;
-            }
-
-            drop(current.unblock_interrupt());
-
-            // Only transfer capabilities if the remote task wasn't preempted out.
-            let reply_endpoint = if !endpoint
-                .flags
-                .contains(TaskEndpointFlags::STATE_TRANSPARENT)
-            {
-                let remote_base = task.ipc_base.load(Ordering::SeqCst);
-
-                // Swap CapabilityEndpointSet of local and remote tasks.
-                if endpoint.flags.contains(TaskEndpointFlags::CAP_TRANSFER) {
-                    let current_capabilities = current.capabilities.get();
-                    let remote_capabilities = task.capabilities.get();
-                    if &*current_capabilities as *const CapabilitySet
-                        != &*remote_capabilities as *const CapabilitySet
-                    {
-                        let local_base = current.ipc_base.load(Ordering::SeqCst);
-                        if local_base != INVALID_CAP && remote_base != INVALID_CAP {
-                            current_capabilities.0.lookup_leaf_entry(
-                                local_base,
-                                |local_entry| {
-                                    remote_capabilities.0.lookup_leaf_entry(
-                                        remote_base,
-                                        |remote_entry| {
-                                            let remote_next = remote_entry.next;
-                                            remote_entry.next = local_entry.next;
-                                            local_entry.next = remote_next;
-                                        },
-                                    )
-                                },
-                            )??;
-                        }
-                    }
-                }
-
-                if !endpoint.flags.contains(TaskEndpointFlags::REPLY) && remote_base != INVALID_CAP
-                {
-                    Some((
-                        CapPtr(remote_base),
-                        CapTaskEndpoint {
-                            task: current.clone(),
-                            entry: IpcEntry {
-                                pc: *invocation.registers.pc_mut(),
-                                user_context: core::u64::MAX,
-                            },
-                            flags: TaskEndpointFlags::REPLY
-                                | (endpoint.flags & TaskEndpointFlags::CAP_TRANSFER),
-                        },
-                    ))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            *invocation.registers.return_value_mut() = 0;
-
-            let (entry, mode) = if endpoint
-                .flags
-                .contains(TaskEndpointFlags::STATE_TRANSPARENT)
-            {
-                (None, StateRestoreMode::Full)
-            } else {
-                (Some(endpoint.entry), StateRestoreMode::Syscall)
-            };
-
-            drop(current);
-
-            let (_, e) = Task::invoke_ipc(task, entry, &invocation.registers, mode, reply_endpoint);
+            let (_, e) = Task::invoke_ipc(
+                endpoint,
+                IpcReason::CapInvoke,
+                &invocation.registers,
+            );
             Err(e)
         }
-        IpcRequest::IsTransparent => Ok(
+        IpcRequest::IsCapTransfer => Ok(
             if endpoint
                 .flags
-                .contains(TaskEndpointFlags::STATE_TRANSPARENT)
+                .contains(TaskEndpointFlags::CAP_TRANSFER)
             {
                 1
             } else {
@@ -732,6 +655,13 @@ fn invoke_cap_task_endpoint(
             } else {
                 0
             },
+        ),
+        IpcRequest::IsReply => Ok(
+            if endpoint.entry.direction() == EntryDirection::Pop {
+                1
+            } else {
+                0
+            }
         ),
         IpcRequest::SetTag => {
             if !endpoint
@@ -763,6 +693,8 @@ enum CapSetRequest {
     FetchDeepClone = 5,
     MoveCap = 6,
     GetCapType = 7,
+    FetchCapMove = 8,
+    PutCapMove = 9,
 }
 
 #[repr(u32)]
@@ -851,6 +783,27 @@ fn invoke_cap_capability_set(
             })?;
             Ok(ty as u32 as _)
         }
+        CapSetRequest::FetchCapMove => {
+            let src = CapPtr(invocation.arg(1)? as u64);
+            let dst = CapPtr(invocation.arg(2)? as u64);
+            let cap = set.entry_endpoint(src, |endpoint| core::mem::replace(endpoint, Default::default()))?;
+            current.capabilities.get().entry_endpoint(dst, |endpoint| {
+                *endpoint = cap;
+            })?;
+            Ok(0)
+        }
+        CapSetRequest::PutCapMove => {
+            let src = CapPtr(invocation.arg(1)? as u64);
+            let dst = CapPtr(invocation.arg(2)? as u64);
+            let cap = current
+                .capabilities
+                .get()
+                .entry_endpoint(src, |endpoint| core::mem::replace(endpoint, Default::default()))?;
+            set.entry_endpoint(dst, |endpoint| {
+                *endpoint = cap;
+            })?;
+            Ok(0)
+        }
     }
 }
 
@@ -891,9 +844,4 @@ fn invoke_cap_interrupt(invocation: &mut CapabilityInvocation, index: u8) -> Ker
             Ok(0)
         }
     }
-}
-
-fn invoke_cap_wait_for_interrupt(invocation: &mut CapabilityInvocation) -> KernelResult<i64> {
-    drop(Task::current().unblock_interrupt());
-    wait_for_interrupt(&invocation.registers);
 }
