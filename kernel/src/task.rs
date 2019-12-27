@@ -44,8 +44,21 @@ pub enum TaskFaultState {
     IntegerDivision,
 }
 
+static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
+
+fn alloc_task_id() -> u64 {
+    let id = NEXT_TASK_ID.fetch_add(1, Ordering::SeqCst);
+    if id == core::u64::MAX {
+        panic!("alloc_task_id: NEXT_TASK_ID overflow"); // is this ever possible?
+    }
+    id
+}
+
 #[repr(C)]
 pub struct Task {
+    /// Kernel-internal task identifier.
+    pub id: u64,
+
     /// Page table of this task.
     pub page_table_root: AtomicKernelObjectRef<PageTableObject>,
 
@@ -69,6 +82,16 @@ pub struct Task {
 
     /// Fault handler table.
     pub fault_handlers: Mutex<FaultHandlerTable>,
+
+    /// Tags.
+    pub tags: Mutex<[TaskTag; 16]>,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct TaskTag {
+    pub owner: u64,
+    pub tag: u64,
 }
 
 #[derive(Default, Clone)]
@@ -124,6 +147,7 @@ impl Task {
         cap_root: KernelObjectRef<CapabilitySet>,
     ) -> Task {
         Task {
+            id: alloc_task_id(),
             page_table_root: AtomicKernelObjectRef::new(page_table_root),
             capabilities: AtomicKernelObjectRef::new(cap_root),
             ipc_base: AtomicU64::new(INVALID_CAP),
@@ -132,6 +156,7 @@ impl Task {
             fault_handlers: Mutex::new(FaultHandlerTable::default()),
             running: AtomicBool::new(false),
             interrupt_blocked: AtomicU8::new(0),
+            tags: Mutex::new(Default::default()),
         }
     }
 
@@ -184,6 +209,7 @@ impl Task {
 
     pub fn shallow_clone(&self) -> KernelResult<KernelObjectRef<Task>> {
         KernelObjectRef::new(Task {
+            id: alloc_task_id(),
             page_table_root: AtomicKernelObjectRef::new(self.page_table_root.get()),
             capabilities: AtomicKernelObjectRef::new(self.capabilities.get()),
             ipc_base: AtomicU64::new(INVALID_CAP),
@@ -192,6 +218,7 @@ impl Task {
             fault_handlers: Mutex::new(self.fault_handlers.lock().clone()),
             running: AtomicBool::new(false),
             interrupt_blocked: AtomicU8::new(0),
+            tags: Mutex::new(Default::default()),
         })
     }
 
@@ -271,7 +298,6 @@ impl Task {
         task: KernelObjectRef<Task>,
         entry: IpcEntry,
         old_registers: &TaskRegisters,
-        code: Option<u64>,
     ) -> (KernelObjectRef<Task>, KernelError) {
         let remote_base = task.ipc_base.load(Ordering::SeqCst);
 
@@ -279,22 +305,17 @@ impl Task {
             Some((
                 CapPtr(remote_base),
                 CapTaskEndpoint {
-                    task: Some(Task::current()),
+                    task: Task::current(),
                     entry: IpcEntry {
                         pc: old_registers.pc(),
                         user_context: core::u64::MAX,
                     },
-                    flags: TaskEndpointFlags::REPLY | TaskEndpointFlags::STATE_TRANSPARENT,
+                    flags: TaskEndpointFlags::REPLY | TaskEndpointFlags::STATE_TRANSPARENT | TaskEndpointFlags::TAGGABLE,
                 },
             ))
         } else {
             None
         };
-
-        if let Some(code) = code {
-            let mut target_regs = task.registers.lock();
-            *target_regs.usermode_arg_mut(1).unwrap() = code; // argument 0 is used in invoke_ipc
-        }
 
         Self::invoke_ipc(
             task,
@@ -303,6 +324,36 @@ impl Task {
             StateRestoreMode::Syscall,
             reply_endpoint,
         )
+    }
+
+    pub fn set_tag(&self, owner: u64, tag: u64) -> KernelResult<()> {
+        assert_ne!(owner, 0);
+
+        let mut tags = self.tags.lock();
+        for entry in tags.iter_mut() {
+            if entry.owner == owner {
+                entry.tag = tag;
+                return Ok(());
+            }
+        }
+        for entry in tags.iter_mut() {
+            if entry.owner == 0 {
+                entry.owner = owner;
+                entry.tag = tag;
+                return Ok(());
+            }
+        }
+        Err(KernelError::InvalidState)
+    }
+
+    pub fn get_tag(&self, owner: u64) -> Option<u64> {
+        let tags = self.tags.lock();
+        for entry in tags.iter() {
+            if entry.owner == owner {
+                return Some(entry.tag);
+            }
+        }
+        None
     }
 }
 
@@ -407,14 +458,13 @@ pub fn unbind_interrupt(index: u8) {
 pub fn invoke_interrupt(
     index: u8,
     old_registers: &TaskRegisters,
-    code: Option<u64>,
 ) -> KernelError {
     let entry = INTERRUPT_BINDINGS.lock()[index as usize].clone();
     if let Some(entry) = entry {
         if let Err(e) = entry.task.block_interrupt(index) {
             return e;
         }
-        let (task, e) = Task::invoke_async_preemption(entry.task, entry.entry, old_registers, code);
+        let (task, e) = Task::invoke_async_preemption(entry.task, entry.entry, old_registers);
         task.unblock_interrupt().expect(
             "invoke_interrupt: invoke_async_preemption returned error but unblock_interrupt failed",
         );

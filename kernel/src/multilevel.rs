@@ -10,6 +10,10 @@ use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ptr::NonNull;
 use spin::Mutex;
 
+pub trait TryClone: Sized {
+    fn try_clone(&self) -> KernelResult<Self>;
+}
+
 pub enum OpaqueCacheElement {}
 
 pub struct GenericLeafCache {
@@ -408,7 +412,7 @@ impl<
 }
 
 impl<
-        T: Clone + Send,
+        T: TryClone + Send,
         P: AsLevel<T, TABLE_SIZE> + Default + Send,
         C: LeafCache,
         L: EntryFilter,
@@ -418,7 +422,7 @@ impl<
         const TABLE_SIZE: usize,
     > MultilevelTableObject<T, P, C, L, BITS, LEVELS, START_BIT, TABLE_SIZE>
 {
-    pub fn deep_clone(&self) -> KernelResult<Self> {
+    pub fn try_deep_clone(&self) -> KernelResult<Self> {
         let clone = Self::new()?;
         self.foreach_entry(|depth, ptr, entry| {
             if depth == LEVELS - 1 {
@@ -426,7 +430,7 @@ impl<
                 if let Some(inner) = entry.as_level() {
                     clone.attach_leaf(
                         ptr,
-                        KernelPageRef::new(unsafe { (*inner.as_ref().value).clone() })?,
+                        KernelPageRef::new(unsafe { (*inner.as_ref().value).try_clone()? })?,
                     )?;
                 }
             }

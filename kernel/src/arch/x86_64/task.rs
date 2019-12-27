@@ -145,7 +145,7 @@ pub struct TlsIndirect {
     pub kernel_stack: u64,
     pub user_stack: u64,
     pub context: u64,
-    pub(super) hlt: u64,
+    pub(super) hlt: *const TaskRegisters,
 }
 
 impl TlsIndirect {
@@ -154,7 +154,7 @@ impl TlsIndirect {
             kernel_stack,
             user_stack: 0,
             context: 0,
-            hlt: 0,
+            hlt: core::ptr::null(),
         }
     }
 }
@@ -177,17 +177,16 @@ pub unsafe fn arch_set_kernel_tls(value: u64) {
     asm!("mov $0, %gs:16" :: "r"(value) :: "volatile");
 }
 
-pub(super) unsafe fn set_hlt(hlt: bool) {
-    let hlt = if hlt { 1u64 } else { 0u64 };
-    asm!("mov $0, %gs:24" :: "r"(hlt) :: "volatile");
+pub(super) unsafe fn set_hlt(hlt_user_regs: *const TaskRegisters) {
+    asm!("mov $0, %gs:24" :: "r"(hlt_user_regs) :: "volatile");
 }
 
-pub(super) fn get_hlt() -> bool {
-    let result: u64;
+pub(super) fn get_hlt() -> *const TaskRegisters {
+    let result: *const TaskRegisters;
     unsafe {
         asm!("mov %gs:24, $0" : "=r"(result) ::);
     }
-    result != 0
+    result
 }
 
 /// The syscall path of entering user mode.
@@ -322,9 +321,9 @@ pub unsafe fn arch_init_syscall() {
 }
 
 /// Waits for an interrupt. Never returns because the interrupt handler will return to usermode.
-pub fn wait_for_interrupt() -> ! {
+pub fn wait_for_interrupt(registers: &TaskRegisters) -> ! {
     unsafe {
-        set_hlt(true);
+        set_hlt(registers as *const _);
         asm!(
             r#"
                 swapgs
