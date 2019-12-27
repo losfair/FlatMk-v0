@@ -3,6 +3,7 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use wee_alloc::MMAP_IMPL;
 use crate::layout;
+use crate::mm::UserPteFlags;
 
 static CURRENT_TOP: AtomicUsize = AtomicUsize::new(layout::HEAP_BASE as usize);
 pub const PAGE_SIZE: usize = 4096;
@@ -15,7 +16,7 @@ fn do_mmap(bytes: usize) -> Option<NonNull<u8>> {
             .make_leaf(i as u64)
             .expect("do_mmap: make_leaf failed");
         ROOT_PAGE_TABLE
-            .alloc_leaf(i as u64)
+            .alloc_leaf(i as u64, UserPteFlags::WRITABLE)
             .expect("do_mmap: alloc_leaf failed");
     }
     Some(NonNull::new(begin as *mut u8).unwrap())

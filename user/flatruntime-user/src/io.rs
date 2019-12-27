@@ -18,6 +18,10 @@ impl Port {
         &self.cap
     }
 
+    pub fn into_cptr(self) -> CPtr {
+        self.cap
+    }
+
     pub unsafe fn outb(&self, x: u8) -> KernelResult<()> {
         self.cap.call_result(PORT_WRITE, 1, x as _, 0).map(|_| ())
     }

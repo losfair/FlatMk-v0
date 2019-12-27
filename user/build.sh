@@ -6,6 +6,18 @@ echo "Building scheduler"
 cd scheduler || exit 1
 cargo xbuild --target ../x86_64-flatmk.json --release || exit 1
 
+echo "Building shmemd"
+cd ../shmemd || exit 1
+cargo xbuild --target ../x86_64-flatmk.json --release || exit 1
+
+echo "Building vga"
+cd ../vga || exit 1
+cargo xbuild --target ../x86_64-flatmk.json --release || exit 1
+
+echo "Building libflatrt"
+cd ../libflatrt || exit 1
+cargo build --release || exit 1
+
 echo "Building init"
 cd ../init || exit 1
 cargo xbuild --target ../x86_64-flatmk.json --release || exit 1

@@ -1,5 +1,5 @@
 [package]
-name = "init"
+name = "vga"
 version = "0.1.0"
 authors = ["losfair <zhy20000919@hotmail.com>"]
 edition = "2018"
@@ -7,9 +7,8 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-flatruntime-user = { path = "../flatruntime-user", features = ["static_stack"] }
+flatruntime-user = { path = "../flatruntime-user" }
 scheduler-api = { path = "../scheduler-api" }
-shmem-api = { path = "../shmem-api" }
 lazy_static = { version = "1.4", features = ["spin_no_std"] }
 spin = "0.5"
 volatile = "0.2"

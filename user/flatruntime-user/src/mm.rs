@@ -1,10 +1,18 @@
 use crate::error::*;
 use crate::syscall::CPtr;
-use crate::task::allocate_cptr;
+use crate::task::{ROOT_CAPSET, allocate_cptr};
 use core::convert::TryFrom;
+use crate::capset::CapType;
 
 pub struct RootPageTable {
     cap: CPtr,
+}
+
+bitflags! {
+    pub struct UserPteFlags: u64 {
+        const WRITABLE = 1 << 0;
+        const EXECUTABLE = 1 << 1;
+    }
 }
 
 #[repr(u32)]
@@ -16,6 +24,7 @@ enum RootPageTableRequest {
     PutPage = 3,
     FetchPage = 4,
     DropPage = 5,
+    SetProtection = 6,
 }
 
 impl RootPageTable {
@@ -23,8 +32,20 @@ impl RootPageTable {
         RootPageTable { cap }
     }
 
+    pub fn checked_new(cap: CPtr) -> KernelResult<RootPageTable> {
+        if ROOT_CAPSET.get_cap_type(&cap)? == CapType::RootPageTable as u32 {
+            Ok(unsafe { RootPageTable::new(cap) })
+        } else {
+            Err(KernelError::InvalidArgument)
+        }
+    }
+
     pub fn cptr(&self) -> &CPtr {
         &self.cap
+    }
+
+    pub fn into_cptr(self) -> CPtr {
+        self.cap
     }
 
     pub fn deep_clone(&self) -> KernelResult<RootPageTable> {
@@ -55,34 +76,34 @@ impl RootPageTable {
         }
     }
 
-    pub fn alloc_leaf(&self, vaddr: u64) -> KernelResult<()> {
+    pub fn alloc_leaf(&self, vaddr: u64, prot: UserPteFlags) -> KernelResult<()> {
         unsafe {
             self.cap
                 .call_result(
                     RootPageTableRequest::AllocLeaf as u32 as i64,
                     vaddr as i64,
-                    0,
+                    prot.bits() as i64,
                     0,
                 )
                 .map(|_| ())
         }
     }
 
-    pub unsafe fn put_page(&self, src: u64, dst: u64) -> KernelResult<()> {
+    pub unsafe fn put_page(&self, src: u64, dst: u64, prot: UserPteFlags) -> KernelResult<()> {
         self.cap.call_result(
             RootPageTableRequest::PutPage as u32 as i64,
             src as _,
             dst as _,
-            0,
+            prot.bits() as i64,
         ).map(|_| ())
     }
 
-    pub unsafe fn fetch_page(&self, src: u64, dst: u64) -> KernelResult<()> {
+    pub unsafe fn fetch_page(&self, src: u64, dst: u64, prot: UserPteFlags) -> KernelResult<()> {
         self.cap.call_result(
             RootPageTableRequest::FetchPage as u32 as i64,
             src as _,
             dst as _,
-            0,
+            prot.bits() as i64,
         ).map(|_| ())
     }
 
@@ -92,6 +113,17 @@ impl RootPageTable {
                 RootPageTableRequest::DropPage as u32 as i64,
                 target as _,
                 0,
+                0,
+            ).map(|_| ())
+        }
+    }
+
+    pub fn set_protection(&self, target: u64, prot: UserPteFlags) -> KernelResult<()> {
+        unsafe {
+            self.cap.call_result(
+                RootPageTableRequest::SetProtection as u32 as i64,
+                target as _,
+                prot.bits() as i64,
                 0,
             ).map(|_| ())
         }
@@ -107,7 +139,7 @@ impl Mmio {
         Mmio { cap }
     }
 
-    pub unsafe fn alloc_at(&self, vaddr: u64) -> KernelResult<()> {
-        self.cap.call_result(vaddr as i64, 0, 0, 0).map(|_| ())
+    pub unsafe fn alloc_at(&self, vaddr: u64, prot: UserPteFlags) -> KernelResult<()> {
+        self.cap.call_result(vaddr as i64, prot.bits() as i64, 0, 0).map(|_| ())
     }
 }

@@ -17,6 +17,8 @@ enum CapSetRequest {
     FetchDeepClone = 5,
     MoveCap = 6,
     GetCapType = 7,
+    FetchCapMove = 8,
+    PutCapMove = 9,
 }
 
 #[repr(u32)]
@@ -24,6 +26,7 @@ enum CapSetRequest {
 pub enum CapType {
     Other = 0,
     TaskEndpoint = 1,
+    RootPageTable = 2,
 }
 
 impl CapSet {
@@ -33,6 +36,10 @@ impl CapSet {
 
     pub fn cptr(&self) -> &CPtr {
         &self.cap
+    }
+
+    pub fn into_cptr(self) -> CPtr {
+        self.cap
     }
 
     pub fn deep_clone(&self) -> KernelResult<CapSet> {
@@ -102,6 +109,33 @@ impl CapSet {
             unsafe {
                 self.cap.call_result(
                     CapSetRequest::FetchCap as u32 as i64,
+                    src as i64,
+                    cptr.index() as i64,
+                    0,
+                )?;
+            }
+            Ok(())
+        })?;
+        Ok(cptr)
+    }
+
+    pub fn put_cap_move(&self, src: CPtr, dst: u64) -> KernelResult<()> {
+        unsafe {
+            self.cap.call_result(
+                CapSetRequest::PutCapMove as u32 as i64,
+                src.index() as i64,
+                dst as i64,
+                0,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn fetch_cap_move(&self, src: u64) -> KernelResult<CPtr> {
+        let (cptr, _) = allocate_cptr(|cptr| {
+            unsafe {
+                self.cap.call_result(
+                    CapSetRequest::FetchCapMove as u32 as i64,
                     src as i64,
                     cptr.index() as i64,
                     0,

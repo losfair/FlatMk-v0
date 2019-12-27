@@ -1,7 +1,10 @@
 use crate::error::*;
 use crate::syscall::{CPtr, INVALID_CAP};
 use core::convert::TryFrom;
-use crate::thread::this_ipc_base;
+use core::mem::ManuallyDrop;
+use crate::capset::CapType;
+use crate::task::ROOT_CAPSET;
+use crate::thread::this_task;
 
 pub fn fastipc_read(out: &mut FastIpcPayload) {
     unsafe {
@@ -45,7 +48,11 @@ pub struct FastIpcPayload {
 #[derive(Debug, Copy, Clone)]
 pub enum IpcRequest {
     SwitchTo = 0,
-    IsTransparent = 1,
+    IsCapTransfer = 1,
+    IsTaggable = 2,
+    IsReply = 3,
+    SetTag = 4,
+    GetTag = 5,
 }
 
 pub struct TaskEndpoint {
@@ -53,12 +60,24 @@ pub struct TaskEndpoint {
 }
 
 impl TaskEndpoint {
-    pub unsafe fn new(cap: CPtr) -> TaskEndpoint {
+    pub const unsafe fn new(cap: CPtr) -> TaskEndpoint {
         TaskEndpoint { cap }
+    }
+
+    pub fn checked_new(cap: CPtr) -> KernelResult<TaskEndpoint> {
+        if ROOT_CAPSET.get_cap_type(&cap)? == CapType::TaskEndpoint as u32 {
+            Ok(unsafe { TaskEndpoint::new(cap) })
+        } else {
+            Err(KernelError::InvalidArgument)
+        }
     }
 
     pub fn cptr(&self) -> &CPtr {
         &self.cap
+    }
+
+    pub fn into_cptr(self) -> CPtr {
+        self.cap
     }
 
     pub fn call(&self, payload: &mut FastIpcPayload) -> KernelResult<()> {
@@ -79,26 +98,112 @@ impl TaskEndpoint {
             }
         }
     }
-}
 
-pub fn ipc_return() -> ! {
-    unsafe {
-        ipc_return_to(CPtr::new(this_ipc_base()))
+    pub fn set_tag(&self, tag: u64) -> KernelResult<()> {
+        unsafe {
+            self.cap.call_result(IpcRequest::SetTag as u32 as i64, tag as _, 0, 0).map(|_| ())
+        }
+    }
+
+    pub fn get_tag(&self) -> KernelResult<u64> {
+        unsafe {
+            self.cap.call_result(IpcRequest::GetTag as u32 as i64, 0, 0, 0).map(|x| x as u64)
+        }
     }
 }
 
-pub unsafe fn ipc_return_to(cptr: CPtr) -> ! {
-    cptr.call_result(
-        IpcRequest::SwitchTo as u32 as i64,
-        0, 0, 0,
-    ).expect("ipc_return_to: cannot send reply");
-    unreachable!()
+pub fn ipc_return() -> KernelError {
+    this_task().ipc_return()
 }
 
-pub unsafe fn ipc_endpoint_is_transparent(cptr: &CPtr) -> bool {
-    let result = cptr.call_result(
-        IpcRequest::IsTransparent as u32 as i64,
+pub unsafe fn ipc_return_to_unowned(cptr: ManuallyDrop<CPtr>) -> KernelError {
+    match cptr.call_result(
+        IpcRequest::SwitchTo as u32 as i64,
         0, 0, 0,
-    ).expect("ipc_endpoint_is_transparent: call_result returned error");
+    ) {
+        Ok(_) => {
+            KernelError::InvalidState
+        },
+        Err(e) => e,
+    }
+}
+
+pub unsafe fn ipc_endpoint_is_cap_transfer(cptr: &CPtr) -> bool {
+    let result = cptr.call_result(
+        IpcRequest::IsCapTransfer as u32 as i64,
+        0, 0, 0,
+    ).expect("ipc_endpoint_is_cap_transfer: call_result returned error");
     result == 1
+}
+
+pub unsafe fn ipc_endpoint_is_taggable(cptr: &CPtr) -> bool {
+    let result = cptr.call_result(
+        IpcRequest::IsTaggable as u32 as i64,
+        0, 0, 0,
+    ).expect("ipc_endpoint_is_taggable: call_result returned error");
+    result == 1
+}
+
+pub unsafe fn ipc_endpoint_is_reply(cptr: &CPtr) -> bool {
+    let result = cptr.call_result(
+        IpcRequest::IsReply as u32 as i64,
+        0, 0, 0,
+    ).expect("ipc_endpoint_is_reply: call_result returned error");
+    result == 1
+}
+
+#[macro_export]
+macro_rules! ipc_entry_with_context {
+    ($name:ident, $internal_name:ident, $context:ident, $tag:ident, $body:block) => {
+        #[no_mangle]
+        extern "C" fn $internal_name($context: u64, $tag: u64) -> ! {
+            $body
+        }
+
+        #[naked]
+        unsafe extern "C" fn $name() {
+            asm!(
+                concat!(r#"
+                    mov %gs:8, %rsp
+                    jmp "#, stringify!($internal_name), r#"
+                "#) :::: "volatile"
+            );
+            loop {}
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! ipc_entry {
+    ($name:ident, $internal_name:ident, $body:block) => {
+        ipc_entry_with_context!($name, $internal_name, _context, _tag, $body);
+    };
+}
+
+#[macro_export]
+macro_rules! ipc_entry_with_context_result_fastipc {
+    ($name:ident, $internal_name:ident, $payload:ident, $context:ident, $tag:ident, $body:block) => {
+        ipc_entry_with_context!($name, $internal_name, ipc_context, ipc_tag, {
+            fn handler($payload: &mut $crate::ipc::FastIpcPayload, $context: u64, $tag: u64) -> $crate::error::KernelResult<i64> {
+                $body
+            }
+
+            let mut payload = $crate::ipc::FastIpcPayload::default();
+            $crate::ipc::fastipc_read(&mut payload);
+
+            let result = handler(&mut payload, ipc_context, ipc_tag);
+            
+            match result {
+                Ok(x) => {
+                    payload.data[0] = x as _;
+                }
+                Err(e) => {
+                    payload.data[0] = e as i32 as _;
+                }
+            }
+            $crate::ipc::fastipc_write(&payload);
+            $crate::ipc::ipc_return();
+            unreachable!()
+        });
+    };
 }

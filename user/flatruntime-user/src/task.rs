@@ -8,8 +8,8 @@ use core::convert::TryFrom;
 use spin::Mutex;
 use crate::ipc::TaskEndpoint;
 
-pub const LOCAL_CAP_INDEX_CAPSET: u64 = 4;
-pub const LOCAL_CAP_INDEX_RPT: u64 = 5;
+pub const LOCAL_CAP_INDEX_CAPSET: u64 = 31;
+pub const LOCAL_CAP_INDEX_RPT: u64 = 30;
 
 lazy_static! {
     pub static ref ROOT_TASK: Task = Task {
@@ -58,15 +58,24 @@ enum BasicTaskRequest {
     FetchRootPageTable = 3,
     GetRegister = 4,
     SetRegister = 5,
-    FetchNewUserPageSet = 6,
     FetchTaskEndpoint = 7,
-    FetchTaskTransparentEndpoint = 8,
-    SetIpcBase = 9,
+    FetchIpcCap = 8,
+    PutIpcCap = 9,
     PutCapSet = 10,
-    FetchTaskCapTransferEndpoint = 11,
     MakeCapSet = 12,
     MakeRootPageTable = 13,
     PutRootPageTable = 14,
+    IpcReturn = 15,
+}
+
+bitflags! {
+    pub struct TaskEndpointFlags: u16 {
+        /// Whether capability transfer is performed for this endpoint.
+        const CAP_TRANSFER = 1 << 0;
+
+        /// Whether this endpoint can be used to add tags.
+        const TAGGABLE = 1 << 1;
+    }
 }
 
 struct CapAllocState {
@@ -95,6 +104,10 @@ impl CapAllocState {
 impl Task {
     pub fn cptr(&self) -> &CPtr {
         &self.cap
+    }
+
+    pub fn into_cptr(self) -> CPtr {
+        self.cap
     }
 
     pub fn fetch_capset(&self) -> KernelResult<CapSet> {
@@ -177,48 +190,40 @@ impl Task {
         Ok(Task { cap: cptr })
     }
 
-    pub fn set_ipc_base(&self, base: u64) -> KernelResult<()> {
+    pub fn fetch_ipc_cap(&self, index: u8) -> KernelResult<CPtr> {
+        let (cptr, _) = allocate_cptr(|cptr| unsafe {
+            self.cap
+                .call_result(
+                    BasicTaskRequest::FetchIpcCap as u32 as i64,
+                    cptr.index() as _,
+                    index as _,
+                    0,
+                )
+                .map(|_| ())
+        })?;
+        Ok(cptr)
+    }
+
+    pub fn put_ipc_cap(&self, index: u8, cptr: CPtr) -> KernelResult<()> {
         unsafe {
             self.cap
-                .call_result(BasicTaskRequest::SetIpcBase as u32 as i64, base as _, 0, 0)
+                .call_result(
+                    BasicTaskRequest::PutIpcCap as u32 as i64,
+                    cptr.index() as _,
+                    index as _,
+                    0,
+                )
                 .map(|_| ())
         }
     }
 
-    pub fn fetch_task_endpoint(&self, pc: u64, context: u64) -> KernelResult<TaskEndpoint> {
+    pub fn fetch_task_endpoint(&self, pc: u64, context: u64, flags: TaskEndpointFlags, reply: bool) -> KernelResult<TaskEndpoint> {
         let (cptr, _) = allocate_cptr(|cptr| unsafe {
+            let mixed_arg1 = cptr.index() | ((flags.bits() as u64) << 48) | ((if reply { 1u64 } else { 0u64 }) << 63);
             self.cap
                 .call_result(
                     BasicTaskRequest::FetchTaskEndpoint as u32 as i64,
-                    cptr.index() as _,
-                    pc as _,
-                    context as _,
-                )
-                .map(|_| ())
-        })?;
-        Ok(unsafe { TaskEndpoint::new(cptr) })
-    }
-
-    pub fn fetch_task_transparent_endpoint(&self, pc: u64, context: u64) -> KernelResult<TaskEndpoint> {
-        let (cptr, _) = allocate_cptr(|cptr| unsafe {
-            self.cap
-                .call_result(
-                    BasicTaskRequest::FetchTaskTransparentEndpoint as u32 as i64,
-                    cptr.index() as _,
-                    pc as _,
-                    context as _,
-                )
-                .map(|_| ())
-        })?;
-        Ok(unsafe { TaskEndpoint::new(cptr) })
-    }
-
-    pub fn fetch_task_cap_transfer_endpoint(&self, pc: u64, context: u64) -> KernelResult<TaskEndpoint> {
-        let (cptr, _) = allocate_cptr(|cptr| unsafe {
-            self.cap
-                .call_result(
-                    BasicTaskRequest::FetchTaskCapTransferEndpoint as u32 as i64,
-                    cptr.index() as _,
+                    mixed_arg1 as _,
                     pc as _,
                     context as _,
                 )
@@ -278,6 +283,18 @@ impl Task {
                 Ok(())
             })?;
             Ok(RootPageTable::new(cptr))
+        }
+    }
+
+    pub fn ipc_return(&self) -> KernelError {
+        unsafe {
+            match self.cap.call_result(
+                BasicTaskRequest::IpcReturn as u32 as i64,
+                0, 0, 0
+            ) {
+                Ok(_) => KernelError::InvalidState,
+                Err(e) => e,
+            }
         }
     }
 }

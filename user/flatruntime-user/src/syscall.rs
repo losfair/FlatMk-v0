@@ -6,7 +6,7 @@ use core::mem::MaybeUninit;
 unsafe fn _do_syscall(p0: i64, p1: i64, p2: i64, p3: i64, p4: i64, p5: i64) -> i64 {
     let result: i64;
     asm!(
-        "syscall" :
+        "mov $$0, %rax\nsyscall" :
             "={rax}"(result) :
             "{rdi}"(p0), "{rsi}"(p1), "{rdx}"(p2), "{r10}"(p3), "{r8}"(p4), "{r9}"(p5) :
             "rcx", "r11"

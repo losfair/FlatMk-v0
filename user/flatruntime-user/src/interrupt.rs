@@ -23,6 +23,10 @@ impl Interrupt {
         &self.cap
     }
 
+    pub fn into_cptr(self) -> CPtr {
+        self.cap
+    }
+
     pub unsafe fn bind(&self, task: &Task, pc: u64, user_context: u64) -> KernelResult<()> {
         self.cap.call_result(
             InterruptRequest::Bind as u32 as _,
@@ -37,26 +41,5 @@ impl Interrupt {
             InterruptRequest::Unbind as u32 as _,
             0, 0, 0,
         ).map(|_| ())
-    }
-}
-
-pub struct WaitForInterrupt {
-    cap: CPtr,
-}
-
-impl WaitForInterrupt {
-    pub const unsafe fn new(cap: CPtr) -> WaitForInterrupt {
-        WaitForInterrupt { cap }
-    }
-
-    pub fn cptr(&self) -> &CPtr {
-        &self.cap
-    }
-
-    pub fn wait(&self) -> ! {
-        unsafe {
-            self.cap.call_result(0, 0, 0, 0).expect("WaitForInterrupt::wait() should not return");
-        }
-        unreachable!()
     }
 }

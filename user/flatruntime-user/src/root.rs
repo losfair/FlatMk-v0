@@ -1,6 +1,6 @@
 use crate::error::*;
 use crate::io::Port;
-use crate::mm::Mmio;
+use crate::mm::{RootPageTable, Mmio};
 use crate::syscall::*;
 use crate::task::*;
 use core::convert::TryFrom;
@@ -11,20 +11,20 @@ use crate::interrupt::*;
 enum RootTaskCapRequest {
     X86IoPort = 0,
     Mmio = 1,
-    WaitForInterrupt = 2,
+    MakeIdle = 2,
     Interrupt = 3,
 }
 
 static CAP_ROOT: CPtr = unsafe { CPtr::new(1) };
 
-pub fn new_mmio(phys_addr: u64) -> KernelResult<Mmio> {
+pub fn new_mmio(pt: &RootPageTable, phys_addr: u64) -> KernelResult<Mmio> {
     let (cptr, _) = allocate_cptr(|cptr| unsafe {
         CAP_ROOT
             .call_result(
                 RootTaskCapRequest::Mmio as u32 as i64,
                 cptr.index() as i64,
+                pt.cptr().index() as i64,
                 phys_addr as _,
-                0,
             )
             .map(|_| ())
     })?;
@@ -45,18 +45,19 @@ pub fn new_x86_io_port(port: u16) -> KernelResult<Port> {
     Ok(unsafe { Port::new(cptr) })
 }
 
-pub fn new_wait_for_interrupt() -> KernelResult<WaitForInterrupt> {
-    let (cptr, _) = allocate_cptr(|cptr| unsafe {
+pub fn make_idle() -> KernelError {
+    match unsafe {
         CAP_ROOT
             .call_result(
-                RootTaskCapRequest::WaitForInterrupt as u32 as i64,
-                cptr.index() as i64,
+                RootTaskCapRequest::MakeIdle as u32 as i64,
+                0,
                 0,
                 0,
             )
-            .map(|_| ())
-    })?;
-    Ok(unsafe { WaitForInterrupt::new(cptr) })
+    } {
+        Ok(_) => KernelError::InvalidState,
+        Err(e) => e,
+    }
 }
 
 pub fn new_interrupt(index: u8) -> KernelResult<Interrupt> {
