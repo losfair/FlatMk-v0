@@ -90,7 +90,7 @@ pub struct Task {
     pub fault_handlers: Mutex<FaultHandlerTable>,
 
     /// Tags.
-    pub tags: Mutex<[TaskTag; 16]>,
+    pub tags: Mutex<[TaskTag; 8]>,
 }
 
 #[repr(C)]

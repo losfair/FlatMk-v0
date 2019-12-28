@@ -16,6 +16,10 @@ use bit_field::BitField;
 pub const N_ENDPOINT_SLOTS: usize = 32;
 pub const INVALID_CAP: u64 = core::u64::MAX;
 
+pub trait TryClone: Sized {
+    fn try_clone(&self) -> KernelResult<Self>;
+}
+
 #[derive(Copy, Clone, Debug)]
 #[repr(transparent)]
 pub struct CapPtr(pub u64);
@@ -549,7 +553,6 @@ fn invoke_cap_x86_io_port(invocation: &CapabilityInvocation, port: u16) -> Kerne
 enum RootPageTableRequest {
     MakeLeaf = 0,
     AllocLeaf = 1,
-    FetchDeepClone = 2,
     PutPage = 3,
     FetchPage = 4,
     DropPage = 5,
@@ -573,15 +576,6 @@ fn invoke_cap_root_page_table(
             let target = UserAddr::new(invocation.arg(1)? as u64)?;
             let protection = UserPteFlags::from_bits(invocation.arg(2)? as u64)?;
             pt.map_anonymous(target, protection)?;
-            Ok(0)
-        }
-        RootPageTableRequest::FetchDeepClone => {
-            let dst = CapPtr(invocation.arg(1)? as u64);
-            let clone = KernelObjectRef::new(PageTableObject(pt.0.deep_clone_direct()?))?;
-            clone.copy_kernel_range_from(&*pt);
-            current.capabilities.get().entry_endpoint(dst, |endpoint| {
-                endpoint.object = CapabilityEndpointObject::RootPageTable(clone);
-            })?;
             Ok(0)
         }
         RootPageTableRequest::PutPage => {
@@ -651,6 +645,7 @@ enum IpcRequest {
     IsReply = 3,
     SetTag = 4,
     GetTag = 5,
+    Ping = 6,
 }
 
 fn invoke_cap_task_endpoint(
@@ -713,6 +708,7 @@ fn invoke_cap_task_endpoint(
             let tag = task.get_tag(current.id)?;
             Ok(tag as _)
         }
+        IpcRequest::Ping => Ok(0),
     }
 }
 
@@ -724,7 +720,6 @@ enum CapSetRequest {
     DropCap = 2,
     FetchCap = 3,
     PutCap = 4,
-    FetchDeepClone = 5,
     MoveCap = 6,
     GetCapType = 7,
     FetchCapMove = 8,
@@ -788,14 +783,6 @@ fn invoke_cap_capability_set(
                 .entry_endpoint(src, |endpoint| endpoint.object.try_clone())??;
             set.entry_endpoint(dst, |endpoint| {
                 endpoint.object = cap;
-            })?;
-            Ok(0)
-        }
-        CapSetRequest::FetchDeepClone => {
-            let dst = CapPtr(invocation.arg(1)? as u64);
-            let clone = KernelObjectRef::new(CapabilitySet(set.0.try_deep_clone()?))?;
-            current.capabilities.get().entry_endpoint(dst, |endpoint| {
-                endpoint.object = CapabilityEndpointObject::CapabilitySet(clone);
             })?;
             Ok(0)
         }
