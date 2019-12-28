@@ -6,6 +6,7 @@ use core::cell::UnsafeCell;
 use core::mem::ManuallyDrop;
 use core::ops::Deref;
 use core::ptr::NonNull;
+use core::convert::TryFrom;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 #[repr(transparent)]
@@ -30,7 +31,7 @@ impl<T: Send + Sync + 'static> AtomicKernelObjectRef<T> {
                 &*(*(self.inner.get() as *mut AtomicPtr<KernelObject<T>>)).load(Ordering::SeqCst)
             },
         };
-        obj.inner.inc_ref();
+        obj.inner.inc_ref_strong();
         obj
     }
 
@@ -55,10 +56,16 @@ pub struct KernelObjectRef<T: Send + Sync + 'static> {
     inner: &'static KernelObject<T>,
 }
 
+#[repr(transparent)]
+pub struct WeakKernelObjectRef<T: Send + Sync + 'static> {
+    inner: &'static KernelObject<T>,
+}
+
 impl<T: Send + Sync + 'static> KernelObjectRef<T> {
     pub fn new(inner: T) -> KernelResult<Self> {
         let kobj = KernelPageRef::new(KernelObject {
-            refcount: AtomicU64::new(1),
+            total: AtomicU64::new(1),
+            strong: AtomicU64::new(1),
             value: ManuallyDrop::new(UnsafeCell::new(inner)),
         })?;
         let ptr = KernelPageRef::into_raw(kobj);
@@ -87,7 +94,7 @@ impl<T: Send + Sync + 'static> KernelObjectRef<T> {
 impl<T: Send + Sync + 'static> Clone for KernelObjectRef<T> {
     #[inline]
     fn clone(&self) -> Self {
-        self.inner.inc_ref();
+        self.inner.inc_ref_strong();
         KernelObjectRef { inner: self.inner }
     }
 }
@@ -96,7 +103,7 @@ impl<T: Send + Sync + 'static> Drop for KernelObjectRef<T> {
     #[inline]
     fn drop(&mut self) {
         unsafe {
-            self.inner.dec_ref();
+            self.inner.dec_ref_strong();
         }
     }
 }
@@ -110,12 +117,62 @@ impl<T: Send + Sync + 'static> Deref for KernelObjectRef<T> {
     }
 }
 
+impl<T: Send + Sync + 'static> Clone for WeakKernelObjectRef<T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        self.inner.inc_ref_weak();
+        WeakKernelObjectRef { inner: self.inner }
+    }
+}
+
+impl<T: Send + Sync + 'static> Drop for WeakKernelObjectRef<T> {
+    fn drop(&mut self) {
+        unsafe {
+            self.inner.dec_ref_weak();
+        }
+    }
+}
+
+impl<T: Send + Sync + 'static> From<KernelObjectRef<T>> for WeakKernelObjectRef<T> {
+    fn from(that: KernelObjectRef<T>) -> Self {
+        let inner = that.inner;
+        unsafe {
+            inner.strong_to_weak();
+        }
+        core::mem::forget(that);
+
+        WeakKernelObjectRef {
+            inner,
+        }
+    }
+}
+
+impl<T: Send + Sync + 'static> TryFrom<WeakKernelObjectRef<T>> for KernelObjectRef<T> {
+    type Error = KernelError;
+
+    fn try_from(that: WeakKernelObjectRef<T>) -> KernelResult<Self> {
+        let inner = that.inner;
+        unsafe {
+            inner.weak_to_strong()?;
+        }
+        core::mem::forget(that);
+
+        Ok(KernelObjectRef {
+            inner: inner,
+        })
+    }
+}
+
 /// A kernel object.
-///
-/// `value` must be the first element.
 #[repr(C, align(4096))]
 pub struct KernelObject<T: Send + Sync + 'static> {
-    refcount: AtomicU64,
+    /// Total reference count.
+    total: AtomicU64,
+
+    /// Strong reference count.
+    strong: AtomicU64,
+
+    /// Inner value.
     value: ManuallyDrop<UnsafeCell<T>>,
 }
 
@@ -125,6 +182,7 @@ unsafe impl<T: Send + Sync + 'static> Send for KernelObject<T> {}
 /// For all immutable self references, `value` is only used immutably.
 unsafe impl<T: Send + Sync + 'static> Sync for KernelObject<T> {}
 
+// TODO: Review atomic orderings.
 impl<T: Send + Sync + 'static> KernelObject<T> {
     /// Dereferences into the inner value.
     /// Only immutable dereferencing is allowed.
@@ -133,24 +191,66 @@ impl<T: Send + Sync + 'static> KernelObject<T> {
         unsafe { &*(self.value.get()) }
     }
 
-    /// Drop.
-    unsafe fn do_drop(&self) {
-        core::ptr::drop_in_place(&mut *self.value.get());
-        KernelPageRef::from_raw(NonNull::from(self));
+    #[inline]
+    fn inc_ref_strong(&self) {
+        self.inc_ref_weak();
+
+        // Refcount can never go up from 0.
+        assert!(self.strong.fetch_add(1, Ordering::Acquire) > 0);
     }
 
     #[inline]
-    fn inc_ref(&self) {
-        self.refcount.fetch_add(1, Ordering::SeqCst);
+    fn inc_ref_weak(&self) {
+        // Refcount can never go up from 0.
+        assert!(self.total.fetch_add(1, Ordering::Acquire) > 0);
     }
 
     #[inline]
-    unsafe fn dec_ref(&self) {
-        let old_count = self.refcount.fetch_sub(1, Ordering::SeqCst);
+    unsafe fn dec_ref_strong(&self) {
+        // Decrement `strong` refcount.
+        self.strong_to_weak();
+
+        // Decrement `total` refcount.
+        self.dec_ref_weak();
+    }
+
+    #[inline]
+    unsafe fn dec_ref_weak(&self) {
+        let old_count = self.total.fetch_sub(1, Ordering::Release);
         if old_count == 1 {
-            self.do_drop();
+            // Release the backing memory.
+            KernelPageRef::from_raw(NonNull::from(self));
         } else if old_count == 0 {
-            panic!("dec_ref(): refcount underflow");
+            panic!("dec_ref_weak(): refcount underflow");
+        }
+    }
+
+    #[inline]
+    unsafe fn weak_to_strong(&self) -> KernelResult<()> {
+        // Reference counts cannot go up again once reached zero.
+        // So here we need a CAS loop.
+        loop {
+            let refcount = self.strong.load(Ordering::Relaxed);
+            if refcount == 0 {
+                return Err(KernelError::InvalidReference);
+            }
+
+            // FIXME: Is Acquire correct here?
+            if self.strong.compare_exchange(refcount, refcount + 1, Ordering::Acquire, Ordering::Acquire).is_err() {
+                continue;
+            }
+            return Ok(());
+        }
+    }
+
+    #[inline]
+    unsafe fn strong_to_weak(&self) {
+        let old_count = self.strong.fetch_sub(1, Ordering::Release);
+        if old_count == 1 {
+            // Drop the inner value.
+            core::ptr::drop_in_place(&mut *self.value.get());
+        } else if old_count == 0 {
+            panic!("strong_to_weak(): refcount underflow");
         }
     }
 }
