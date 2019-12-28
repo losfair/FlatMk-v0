@@ -316,7 +316,7 @@ fn invoke_cap_basic_task(
                         })
                     };
                     endpoint.object = CapabilityEndpointObject::TaskEndpoint(TaskEndpoint {
-                        task: task.clone(),
+                        task: WeakKernelObjectRef::from(task),
                         entry,
                         flags,
                     });
@@ -401,8 +401,10 @@ fn invoke_cap_basic_task(
             let cap = core::mem::replace(&mut current.ipc_caps.lock()[0], Default::default());
             if let CapabilityEndpointObject::TaskEndpoint(endpoint) = cap.object {
                 drop(current);
+                let task = KernelObjectRef::try_from(endpoint.task.clone())?;
                 let (_, e) = Task::invoke_ipc(
                     endpoint,
+                    task,
                     IpcReason::CapInvoke,
                     &invocation.registers,
                 );
@@ -626,11 +628,13 @@ fn invoke_cap_task_endpoint(
     endpoint: TaskEndpoint,
 ) -> KernelResult<i64> {
     let req = IpcRequest::try_from(invocation.arg(0)? as u32)?;
+    let task = KernelObjectRef::try_from(endpoint.task.clone())?;
 
     match req {
         IpcRequest::SwitchTo => {
             let (_, e) = Task::invoke_ipc(
                 endpoint,
+                task,
                 IpcReason::CapInvoke,
                 &invocation.registers,
             );
@@ -671,12 +675,12 @@ fn invoke_cap_task_endpoint(
                 }
             let current = Task::current();
             let tag = invocation.arg(1)? as u64;
-            endpoint.task.set_tag(current.id, tag)?;
+            task.set_tag(current.id, tag)?;
             Ok(0)
         }
         IpcRequest::GetTag => {
             let current = Task::current();
-            let tag = endpoint.task.get_tag(current.id)?;
+            let tag = task.get_tag(current.id)?;
             Ok(tag as _)
         }
     }
