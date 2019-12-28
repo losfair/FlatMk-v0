@@ -1,0 +1,165 @@
+[enums.BasicTaskRequest]
+description = "A request to a BasicTask/BasicTaskWeak endpoint."
+
+[enums.BasicTaskRequest.variants]
+Ping = 0
+FetchShallowClone = 1
+FetchCapSet = 2
+FetchRootPageTable = 3
+GetRegister = 4
+SetRegister = 5
+FetchTaskEndpoint = 6
+FetchIpcCap = 7
+PutIpcCap = 8
+PutCapSet = 9
+MakeCapSet = 10
+MakeRootPageTable = 11
+PutRootPageTable = 12
+IpcReturn = 13
+FetchWeak = 14
+HasWeak = 15
+
+[enums.RootTaskCapRequest]
+description = "A request to the root capability."
+
+[enums.RootTaskCapRequest.variants]
+X86IoPort = 0
+Mmio = 1
+MakeIdle = 2
+Interrupt = 3
+
+[enums.RootPageTableRequest]
+description = "A request to a root page table."
+
+[enums.RootPageTableRequest.variants]
+MakeLeaf = 0
+AllocLeaf = 1
+PutPage = 2
+FetchPage = 3
+DropPage = 4
+SetProtection = 5
+
+[enums.IpcRequest]
+description = "A request to an IPC endpoint for another task."
+
+[enums.IpcRequest.variants]
+SwitchTo = 0
+IsCapTransfer = 1
+IsTaggable = 2
+IsReply = 3
+SetTag = 4
+GetTag = 5
+Ping = 6
+
+[enums.CapSetRequest]
+description = "A request to a capability set."
+
+[enums.CapSetRequest.variants]
+MakeLeafSet = 0
+CloneCap = 1
+DropCap = 2
+FetchCap = 3
+PutCap = 4
+MoveCap = 6
+GetCapType = 7
+FetchCapMove = 8
+PutCapMove = 9
+
+[enums.CapType]
+description = "The type of a capability endpoint."
+
+[enums.CapType.variants]
+Other = 0
+TaskEndpoint = 1
+RootPageTable = 2
+
+[enums.InterruptRequest]
+description = "A request to an interrupt endpoint."
+
+[enums.InterruptRequest.variants]
+Bind = 0
+Unbind = 1
+
+[bitflags.UserPteFlags]
+description = "Flags for a user page table entry."
+
+[bitflags.UserPteFlags.bits]
+Writable = 0
+Executable = 1
+
+[types.RootPageTable]
+description = "Capability to a root page table."
+into = []
+base_enum = "RootPageTableRequest"
+
+[types.RootPageTable.methods.make_leaf]
+description = "Creates a leaf entry in this root page table, without allocating page for it."
+in_args = [
+    { name = "vaddr", kind = "U64" },
+]
+out_args = [
+    { EnumVariant = "MakeLeaf" },
+    { Input = "vaddr" },
+]
+
+[types.RootPageTable.methods.alloc_leaf]
+description = "Alllocates a page at a leaf entry in this root page table."
+in_args = [
+    { name = "vaddr", kind = "U64" },
+    { name = "prot", kind = { BitflagSet = "UserPteFlags" } },
+]
+out_args = [
+    { EnumVariant = "AllocLeaf" },
+    { Input = "vaddr" },
+    { Input = "prot" },
+]
+
+[types.RootPageTable.methods.put_page]
+description = "Clones reference to a page in the current task's page table to this page table."
+in_args = [
+    { name = "src", kind = "U64" },
+    { name = "dst", kind = "U64" },
+    { name = "prot", kind = { BitflagSet = "UserPteFlags"} },
+]
+out_args = [
+    { EnumVariant = "PutPage" },
+    { Input = "src" },
+    { Input = "dst" },
+    { Input = "prot" },
+]
+
+[types.RootPageTable.methods.fetch_page]
+description = "Clones reference to a page in this page table to the current task's page table."
+in_args = [
+    { name = "src", kind = "U64" },
+    { name = "dst", kind = "U64" },
+    { name = "prot", kind = { BitflagSet = "UserPteFlags"} },
+]
+out_args = [
+    { EnumVariant = "FetchPage" },
+    { Input = "src" },
+    { Input = "dst" },
+    { Input = "prot" },
+]
+
+[types.RootPageTable.methods.drop_page]
+description = "Drops a page."
+in_args = [
+    { name = "target", kind = "U64" },
+]
+out_args = [
+    { EnumVariant = "DropPage" },
+    { Input = "target" },
+]
+
+[types.RootPageTable.methods.set_protection]
+description = "Sets protection flags for a page table entry."
+in_args = [
+    { name = "target", kind = "U64" },
+    { name = "prot", kind = { BitflagSet = "UserPteFlags"} },
+]
+out_args = [
+    { EnumVariant = "SetProtection" },
+    { Input = "target" },
+    { Input = "prot" },
+]

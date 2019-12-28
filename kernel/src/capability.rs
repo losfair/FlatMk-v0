@@ -10,8 +10,8 @@ use core::convert::TryFrom;
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
-use num_enum::TryFromPrimitive;
 use bit_field::BitField;
+use crate::spec::*;
 
 pub const N_ENDPOINT_SLOTS: usize = 32;
 pub const INVALID_CAP: u64 = core::u64::MAX;
@@ -226,43 +226,13 @@ impl CapabilityEndpointObject {
     }
 }
 
-/// Type of a request to `BasicTask`.
-///
-/// Variants prefixed with `Fetch` uses resources in the associated task to create a new
-/// capability in the current task's capability space.
-///
-/// Variants prefixed with `Put` uses resources in the current task to create a new capability
-/// in the associated task's capability space.
-///
-/// Other variants only use and generate resources in the associated task.
-#[repr(u32)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
-enum BasicTaskRequest {
-    Ping = 0,
-    FetchShallowClone = 1,
-    FetchCapSet = 2,
-    FetchRootPageTable = 3,
-    GetRegister = 4,
-    SetRegister = 5,
-    FetchTaskEndpoint = 7,
-    FetchIpcCap = 8,
-    PutIpcCap = 9,
-    PutCapSet = 10,
-    MakeCapSet = 12,
-    MakeRootPageTable = 13,
-    PutRootPageTable = 14,
-    IpcReturn = 15,
-    FetchWeak = 16,
-    HasWeak = 17,
-}
-
 fn invoke_cap_basic_task(
     invocation: &mut CapabilityInvocation,
     task: KernelObjectRef<Task>,
 ) -> KernelResult<i64> {
     let current = Task::current();
 
-    let req = BasicTaskRequest::try_from(invocation.arg(0)? as u32)?;
+    let req = BasicTaskRequest::try_from(invocation.arg(0)? as i64)?;
     match req {
         BasicTaskRequest::Ping => {
             // For weak task references, just detect whether it is still alive.
@@ -450,19 +420,10 @@ fn invoke_cap_basic_task(
     }
 }
 
-#[repr(u32)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
-enum RootTaskCapRequest {
-    X86IoPort = 0,
-    Mmio = 1,
-    MakeIdle = 2,
-    Interrupt = 3,
-}
-
 fn invoke_cap_root_task(invocation: &CapabilityInvocation) -> KernelResult<i64> {
     let current = Task::current();
 
-    let requested_cap = RootTaskCapRequest::try_from(invocation.arg(0)? as u32)?;
+    let requested_cap = RootTaskCapRequest::try_from(invocation.arg(0)? as i64)?;
     match requested_cap {
         RootTaskCapRequest::X86IoPort => {
             let cptr = CapPtr(invocation.arg(1)? as u64);
@@ -547,23 +508,11 @@ fn invoke_cap_x86_io_port(invocation: &CapabilityInvocation, port: u16) -> Kerne
     }
 }
 
-#[repr(u32)]
-#[allow(non_camel_case_types)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
-enum RootPageTableRequest {
-    MakeLeaf = 0,
-    AllocLeaf = 1,
-    PutPage = 3,
-    FetchPage = 4,
-    DropPage = 5,
-    SetProtection = 6,
-}
-
 fn invoke_cap_root_page_table(
     invocation: &CapabilityInvocation,
     pt: KernelObjectRef<PageTableObject>,
 ) -> KernelResult<i64> {
-    let req = RootPageTableRequest::try_from(invocation.arg(0)? as u32)?;
+    let req = RootPageTableRequest::try_from(invocation.arg(0)? as i64)?;
     let current = Task::current();
 
     match req {
@@ -635,24 +584,11 @@ fn invoke_cap_mmio(invocation: &CapabilityInvocation, mmio: CapMmio) -> KernelRe
     Ok(0)
 }
 
-#[repr(u32)]
-#[allow(non_camel_case_types)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
-enum IpcRequest {
-    SwitchTo = 0,
-    IsCapTransfer = 1,
-    IsTaggable = 2,
-    IsReply = 3,
-    SetTag = 4,
-    GetTag = 5,
-    Ping = 6,
-}
-
 fn invoke_cap_task_endpoint(
     invocation: &mut CapabilityInvocation,
     endpoint: TaskEndpoint,
 ) -> KernelResult<i64> {
-    let req = IpcRequest::try_from(invocation.arg(0)? as u32)?;
+    let req = IpcRequest::try_from(invocation.arg(0)? as i64)?;
     let task = KernelObjectRef::try_from(endpoint.task.clone())?;
 
     match req {
@@ -712,33 +648,11 @@ fn invoke_cap_task_endpoint(
     }
 }
 
-#[repr(u32)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
-enum CapSetRequest {
-    MakeLeafSet = 0,
-    CloneCap = 1,
-    DropCap = 2,
-    FetchCap = 3,
-    PutCap = 4,
-    MoveCap = 6,
-    GetCapType = 7,
-    FetchCapMove = 8,
-    PutCapMove = 9,
-}
-
-#[repr(u32)]
-#[derive(Debug, Copy, Clone)]
-enum CapType {
-    Other = 0,
-    TaskEndpoint = 1,
-    RootPageTable = 2,
-}
-
 fn invoke_cap_capability_set(
     invocation: &mut CapabilityInvocation,
     set: KernelObjectRef<CapabilitySet>,
 ) -> KernelResult<i64> {
-    let req = CapSetRequest::try_from(invocation.arg(0)? as u32)?;
+    let req = CapSetRequest::try_from(invocation.arg(0)? as i64)?;
     let current = Task::current();
 
     match req {
@@ -828,15 +742,8 @@ fn invoke_cap_capability_set(
     }
 }
 
-#[repr(u32)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
-enum InterruptRequest {
-    Bind = 0,
-    Unbind = 1,
-}
-
 fn invoke_cap_interrupt(invocation: &mut CapabilityInvocation, index: u8) -> KernelResult<i64> {
-    let req = InterruptRequest::try_from(invocation.arg(0)? as u32)?;
+    let req = InterruptRequest::try_from(invocation.arg(0)? as i64)?;
 
     match req {
         InterruptRequest::Bind => {
