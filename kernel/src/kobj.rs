@@ -89,6 +89,14 @@ impl<T: Send + Sync + 'static> KernelObjectRef<T> {
     pub unsafe fn from_raw(raw: *const KernelObject<T>) -> KernelObjectRef<T> {
         KernelObjectRef { inner: &*raw }
     }
+
+    /// Returns whether or not there exists weak references to this object.
+    /// 
+    /// This is not accurate due to race conditions, and should not be relied on for correctness.
+    #[inline]
+    pub fn has_weak(me: &Self) -> bool {
+        me.inner.has_weak()
+    }
 }
 
 impl<T: Send + Sync + 'static> Clone for KernelObjectRef<T> {
@@ -252,5 +260,10 @@ impl<T: Send + Sync + 'static> KernelObject<T> {
         } else if old_count == 0 {
             panic!("strong_to_weak(): refcount underflow");
         }
+    }
+
+    #[inline]
+    fn has_weak(&self) -> bool {
+        self.strong.load(Ordering::Relaxed) < self.total.load(Ordering::Relaxed)
     }
 }

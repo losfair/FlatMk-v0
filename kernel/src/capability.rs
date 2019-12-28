@@ -128,6 +128,7 @@ impl Default for CapabilityEndpoint {
 pub enum CapabilityEndpointObject {
     Empty,
     BasicTask(KernelObjectRef<Task>),
+    BasicTaskWeak(WeakKernelObjectRef<Task>),
     RootTask,
     X86IoPort(u16),
     Mmio(CapMmio),
@@ -200,6 +201,10 @@ impl CapabilityEndpointObject {
         match self {
             CapabilityEndpointObject::Empty => Err(KernelError::EmptyCapability),
             CapabilityEndpointObject::BasicTask(task) => invoke_cap_basic_task(invocation, task),
+            CapabilityEndpointObject::BasicTaskWeak(task) => {
+                let task = KernelObjectRef::try_from(task)?;
+                invoke_cap_basic_task(invocation, task)
+            },
             CapabilityEndpointObject::RootTask => invoke_cap_root_task(invocation),
             CapabilityEndpointObject::X86IoPort(index) => invoke_cap_x86_io_port(invocation, index),
             CapabilityEndpointObject::Mmio(mmio) => invoke_cap_mmio(invocation, mmio),
@@ -229,6 +234,7 @@ impl CapabilityEndpointObject {
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, TryFromPrimitive)]
 enum BasicTaskRequest {
+    Ping = 0,
     FetchShallowClone = 1,
     FetchCapSet = 2,
     FetchRootPageTable = 3,
@@ -242,6 +248,8 @@ enum BasicTaskRequest {
     MakeRootPageTable = 13,
     PutRootPageTable = 14,
     IpcReturn = 15,
+    FetchWeak = 16,
+    HasWeak = 17,
 }
 
 fn invoke_cap_basic_task(
@@ -252,6 +260,10 @@ fn invoke_cap_basic_task(
 
     let req = BasicTaskRequest::try_from(invocation.arg(0)? as u32)?;
     match req {
+        BasicTaskRequest::Ping => {
+            // For weak task references, just detect whether it is still alive.
+            Ok(0)
+        }
         BasicTaskRequest::FetchShallowClone => {
             let cptr = CapPtr(invocation.arg(1)? as u64);
             let clone = task.shallow_clone()?;
@@ -412,6 +424,24 @@ fn invoke_cap_basic_task(
             } else {
                 Err(KernelError::InvalidArgument)
             }
+        }
+        BasicTaskRequest::FetchWeak => {
+            let cptr = CapPtr(invocation.arg(1)? as u64);
+            let weak = WeakKernelObjectRef::from(task);
+            current
+                .capabilities
+                .get()
+                .entry_endpoint(cptr, |endpoint| {
+                    endpoint.object = CapabilityEndpointObject::BasicTaskWeak(weak);
+                })?;
+            Ok(0)
+        }
+        BasicTaskRequest::HasWeak => {
+            Ok(if KernelObjectRef::has_weak(&task) {
+                1
+            } else {
+                0
+            })
         }
     }
 }
