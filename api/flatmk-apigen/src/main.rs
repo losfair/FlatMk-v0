@@ -3,11 +3,11 @@
 #[macro_use]
 extern crate serde_derive;
 
-use std::fs::File;
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::io::{Read, Write};
-use structopt::StructOpt;
 use std::str::FromStr;
+use structopt::StructOpt;
 
 /// Generates FlatMk kernel API bindings from specification.
 #[derive(StructOpt, Debug)]
@@ -218,7 +218,8 @@ fn generate_enums(spec: &Spec, lang: TargetLanguage, out: &mut String) {
                 out.push_str(format!("pub enum {} {{\n", k).as_str());
             }
         }
-        let mut variants: Vec<(i64, String)> = v.variants.iter().map(|(k, v)| (*v, k.clone())).collect();
+        let mut variants: Vec<(i64, String)> =
+            v.variants.iter().map(|(k, v)| (*v, k.clone())).collect();
         variants.sort();
         for (index, key) in variants {
             match lang {
