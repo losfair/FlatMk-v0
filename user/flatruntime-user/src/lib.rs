@@ -85,5 +85,8 @@ unsafe extern "C" fn early_start() -> ! {
 
 #[alloc_error_handler]
 fn on_alloc_error(_: core::alloc::Layout) -> ! {
+    unsafe {
+        asm!("mov $$0xffff8000000a110c, %rax\nmov (%rax), %rax" :::: "volatile");
+    }
     loop {}
 }

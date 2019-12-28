@@ -53,6 +53,7 @@ pub struct Task {
 #[repr(u32)]
 #[derive(Debug, Copy, Clone)]
 enum BasicTaskRequest {
+    Ping = 0,
     FetchShallowClone = 1,
     FetchCapSet = 2,
     FetchRootPageTable = 3,
@@ -66,6 +67,8 @@ enum BasicTaskRequest {
     MakeRootPageTable = 13,
     PutRootPageTable = 14,
     IpcReturn = 15,
+    FetchWeak = 16,
+    HasWeak = 17,
 }
 
 bitflags! {
@@ -148,6 +151,16 @@ impl Task {
         }
     }
 
+    pub fn ping(&self) -> KernelResult<()> {
+        unsafe {
+            self.cap.call_result(
+                BasicTaskRequest::Ping as u32 as i64,
+                0, 0, 0,
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn set_register(&self, index: u32, value: u64) -> KernelResult<()> {
         unsafe {
             self.cap.call_result(
@@ -188,6 +201,33 @@ impl Task {
             .map(|_| ())
         })?;
         Ok(Task { cap: cptr })
+    }
+
+    pub fn fetch_weak(&self) -> KernelResult<Task> {
+        let (cptr, _) = allocate_cptr(|cptr| {
+            unsafe {
+                self.cap.call_result(
+                    BasicTaskRequest::FetchWeak as u32 as i64,
+                    cptr.index() as i64,
+                    0,
+                    0,
+                )
+            }
+            .map(|_| ())
+        })?;
+        Ok(Task { cap: cptr })
+    }
+
+    pub fn has_weak(&self) -> KernelResult<bool> {
+        unsafe {
+            self.cap.call_result(
+                BasicTaskRequest::HasWeak as u32 as i64,
+                0,
+                0,
+                0,
+            )
+        }
+        .map(|x| x == 1)
     }
 
     pub fn fetch_ipc_cap(&self, index: u8) -> KernelResult<CPtr> {

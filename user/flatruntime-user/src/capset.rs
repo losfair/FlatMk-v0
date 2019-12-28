@@ -14,7 +14,6 @@ enum CapSetRequest {
     DropCap = 2,
     FetchCap = 3,
     PutCap = 4,
-    FetchDeepClone = 5,
     MoveCap = 6,
     GetCapType = 7,
     FetchCapMove = 8,
@@ -40,21 +39,6 @@ impl CapSet {
 
     pub fn into_cptr(self) -> CPtr {
         self.cap
-    }
-
-    pub fn deep_clone(&self) -> KernelResult<CapSet> {
-        let (cptr, _) = allocate_cptr(|cptr| {
-            unsafe {
-                self.cap.call_result(
-                    CapSetRequest::FetchDeepClone as u32 as i64,
-                    cptr.index() as i64,
-                    0,
-                    0,
-                )?;
-            }
-            Ok(())
-        })?;
-        Ok(unsafe { CapSet::new(cptr) })
     }
 
     pub fn make_leaf(&self, ptr: u64) -> KernelResult<()> {

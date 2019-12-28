@@ -26,18 +26,11 @@ static THREAD_CAP_TOP: AtomicU64 = AtomicU64::new(0x301000);
 pub struct ThreadStack(pub [u8; 65536]);
 
 pub struct Thread {
-    task: Box<Task>,
+    task: ManuallyDrop<Box<Task>>,
     tls_indirect: ManuallyDrop<Box<LowlevelTls>>,
 }
 
-impl Drop for Thread {
-    fn drop(&mut self) {
-        release_thread_cap_base(self.tls_indirect.inner.current_cap_base);
-        unsafe {
-            ManuallyDrop::drop(&mut self.tls_indirect);
-        }
-    }
-}
+unsafe impl Send for Thread {}
 
 #[repr(C)]
 pub struct Tls {
@@ -60,12 +53,12 @@ fn map_tl_cap_range(task: &Task, base: u64) {
 impl Thread {
     pub fn new() -> Thread {
         let cap_base = allocate_thread_cap_base();
-        let task = Box::new(this_task().shallow_clone().unwrap());
+        let task = ManuallyDrop::new(Box::new(this_task().shallow_clone().unwrap()));
         let mut stack: Box<ThreadStack> = unsafe { Box::new_uninit().assume_init() };
         let stack_end = unsafe { (&mut *stack as *mut ThreadStack).offset(1) };
         let tls_indirect = ManuallyDrop::new(Box::new(LowlevelTls {
             inner: Box::new(Tls {
-                current_task: &*task as *const Task,
+                current_task: &**task as *const Task,
                 current_cap_base: cap_base,
             }),
             stack_end,
@@ -76,6 +69,24 @@ impl Thread {
         map_tl_cap_range(&*task, cap_base);
         Thread { task, tls_indirect }
     }
+
+    /// Releases local memory resources for this task.
+    /// 
+    /// This is unsafe as calling this more than once will cause double free, and
+    /// calling this before ensuring that the backing task is actually dropped will cause
+    /// invalid memory access in the backing task.
+    pub unsafe fn release_memory(&mut self) {
+        release_thread_cap_base(self.tls_indirect.inner.current_cap_base);
+        ManuallyDrop::drop(&mut self.tls_indirect);
+    }
+
+    /// Drops the backing task object.
+    /// 
+    /// This is unsafe as calling this more than once will cause double free.
+    pub unsafe fn release_task(&mut self) {
+        ManuallyDrop::drop(&mut self.task);
+    }
+
     pub unsafe fn task_endpoint(&self, pc: u64, context: u64) -> TaskEndpoint {
         self
             .task
@@ -83,7 +94,7 @@ impl Thread {
             .expect("fetch_task_endpoint failed")
     }
     pub unsafe fn task(&self) -> &Task {
-        &*self.task
+        &**self.task
     }
 }
 

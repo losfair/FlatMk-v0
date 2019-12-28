@@ -123,7 +123,7 @@ pub fn create_process(image: &[u8], caps: &[(u64, &CPtr)], moving: Vec<(u64, CPt
     // Initialize capability set.
     let new_capset = this_task().make_capset()?;
     new_capset.make_leaf(0)?;
-    new_capset.put_cap(task.cptr(), 0)?;
+    new_capset.put_cap(task.fetch_weak().unwrap().cptr(), 0)?;
     for &(p, cptr) in caps {
         // TODO: Allow caps to reside outside of the first endpoint set?
         new_capset.put_cap(cptr, p)?;
@@ -143,11 +143,11 @@ pub fn create_process(image: &[u8], caps: &[(u64, &CPtr)], moving: Vec<(u64, CPt
     Ok((task, entry_pc))
 }
 
-pub fn create_and_initialize_early_process(image: &[u8], caps: &[(u64, &CPtr)], moving: Vec<(u64, CPtr)>) -> KernelResult<()> {
+pub fn create_and_initialize_early_process(image: &[u8], caps: &[(u64, &CPtr)], moving: Vec<(u64, CPtr)>) -> KernelResult<Task> {
     let (task, entry_pc) = create_process(image, caps, moving)?;
     let endpoint = task.fetch_task_endpoint(entry_pc, 0, TaskEndpointFlags::CAP_TRANSFER, false)?;
     endpoint.call(&mut FastIpcPayload::default())?;
-    Ok(())
+    Ok(task)
 }
 
 pub fn create_and_prepare_normal_process(image: &[u8], caps: &[(u64, &CPtr)], moving: Vec<(u64, CPtr)>) -> KernelResult<(Task, TaskEndpoint)> {

@@ -20,7 +20,6 @@ bitflags! {
 enum RootPageTableRequest {
     MakeLeaf = 0,
     AllocLeaf = 1,
-    FetchDeepClone = 2,
     PutPage = 3,
     FetchPage = 4,
     DropPage = 5,
@@ -46,21 +45,6 @@ impl RootPageTable {
 
     pub fn into_cptr(self) -> CPtr {
         self.cap
-    }
-
-    pub fn deep_clone(&self) -> KernelResult<RootPageTable> {
-        let (cptr, _) = allocate_cptr(|cptr| {
-            unsafe {
-                self.cap.call_result(
-                    RootPageTableRequest::FetchDeepClone as u32 as i64,
-                    cptr.index() as i64,
-                    0,
-                    0,
-                )?;
-            }
-            Ok(())
-        })?;
-        Ok(unsafe { RootPageTable::new(cptr) })
     }
 
     pub fn make_leaf(&self, vaddr: u64) -> KernelResult<()> {

@@ -16,6 +16,8 @@ pub enum KernelError {
     EmptyObject = -5,
     /// An empty capability is invoked.
     EmptyCapability = -7,
+    /// The object referred to by a weak reference is no longer valid.
+    InvalidReference = -8,
     /// No available memory.
     OutOfMemory = -9,
 }

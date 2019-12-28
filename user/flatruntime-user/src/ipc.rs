@@ -53,6 +53,7 @@ pub enum IpcRequest {
     IsReply = 3,
     SetTag = 4,
     GetTag = 5,
+    Ping = 6,
 }
 
 pub struct TaskEndpoint {
@@ -108,6 +109,12 @@ impl TaskEndpoint {
     pub fn get_tag(&self) -> KernelResult<u64> {
         unsafe {
             self.cap.call_result(IpcRequest::GetTag as u32 as i64, 0, 0, 0).map(|x| x as u64)
+        }
+    }
+
+    pub fn ping(&self) -> KernelResult<()> {
+        unsafe {
+            self.cap.call_result(IpcRequest::Ping as u32 as i64, 0, 0, 0).map(|x| ())
         }
     }
 }
