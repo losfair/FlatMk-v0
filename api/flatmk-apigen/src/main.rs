@@ -199,7 +199,7 @@ impl ArgumentKind {
                     out.push_str("CPtr");
                 }
                 ArgumentKind::TypeRef(ref ty) => {
-                    out.push_str(ty.as_str());
+                    out.push_str(format!("struct {}", ty).as_str());
                 }
                 ArgumentKind::BitflagSet(_) => {
                     out.push_str("uint64_t");
@@ -501,6 +501,32 @@ fn generate_types(spec: &Spec, lang: TargetLanguage, out: &mut String) {
 
     for (type_name, type_def) in &spec.types {
         match lang {
+            TargetLanguage::C => {
+                if let Some(ref desc) = type_def.description {
+                    lang.format_multiline_comment(desc.as_str(), 0, out);
+                }
+                out.push_str(
+                    format!(
+                        r#"struct {} {{
+    CPtr cap;
+}};
+
+struct {} {}_new(CPtr cap) {{
+    struct {} result = {{ .cap = cap }};
+    return result;
+}}
+"#,
+                        type_name, type_name, type_name, type_name
+                    )
+                    .as_str(),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    for (type_name, type_def) in &spec.types {
+        match lang {
             TargetLanguage::Rust => {
                 if let Some(ref desc) = type_def.description {
                     lang.format_multiline_comment(desc.as_str(), 0, out);
@@ -535,24 +561,7 @@ impl {} {{
                 );
             }
             TargetLanguage::C => {
-                if let Some(ref desc) = type_def.description {
-                    lang.format_multiline_comment(desc.as_str(), 0, out);
-                }
-                out.push_str(
-                    format!(
-                        r#"struct {} {{
-    CPtr cap;
-}};
-
-struct {} {}_new(CPtr cap) {{
-    struct {} result = {{ .cap = cap }};
-    return result;
-}}
-"#,
-                        type_name, type_name, type_name, type_name
-                    )
-                    .as_str(),
-                );
+                // Definition generated in the previous loop.
             }
             TargetLanguage::Markdown => {
                 out.push_str(format!("### {}\n\n", type_name).as_str());
@@ -574,9 +583,12 @@ struct {} {}_new(CPtr cap) {{
                     );
 
                     for arg in &method.in_args {
+                        // Rust does not support per-argument documentation.
+                        /*
                         if let Some(ref desc) = arg.description {
                             lang.format_multiline_comment(desc.as_str(), 2, out);
                         }
+                        */
                         out.push_str(format!("\t\t{}: ", arg.name).as_str());
                         arg.kind.fmt_write(lang, out);
                         out.push_str(",\n");
