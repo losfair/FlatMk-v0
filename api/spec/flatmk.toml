@@ -9,18 +9,17 @@ Ping = 0
 FetchShallowClone = 1
 FetchCapSet = 2
 FetchRootPageTable = 3
-GetRegister = 4
-SetRegister = 5
-FetchTaskEndpoint = 6
-FetchIpcCap = 7
-PutIpcCap = 8
-PutCapSet = 9
+FetchWeak = 4
+FetchTaskEndpoint = 5
+FetchIpcCap = 6
+PutIpcCap = 7
+PutCapSet = 8
+PutRootPageTable = 9
 MakeCapSet = 10
 MakeRootPageTable = 11
-PutRootPageTable = 12
-IpcReturn = 13
-FetchWeak = 14
-HasWeak = 15
+SetRegister = 12
+HasWeak = 13
+IpcReturn = 14
 
 [enums.RootTaskCapRequest]
 description = "A request to the root capability."
@@ -83,6 +82,13 @@ description = "A request to an interrupt endpoint."
 Bind = 0
 Unbind = 1
 
+[enums.X86IoPortRequest]
+description = "A request to an X86 I/O port."
+
+[enums.X86IoPortRequest.variants]
+Read = 0
+Write = 1
+
 [bitflags.UserPteFlags]
 description = "Flags for a user page table entry."
 
@@ -104,7 +110,7 @@ out_args = [
 ]
 
 [types.RootPageTable.methods.alloc_leaf]
-description = "Alllocates a page at a leaf entry in this root page table."
+description = "Allocates a page at a leaf entry in this root page table."
 in_args = [
     { name = "vaddr", kind = "U64" },
     { name = "prot", kind = { BitflagSet = "UserPteFlags" } },
@@ -163,4 +169,427 @@ out_args = [
     { EnumVariant = { enum_name = "RootPageTableRequest", variant = "SetProtection" }},
     { Input = "target" },
     { Input = "prot" },
+]
+
+[types.Mmio]
+description = "Memory-mapped I/O on one memory page."
+
+[types.Mmio.methods.alloc_at]
+description = "Map the backing physical page into this endpoint's associated page table."
+in_args = [
+    { name = "vaddr", kind = "U64", description = "The target virtual address." },
+    { name = "prot", kind = { BitflagSet = "UserPteFlags" }, description = "Protection flags." },
+]
+out_args = [
+    { Input = "vaddr" },
+    { Input = "prot" },
+]
+
+[types.BasicTask]
+description = "A strong or weak reference to a task."
+
+[types.BasicTask.methods.fetch_capset]
+description = "Fetch the capability set of this task into the current task's capability set."
+in_args = [
+    { name = "out", kind = "CPtrRef", description = "A capability pointer in the current task's capability set to write to." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "BasicTaskRequest", variant = "FetchCapSet" } },
+    { Input = "out" },
+]
+
+[types.BasicTask.methods.fetch_root_page_table]
+description = "Fetch the root page table of this task into the current task's capability set."
+in_args = [
+    { name = "out", kind = "CPtrRef", description = "A capability pointer in the current task's capability set to write to." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "BasicTaskRequest", variant = "FetchRootPageTable" } },
+    { Input = "out" },
+]
+
+[types.BasicTask.methods.call_invalid]
+description = "Invokes an invalid operation on this capability. Useful for benchmarking."
+in_args = []
+out_args = [
+    { Constant = -1 },
+]
+
+[types.BasicTask.methods.ping]
+description = "Detects whether the reference is still alive if it is a weak reference. Always return 0 for strong references."
+in_args = []
+out_args = [
+    { EnumVariant = { enum_name = "BasicTaskRequest", variant = "Ping" } },
+]
+
+[types.BasicTask.methods.set_register]
+description = "Sets a saved register of this task. Calling this method on a running task has undefined result."
+in_args = [
+    { name = "index", kind = "U64", description = "The DWARF index for the target register." },
+    { name = "value", kind = "U64", description = "The value to set the register to." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "BasicTaskRequest", variant = "SetRegister" } },
+    { Input = "index" },
+    { Input = "value" },
+]
+
+[types.BasicTask.methods.fetch_shallow_clone]
+description = """
+Makes a shallow clone for this task. The clone will always be a strong reference.
+
+The resulting task shares the same capability set and page table with this task, but has its own state flags and execution context.
+"""
+in_args = [
+    { name = "out", kind = "CPtrRef", description = "A capability pointer in the current task's capability set to write to." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "BasicTaskRequest", variant = "FetchShallowClone" } },
+    { Input = "out" },
+]
+
+[types.BasicTask.methods.fetch_weak]
+description = "Makes a weak reference for this task."
+in_args = [
+    { name = "out", kind = "CPtrRef", description = "A capability pointer in the current task's capability set to write to." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "BasicTaskRequest", variant = "FetchWeak" } },
+    { Input = "out" },
+]
+
+[types.BasicTask.methods.fetch_ipc_cap]
+description = "Fetches a capability from the IPC capability buffer of this task. The capability is moved instead of cloned."
+in_args = [
+    { name = "out", kind = "CPtrRef", description = "A capability pointer in the current task's capability set to write to." },
+    { name = "index", kind = "U64", description = "An index to the capability buffer." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "BasicTaskRequest", variant = "FetchIpcCap" } },
+    { Input = "out" },
+    { Input = "index" },
+]
+
+[types.BasicTask.methods.fetch_task_endpoint]
+description = """
+Fetches an IPC endpoint to this task.
+
+The first argument `mixed_arg1` is a mixed argument that contains several properties:
+
+- Bits 0 to 47 (inclusively) is a capability pointer in the current task's capability set to write to.
+- Bits 48 to 62 is a bitflag set of type `TaskEndpointFlags`.
+- Bit 63 indicates whether the new endpoint is a reply endpoint.
+"""
+in_args = [
+    { name = "mixed_arg1", kind = "U64", description = "The mixed argument." },
+    { name = "pc", kind = "U64", description = "Program Counter/Instruction Pointer value for the IPC entry." },
+    { name = "user_context", kind = "U64", description = "User context for the IPC entry." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "BasicTaskRequest", variant = "FetchTaskEndpoint" } },
+    { Input = "mixed_arg1" },
+    { Input = "pc" },
+    { Input = "user_context" },
+]
+
+[types.BasicTask.methods.put_ipc_cap]
+description = "Puts a capability into the IPC capability buffer of this task. The capability is moved instead of cloned."
+in_args = [
+    { name = "cptr", kind = "CPtrRef", description = "A capability pointer in the current task's capability set to read from." },
+    { name = "index", kind = "U64", description = "An index to the capability buffer." }
+]
+out_args = [
+    { EnumVariant = { enum_name = "BasicTaskRequest", variant = "PutIpcCap" } },
+    { Input = "cptr" },
+    { Input = "index" },
+]
+
+[types.BasicTask.methods.put_capset]
+description = "Puts an endpoint to a capability set in the current task's capability set into this task's capability set."
+in_args = [
+    { name = "cptr", kind = { TypeRef = "CapabilitySet" }, description = "A capability pointer in the current task's capability set to read from." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "BasicTaskRequest", variant = "PutCapSet" } },
+    { Input = "cptr" },
+]
+
+[types.BasicTask.methods.put_root_page_table]
+description = "Puts an endpoint to a root page table in the current task's capability set into this task's capability set."
+in_args = [
+    { name = "cptr", kind = { TypeRef = "RootPageTable" }, description = "A capability pointer in the current task's capability set to read from." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "BasicTaskRequest", variant = "PutRootPageTable" } },
+    { Input = "cptr" },
+]
+
+[types.BasicTask.methods.make_capset]
+description = "Makes a capability set and puts its endpoint in the current task's capability set. (FIXME: Maybe this shouldn't be in BasicTask?)"
+in_args = [
+    { name = "out", kind = "CPtrRef", description = "A capability pointer in the current task's capability set to write to." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "BasicTaskRequest", variant = "MakeCapSet" } },
+    { Input = "out" },
+]
+
+[types.BasicTask.methods.make_root_page_table]
+description = "Makes a root page table and puts its endpoint in the current task's capability set. (FIXME: Maybe this shouldn't be in BasicTask?)"
+in_args = [
+    { name = "out", kind = "CPtrRef", description = "A capability pointer in the current task's capability set to write to." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "BasicTaskRequest", variant = "MakeRootPageTable" } },
+    { Input = "out" },
+]
+
+[types.BasicTask.methods.ipc_return]
+description = "Fast path for returning from an IPC call, by automatically invoking the 0th entry in this task's IPC capability buffer."
+in_args = []
+out_args = [
+    { EnumVariant = { enum_name = "BasicTaskRequest", variant = "IpcReturn" } },
+]
+
+[types.BasicTask.methods.has_weak]
+description = "Returns whether there exists weak references to this task."
+in_args = []
+out_args = [
+    { EnumVariant = { enum_name = "BasicTaskRequest", variant = "HasWeak" } },
+]
+
+[types.Interrupt]
+description = "Capability to an interrupt."
+
+[types.Interrupt.methods.bind]
+description = "Bind the interrupt to a task."
+in_args = [
+    { name = "task", kind = { TypeRef = "TaskEndpoint" }, description = "The task to bind to." },
+    { name = "pc", kind = "U64", description = "Program Counter/Instruction Pointer value for the IPC entry." },
+    { name = "user_context", kind = "U64", description = "User context for the IPC entry." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "InterruptRequest", variant = "Bind" }},
+    { Input = "task" },
+    { Input = "pc" },
+    { Input = "user_context" },
+]
+
+[types.CapabilitySet]
+description = "A capability set."
+
+[types.CapabilitySet.methods.make_leaf]
+description = "Makes a leaf entry in this capability set, and initializes it with empty capabilities."
+in_args = [
+    { name = "cptr", kind = "CPtrRef", description = "The \"base\" capability pointer that points to the entry."},
+]
+out_args = [
+    { EnumVariant = { enum_name = "CapSetRequest", variant = "MakeLeafSet" } },
+    { Input = "cptr" },
+]
+
+[types.CapabilitySet.methods.clone_cap]
+description = "Clones a capability."
+in_args = [
+    { name = "src", kind = "CPtrRef", description = "Source capability pointer." },
+    { name = "dst", kind = "CPtrRef", description = "Destination capability pointer." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "CapSetRequest", variant = "CloneCap" } },
+    { Input = "src" },
+    { Input = "dst" },
+]
+
+[types.CapabilitySet.methods.drop_cap]
+description = "Drops a capability."
+in_args = [
+    { name = "cptr", kind = "CPtrRef", description = "The capability pointer that points to the target capability." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "CapSetRequest", variant = "DropCap" } },
+    { Input = "cptr" },
+]
+
+[types.CapabilitySet.methods.put_cap]
+description = "Puts a capability from the current task's capability set to this capability set."
+in_args = [
+    { name = "src", kind = "CPtrRef", description = "Source capability pointer." },
+    { name = "dst", kind = "CPtrRef", description = "Destination capability pointer." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "CapSetRequest", variant = "PutCap" } },
+    { Input = "src" },
+    { Input = "dst" },
+]
+
+[types.CapabilitySet.methods.put_cap_move]
+description = "Puts a capability from the current task's capability set to this capability set, with moving semantics."
+in_args = [
+    { name = "src", kind = "CPtrRef", description = "Source capability pointer." },
+    { name = "dst", kind = "CPtrRef", description = "Destination capability pointer." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "CapSetRequest", variant = "PutCapMove" } },
+    { Input = "src" },
+    { Input = "dst" },
+]
+
+[types.CapabilitySet.methods.fetch_cap]
+description = "Fetches a capability from this capability set to the current task's capability set."
+in_args = [
+    { name = "src", kind = "CPtrRef", description = "Source capability pointer." },
+    { name = "dst", kind = "CPtrRef", description = "Destination capability pointer." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "CapSetRequest", variant = "FetchCap" } },
+    { Input = "src" },
+    { Input = "dst" },
+]
+
+[types.CapabilitySet.methods.fetch_cap_move]
+description = "Fetches a capability from this capability set to the current task's capability set, with moving semantics."
+in_args = [
+    { name = "src", kind = "CPtrRef", description = "Source capability pointer." },
+    { name = "dst", kind = "CPtrRef", description = "Destination capability pointer." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "CapSetRequest", variant = "FetchCapMove" } },
+    { Input = "src" },
+    { Input = "dst" },
+]
+
+[types.CapabilitySet.methods.get_cap_type]
+description = "Returns the type of the capability. The return type is actually `CapType` but needs a conversion."
+in_args = [
+    { name = "cptr", kind = "CPtrRef", description = "The capability pointer that points to the target capability." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "CapSetRequest", variant = "GetCapType" } },
+    { Input = "cptr" },
+]
+
+[types.TaskEndpoint]
+description = "An IPC endpoint."
+
+[types.TaskEndpoint.methods.invoke]
+description = "Invokes the IPC endpoint."
+in_args = []
+out_args = [
+    { EnumVariant = { enum_name = "IpcRequest", variant = "SwitchTo" } },
+]
+
+[types.TaskEndpoint.methods.set_tag]
+description = "Sets a source-specific tag on the backing task of this IPC endpoint. Requires the `TAGGABLE` flag."
+in_args = [
+    { name = "tag", kind = "U64", description = "The value of the new tag." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "IpcRequest", variant = "SetTag" } },
+    { Input = "tag" },
+]
+
+[types.TaskEndpoint.methods.get_tag]
+description = "Gets a source-specific tag on the backing task of this IPC endpoint."
+in_args = []
+out_args = [
+    { EnumVariant = { enum_name = "IpcRequest", variant = "GetTag" } },
+]
+
+[types.TaskEndpoint.methods.ping]
+description = "Checks whether the backing task is still alive."
+in_args = []
+out_args = [
+    { EnumVariant = { enum_name = "IpcRequest", variant = "Ping" } },
+]
+
+[types.TaskEndpoint.methods.is_cap_transfer]
+description = "Checks whether this task endpoint has the `CAP_TRANSFER` flag set."
+in_args = []
+out_args = [
+    { EnumVariant = { enum_name = "IpcRequest", variant = "IsCapTransfer" } },
+]
+
+[types.TaskEndpoint.methods.is_taggable]
+description = "Checks whether this task endpoint has the `TAGGABLE` flag set."
+in_args = []
+out_args = [
+    { EnumVariant = { enum_name = "IpcRequest", variant = "IsTaggable" } },
+]
+
+[types.TaskEndpoint.methods.is_reply]
+description = "Checks whether this is a reply endpoint."
+in_args = []
+out_args = [
+    { EnumVariant = { enum_name = "IpcRequest", variant = "IsReply" } },
+]
+
+[types.RootTask]
+description = "The \"privileged\" root task capability. Hardware capabilities are derived from this."
+
+[types.RootTask.methods.new_mmio]
+description = "Creates an `Mmio` endpoint for the physical page starting at `phys_addr`."
+in_args = [
+    { name = "out", kind = "CPtrRef", description = "A capability pointer in the current task's capability set to write to." },
+    { name = "page_table", kind = { TypeRef = "RootPageTable" }, description = "The page table that the physical page will be mapped into." },
+    { name = "phys_addr", kind = "U64", description = "The physical address." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "RootTaskCapRequest", variant = "Mmio" } },
+    { Input = "out" },
+    { Input = "page_table" },
+    { Input = "phys_addr" },
+]
+
+[types.RootTask.methods.new_x86_io_port]
+description = "Creates an `X86IoPort` endpoint for a hardware I/O port."
+in_args = [
+    { name = "out", kind = "CPtrRef", description = "A capability pointer in the current task's capability set to write to." },
+    { name = "port", kind = "U64", description = "The associated port." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "RootTaskCapRequest", variant = "X86IoPort" } },
+    { Input = "out" },
+    { Input = "port" },
+]
+
+[types.RootTask.methods.new_interrupt]
+description = "Creates an `Interrupt` endpoint for an interrupt index."
+in_args = [
+    { name = "out", kind = "CPtrRef", description = "A capability pointer in the current task's capability set to write to." },
+    { name = "index", kind = "U64", description = "The associated interrupt index." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "RootTaskCapRequest", variant = "Interrupt" } },
+    { Input = "out" },
+    { Input = "index" },
+]
+
+
+[types.RootTask.methods.make_idle]
+description = "Make the current task an idle task. Never returns if succeeded."
+in_args = []
+out_args = [
+    { EnumVariant = { enum_name = "RootTaskCapRequest", variant = "MakeIdle" } },
+]
+
+[types.X86IoPort]
+description = "Capability to an X86 I/O port."
+
+[types.X86IoPort.methods.outb]
+description = "Calls the x86 `outb` instruction on this port."
+in_args = [
+    { name = "value", kind = "U64", description = "The 8-bit value to write." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "X86IoPortRequest", variant = "Write" } },
+    { Constant = 1 }, # 1 byte
+    { Input = "value" },
+]
+
+[types.X86IoPort.methods.inb]
+description = "Calls the x86 `inb` instruction on this port."
+in_args = []
+out_args = [
+    { EnumVariant = { enum_name = "X86IoPortRequest", variant = "Read" } },
+    { Constant = 1 }, # 1 byte
 ]
