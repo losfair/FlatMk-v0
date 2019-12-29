@@ -119,9 +119,6 @@ struct Type {
     /// Type description.
     description: Option<String>,
 
-    /// Types that can be converted into this type.
-    from: Vec<String>,
-
     /// Methods of this type.
     methods: BTreeMap<String, Method>,
 }

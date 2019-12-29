@@ -1,3 +1,6 @@
+# This file contains the types and methods for the FlatMk usermode interface.
+# Bindings and documentation are automatically generated from this file.
+
 [enums.BasicTaskRequest]
 description = "A request to a BasicTask/BasicTaskWeak endpoint."
 
@@ -89,8 +92,6 @@ EXECUTABLE = 1
 
 [types.RootPageTable]
 description = "Capability to a root page table."
-from = []
-base_enum = "RootPageTableRequest"
 
 [types.RootPageTable.methods.make_leaf]
 description = "Creates a leaf entry in this root page table, without allocating page for it."
