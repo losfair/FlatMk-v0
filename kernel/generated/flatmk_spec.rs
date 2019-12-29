@@ -8,18 +8,17 @@ pub enum BasicTaskRequest {
 	FetchShallowClone = 1,
 	FetchCapSet = 2,
 	FetchRootPageTable = 3,
-	GetRegister = 4,
-	SetRegister = 5,
-	FetchTaskEndpoint = 6,
-	FetchIpcCap = 7,
-	PutIpcCap = 8,
-	PutCapSet = 9,
+	FetchWeak = 4,
+	FetchTaskEndpoint = 5,
+	FetchIpcCap = 6,
+	PutIpcCap = 7,
+	PutCapSet = 8,
+	PutRootPageTable = 9,
 	MakeCapSet = 10,
 	MakeRootPageTable = 11,
-	PutRootPageTable = 12,
-	IpcReturn = 13,
-	FetchWeak = 14,
-	HasWeak = 15,
+	SetRegister = 12,
+	HasWeak = 13,
+	IpcReturn = 14,
 }
 
 /// A request to a capability set.
@@ -87,6 +86,14 @@ pub enum RootTaskCapRequest {
 	Mmio = 1,
 	MakeIdle = 2,
 	Interrupt = 3,
+}
+
+/// A request to an X86 I/O port.
+#[repr(i64)]
+#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+pub enum X86IoPortRequest {
+	Read = 0,
+	Write = 1,
 }
 
 bitflags! {

@@ -268,7 +268,6 @@ fn invoke_cap_basic_task(
                 })?;
             Ok(0)
         }
-        BasicTaskRequest::GetRegister => Err(KernelError::NotImplemented),
         BasicTaskRequest::SetRegister => {
             let field_index = invocation.arg(1)? as usize;
             let new_value = invocation.arg(2)? as u64;
@@ -485,26 +484,27 @@ fn invoke_cap_root_task(invocation: &CapabilityInvocation) -> KernelResult<i64> 
 
 fn invoke_cap_x86_io_port(invocation: &CapabilityInvocation, port: u16) -> KernelResult<i64> {
     use x86::io;
+    let req = X86IoPortRequest::try_from(invocation.arg(0)? as i64)?;
+
     unsafe {
-        if invocation.arg(0)? == 0 {
-            // read
-            Ok(match invocation.arg(1)? {
-                1 => io::inb(port) as i64,
-                2 => io::inw(port) as i64,
-                4 => io::inl(port) as i64,
-                _ => return Err(KernelError::InvalidArgument),
-            })
-        } else if invocation.arg(0)? == 1 {
-            // write
-            match invocation.arg(1)? {
-                1 => io::outb(port, invocation.arg(2)? as u8),
-                2 => io::outw(port, invocation.arg(2)? as u16),
-                4 => io::outl(port, invocation.arg(2)? as u32),
-                _ => return Err(KernelError::InvalidArgument),
+        match req {
+            X86IoPortRequest::Read => {
+                Ok(match invocation.arg(1)? {
+                    1 => io::inb(port) as i64,
+                    2 => io::inw(port) as i64,
+                    4 => io::inl(port) as i64,
+                    _ => return Err(KernelError::InvalidArgument),
+                })
             }
-            Ok(0)
-        } else {
-            Err(KernelError::InvalidArgument)
+            X86IoPortRequest::Write => {
+                match invocation.arg(1)? {
+                    1 => io::outb(port, invocation.arg(2)? as u8),
+                    2 => io::outw(port, invocation.arg(2)? as u16),
+                    4 => io::outl(port, invocation.arg(2)? as u32),
+                    _ => return Err(KernelError::InvalidArgument),
+                }
+                Ok(0)
+            }
         }
     }
 }
