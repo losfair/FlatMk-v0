@@ -591,7 +591,7 @@ struct {} {}_new(CPtr cap) {{
 
                     out.push_str(
                         format!(
-                            "int64_t {}_{}(\n\tstruct {} me",
+                            "static inline int64_t {}_{}(\n\tstruct {} me",
                             type_name, method_name, type_name
                         )
                         .as_str(),

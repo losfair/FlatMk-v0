@@ -89,7 +89,7 @@ struct RootPageTable RootPageTable_new(CPtr cap) {
     return result;
 }
 // Alllocates a page at a leaf entry in this root page table.
-int64_t RootPageTable_alloc_leaf(
+static inline int64_t RootPageTable_alloc_leaf(
 	struct RootPageTable me,
 	uint64_t vaddr,
 	uint64_t prot
@@ -98,7 +98,7 @@ int64_t RootPageTable_alloc_leaf(
 }
 
 // Drops a page.
-int64_t RootPageTable_drop_page(
+static inline int64_t RootPageTable_drop_page(
 	struct RootPageTable me,
 	uint64_t target
 ) {
@@ -106,7 +106,7 @@ int64_t RootPageTable_drop_page(
 }
 
 // Clones reference to a page in this page table to the current task's page table.
-int64_t RootPageTable_fetch_page(
+static inline int64_t RootPageTable_fetch_page(
 	struct RootPageTable me,
 	uint64_t src,
 	uint64_t dst,
@@ -116,7 +116,7 @@ int64_t RootPageTable_fetch_page(
 }
 
 // Creates a leaf entry in this root page table, without allocating page for it.
-int64_t RootPageTable_make_leaf(
+static inline int64_t RootPageTable_make_leaf(
 	struct RootPageTable me,
 	uint64_t vaddr
 ) {
@@ -124,7 +124,7 @@ int64_t RootPageTable_make_leaf(
 }
 
 // Clones reference to a page in the current task's page table to this page table.
-int64_t RootPageTable_put_page(
+static inline int64_t RootPageTable_put_page(
 	struct RootPageTable me,
 	uint64_t src,
 	uint64_t dst,
@@ -134,7 +134,7 @@ int64_t RootPageTable_put_page(
 }
 
 // Sets protection flags for a page table entry.
-int64_t RootPageTable_set_protection(
+static inline int64_t RootPageTable_set_protection(
 	struct RootPageTable me,
 	uint64_t target,
 	uint64_t prot
