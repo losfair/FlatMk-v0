@@ -28,6 +28,14 @@ struct CliArgs {
     /// Whether to generate enumeration definitions.
     #[structopt(long = "generate-enums")]
     generate_enums: bool,
+
+    /// Whether to generate bitflag definitions.
+    #[structopt(long = "generate-bitflags")]
+    generate_bitflags: bool,
+
+    /// Whether to generate type definitions.
+    #[structopt(long = "generate-types")]
+    generate_types: bool,
 }
 
 /// Target language to generate bindings for.
@@ -52,8 +60,11 @@ impl FromStr for TargetLanguage {
 }
 
 impl TargetLanguage {
-    fn format_multiline_comment(&self, comment: &str, out: &mut String) {
-        for line in comment.split("\n").map(|x| x.trim()) {
+    fn format_multiline_comment(&self, comment: &str, prefix_tabs: usize, out: &mut String) {
+        for line in comment.trim().split("\n").map(|x| x.trim()) {
+            for _ in 0..prefix_tabs {
+                out.push('\t');
+            }
             match *self {
                 TargetLanguage::C => {
                     out.push_str("// ");
@@ -108,11 +119,8 @@ struct Type {
     /// Type description.
     description: Option<String>,
 
-    /// Types that can be converted from this type.
-    into: Vec<String>,
-
-    /// The base enum for this type. Used in CapInvokeArgument.
-    base_enum: Option<String>,
+    /// Types that can be converted into this type.
+    from: Vec<String>,
 
     /// Methods of this type.
     methods: BTreeMap<String, Method>,
@@ -163,18 +171,152 @@ enum ArgumentKind {
     BitflagSet(String),
 }
 
+impl ArgumentKind {
+    fn fmt_write(&self, lang: TargetLanguage, out: &mut String) {
+        match lang {
+            TargetLanguage::Rust => match *self {
+                ArgumentKind::I64 => {
+                    out.push_str("i64");
+                }
+                ArgumentKind::U64 => {
+                    out.push_str("u64");
+                }
+                ArgumentKind::CPtrRef => {
+                    out.push_str("&CPtr");
+                }
+                ArgumentKind::TypeRef(ref ty) => {
+                    out.push_str(format!("&{}", ty).as_str());
+                }
+                ArgumentKind::BitflagSet(ref ty) => {
+                    out.push_str(ty.as_str());
+                }
+            },
+            TargetLanguage::C => match *self {
+                ArgumentKind::I64 => {
+                    out.push_str("int64_t");
+                }
+                ArgumentKind::U64 => {
+                    out.push_str("uint64_t");
+                }
+                ArgumentKind::CPtrRef => {
+                    out.push_str("CPtr");
+                }
+                ArgumentKind::TypeRef(ref ty) => {
+                    out.push_str(ty.as_str());
+                }
+                ArgumentKind::BitflagSet(_) => {
+                    out.push_str("uint64_t");
+                }
+            },
+            TargetLanguage::Markdown => match *self {
+                ArgumentKind::I64 => {
+                    out.push_str("i64");
+                }
+                ArgumentKind::U64 => {
+                    out.push_str("u64");
+                }
+                ArgumentKind::CPtrRef => {
+                    out.push_str("CPtr");
+                }
+                ArgumentKind::TypeRef(ref ty) => {
+                    out.push_str(format!("Type: {}", ty).as_str());
+                }
+                ArgumentKind::BitflagSet(ref ty) => {
+                    out.push_str(format!("Bitflags: {}", ty).as_str());
+                }
+            },
+        }
+    }
+}
+
 /// An argument for capability invocation.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 enum CapInvokeArgument {
     /// A 64-bit signed constant.
     Constant(i64),
 
-    /// A variant in the `base_enum`.
-    EnumVariant(String),
+    /// A variant of an enum.
+    EnumVariant { enum_name: String, variant: String },
 
     /// An input argument.
     Input(String),
 }
+
+impl CapInvokeArgument {
+    fn fmt_write(&self, lang: TargetLanguage, in_args: &[MethodArgument], out: &mut String) {
+        match *self {
+            CapInvokeArgument::Input(ref name) => {
+                let input = in_args
+                    .iter()
+                    .find(|x| x.name == name.as_str())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "CapInvokeArgument::fmt_write: Cannot find input argument '{}'.",
+                            name
+                        )
+                    });
+                match lang {
+                    TargetLanguage::Rust => match input.kind {
+                        ArgumentKind::I64 => out.push_str(format!("{}", input.name).as_str()),
+                        ArgumentKind::U64 => {
+                            out.push_str(format!("{} as i64", input.name).as_str())
+                        }
+                        ArgumentKind::CPtrRef => {
+                            out.push_str(format!("{}.index() as i64", input.name).as_str())
+                        }
+                        ArgumentKind::TypeRef(_) => {
+                            out.push_str(format!("{}.cptr().index() as i64", input.name).as_str())
+                        }
+                        ArgumentKind::BitflagSet(_) => {
+                            out.push_str(format!("{}.bits() as i64", input.name).as_str())
+                        }
+                    },
+                    TargetLanguage::C => match input.kind {
+                        ArgumentKind::I64
+                        | ArgumentKind::U64
+                        | ArgumentKind::CPtrRef
+                        | ArgumentKind::BitflagSet(_) => {
+                            out.push_str(format!("{}", input.name).as_str())
+                        }
+                        ArgumentKind::TypeRef(_) => {
+                            out.push_str(format!("{}.cap", input.name).as_str())
+                        }
+                    },
+                    TargetLanguage::Markdown => {
+                        unreachable!("CapInvokeArgument should not be written to Markdown output");
+                    }
+                }
+            }
+            CapInvokeArgument::EnumVariant {
+                ref enum_name,
+                ref variant,
+            } => match lang {
+                TargetLanguage::Rust => {
+                    out.push_str(format!("{}::{} as i64", enum_name, variant).as_str());
+                }
+                TargetLanguage::C => {
+                    out.push_str(format!("{}_{}", enum_name, variant).as_str());
+                }
+                TargetLanguage::Markdown => {
+                    unreachable!("CapInvokeArgument should not be written to Markdown output");
+                }
+            },
+            CapInvokeArgument::Constant(x) => match lang {
+                TargetLanguage::Rust => {
+                    out.push_str(format!("{}i64", x).as_str());
+                }
+                TargetLanguage::C => {
+                    out.push_str(format!("{}ll", x).as_str());
+                }
+                TargetLanguage::Markdown => {
+                    unreachable!("CapInvokeArgument should not be written to Markdown output");
+                }
+            },
+        }
+    }
+}
+
+const N_CAP_INVOKE_ARGUMENTS: usize = 4;
 
 fn main() {
     let args = CliArgs::from_args();
@@ -201,6 +343,14 @@ fn main() {
         generate_enums(&spec, args.language, &mut out);
     }
 
+    if args.generate_bitflags {
+        generate_bitflags(&spec, args.language, &mut out);
+    }
+
+    if args.generate_types {
+        generate_types(&spec, args.language, &mut out);
+    }
+
     File::create(&args.output)
         .expect("Cannot open output file.")
         .write_all(out.as_bytes())
@@ -209,9 +359,7 @@ fn main() {
 
 fn generate_enums(spec: &Spec, lang: TargetLanguage, out: &mut String) {
     match lang {
-        TargetLanguage::Rust => {
-            out.push_str("#[allow(unused_imports)]\nuse num_enum::TryFromPrimitive;\n\n");
-        }
+        TargetLanguage::Rust => {}
         TargetLanguage::Markdown => {
             out.push_str("## Enums\n\n");
         }
@@ -222,13 +370,13 @@ fn generate_enums(spec: &Spec, lang: TargetLanguage, out: &mut String) {
         match lang {
             TargetLanguage::C => {
                 if let Some(ref desc) = v.description {
-                    lang.format_multiline_comment(desc.as_str(), out);
+                    lang.format_multiline_comment(desc.as_str(), 0, out);
                 }
                 out.push_str(format!("enum {} {{\n", k).as_str());
             }
             TargetLanguage::Rust => {
                 if let Some(ref desc) = v.description {
-                    lang.format_multiline_comment(desc.as_str(), out);
+                    lang.format_multiline_comment(desc.as_str(), 0, out);
                 }
                 out.push_str("#[repr(i64)]\n");
                 out.push_str("#[derive(Debug, Copy, Clone, TryFromPrimitive)]\n");
@@ -237,7 +385,7 @@ fn generate_enums(spec: &Spec, lang: TargetLanguage, out: &mut String) {
             TargetLanguage::Markdown => {
                 out.push_str(format!("- `{}`\n\n", k).as_str());
                 if let Some(ref desc) = v.description {
-                    lang.format_multiline_comment(desc.as_str(), out);
+                    lang.format_multiline_comment(desc.as_str(), 0, out);
                 }
                 out.push_str("\n");
                 out.push_str("| Variant | Index |\n");
@@ -270,6 +418,262 @@ fn generate_enums(spec: &Spec, lang: TargetLanguage, out: &mut String) {
             TargetLanguage::Markdown => {
                 out.push_str("\n");
             }
+        }
+    }
+}
+
+fn generate_bitflags(spec: &Spec, lang: TargetLanguage, out: &mut String) {
+    match lang {
+        TargetLanguage::Rust => {
+            out.push_str("bitflags! {\n");
+        }
+        TargetLanguage::Markdown => {
+            out.push_str("## Bitflags\n\n");
+        }
+        _ => {}
+    }
+
+    for (set_name, set) in &spec.bitflags {
+        match lang {
+            TargetLanguage::C => {
+                if let Some(ref desc) = set.description {
+                    lang.format_multiline_comment(desc.as_str(), 0, out);
+                }
+            }
+            TargetLanguage::Rust => {
+                if let Some(ref desc) = set.description {
+                    lang.format_multiline_comment(desc.as_str(), 1, out);
+                }
+                out.push_str(format!("\tpub struct {}: u64 {{\n", set_name).as_str());
+            }
+            TargetLanguage::Markdown => {
+                out.push_str(format!("- `{}`\n\n", set_name).as_str());
+                if let Some(ref desc) = set.description {
+                    lang.format_multiline_comment(desc.as_str(), 0, out);
+                }
+                out.push_str("\n");
+                out.push_str("| Flag | Bit |\n");
+                out.push_str("| ------- | ----- |\n");
+            }
+        }
+        let mut bits: Vec<(u8, String)> = set.bits.iter().map(|(k, v)| (*v, k.clone())).collect();
+        bits.sort();
+        for (bit, flag) in bits {
+            match lang {
+                TargetLanguage::C => {
+                    out.push_str(
+                        format!("#define {}_{} (1 << {})\n", set_name, flag, bit).as_str(),
+                    );
+                }
+                TargetLanguage::Rust => {
+                    out.push_str(format!("\t\tconst {} = 1 << {};\n", flag, bit).as_str());
+                }
+                TargetLanguage::Markdown => {
+                    out.push_str(format!("| {} | {} |\n", flag, bit).as_str());
+                }
+            }
+        }
+        match lang {
+            TargetLanguage::C => {
+                out.push_str("\n");
+            }
+            TargetLanguage::Rust => {
+                out.push_str("\t}\n\n");
+            }
+            TargetLanguage::Markdown => {
+                out.push_str("\n");
+            }
+        }
+    }
+
+    match lang {
+        TargetLanguage::Rust => {
+            out.push_str("}\n\n");
+        }
+        _ => {}
+    }
+}
+
+fn generate_types(spec: &Spec, lang: TargetLanguage, out: &mut String) {
+    match lang {
+        TargetLanguage::Markdown => {
+            out.push_str("## Types\n\n");
+        }
+        _ => {}
+    }
+
+    for (type_name, type_def) in &spec.types {
+        match lang {
+            TargetLanguage::Rust => {
+                if let Some(ref desc) = type_def.description {
+                    lang.format_multiline_comment(desc.as_str(), 0, out);
+                }
+                out.push_str(
+                    format!(
+                        r#"pub struct {} {{
+    cap: CPtr
+}}
+
+impl Into<CPtr> for {} {{
+    fn into(self) -> CPtr {{
+        self.cap
+    }}
+}}
+
+impl {} {{
+    pub const unsafe fn new(cap: CPtr) -> Self {{
+        Self {{
+            cap,
+        }}
+    }}
+
+    pub const fn cptr(&self) -> &CPtr {{
+        &self.cap
+    }}
+
+"#,
+                        type_name, type_name, type_name
+                    )
+                    .as_str(),
+                );
+            }
+            TargetLanguage::C => {
+                if let Some(ref desc) = type_def.description {
+                    lang.format_multiline_comment(desc.as_str(), 0, out);
+                }
+                out.push_str(
+                    format!(
+                        r#"struct {} {{
+    CPtr cap;
+}};
+
+struct {} {}_new(CPtr cap) {{
+    struct {} result = {{ .cap = cap }};
+    return result;
+}}
+"#,
+                        type_name, type_name, type_name, type_name
+                    )
+                    .as_str(),
+                );
+            }
+            TargetLanguage::Markdown => {
+                out.push_str(format!("### {}\n\n", type_name).as_str());
+                if let Some(ref desc) = type_def.description {
+                    lang.format_multiline_comment(desc.as_str(), 0, out);
+                }
+                out.push('\n');
+            }
+        }
+        for (method_name, method) in &type_def.methods {
+            match lang {
+                TargetLanguage::Rust => {
+                    if let Some(ref desc) = method.description {
+                        lang.format_multiline_comment(desc.as_str(), 1, out);
+                    }
+
+                    out.push_str(
+                        format!("\tpub unsafe fn {}(\n\t\t&self,\n", method_name).as_str(),
+                    );
+
+                    for arg in &method.in_args {
+                        if let Some(ref desc) = arg.description {
+                            lang.format_multiline_comment(desc.as_str(), 2, out);
+                        }
+                        out.push_str(format!("\t\t{}: ", arg.name).as_str());
+                        arg.kind.fmt_write(lang, out);
+                        out.push_str(",\n");
+                    }
+
+                    out.push_str("\t) -> i64 {\n\t\tself.cap.call(");
+                }
+                TargetLanguage::C => {
+                    if let Some(ref desc) = method.description {
+                        lang.format_multiline_comment(desc.as_str(), 0, out);
+                    }
+
+                    out.push_str(
+                        format!(
+                            "int64_t {}_{}(\n\tstruct {} me",
+                            type_name, method_name, type_name
+                        )
+                        .as_str(),
+                    );
+                    for arg in &method.in_args {
+                        out.push_str(",\n");
+                        if let Some(ref desc) = arg.description {
+                            lang.format_multiline_comment(desc.as_str(), 1, out);
+                        }
+                        out.push_str("\t");
+                        arg.kind.fmt_write(lang, out);
+                        out.push_str(format!(" {}", arg.name).as_str());
+                    }
+                    out.push_str("\n) {\n\treturn cptr_invoke(me.cap");
+                }
+                TargetLanguage::Markdown => {
+                    out.push_str(format!("- `{}`\n\n", method_name).as_str());
+                    if let Some(ref desc) = method.description {
+                        lang.format_multiline_comment(desc.as_str(), 0, out);
+                        out.push('\n');
+                    }
+
+                    out.push_str("| Argument | Kind | Description\n");
+                    out.push_str("| -------- | ---- | ----------- |\n");
+                    for arg in &method.in_args {
+                        out.push_str("| ");
+                        out.push_str(arg.name.as_str());
+                        out.push_str(" | ");
+                        arg.kind.fmt_write(lang, out);
+                        out.push_str(" | ");
+                        if let Some(ref desc) = arg.description {
+                            let s: String = desc
+                                .chars()
+                                .map(|x| if x == '\n' { ' ' } else { x })
+                                .collect();
+                            out.push_str(s.as_str());
+                        }
+                        out.push_str(" |\n");
+                    }
+                    out.push_str("\n");
+                }
+            }
+
+            let mut invoke_args = method.out_args.clone();
+            if invoke_args.len() > N_CAP_INVOKE_ARGUMENTS {
+                panic!("generate_types: Too many capability invocation arguments (out_args) for method '{}'. At most {} arguments are supported.", method_name, N_CAP_INVOKE_ARGUMENTS);
+            }
+            invoke_args.resize(N_CAP_INVOKE_ARGUMENTS, CapInvokeArgument::Constant(0));
+
+            for arg in invoke_args {
+                match lang {
+                    TargetLanguage::Rust => {
+                        arg.fmt_write(lang, &method.in_args, out);
+                        out.push_str(", ");
+                    }
+                    TargetLanguage::C => {
+                        out.push_str(", ");
+                        arg.fmt_write(lang, &method.in_args, out);
+                    }
+                    TargetLanguage::Markdown => {}
+                }
+            }
+
+            match lang {
+                TargetLanguage::Rust => {
+                    out.push_str(")\n\t}\n\n");
+                }
+                TargetLanguage::C => {
+                    out.push_str(");\n}\n\n");
+                }
+                TargetLanguage::Markdown => {}
+            }
+        }
+        match lang {
+            TargetLanguage::Rust => {
+                out.push_str("}\n\n");
+            }
+            TargetLanguage::C => {}
+            TargetLanguage::Markdown => {}
         }
     }
 }

@@ -84,12 +84,12 @@ Unbind = 1
 description = "Flags for a user page table entry."
 
 [bitflags.UserPteFlags.bits]
-Writable = 0
-Executable = 1
+WRITABLE = 0
+EXECUTABLE = 1
 
 [types.RootPageTable]
 description = "Capability to a root page table."
-into = []
+from = []
 base_enum = "RootPageTableRequest"
 
 [types.RootPageTable.methods.make_leaf]
@@ -98,7 +98,7 @@ in_args = [
     { name = "vaddr", kind = "U64" },
 ]
 out_args = [
-    { EnumVariant = "MakeLeaf" },
+    { EnumVariant = { enum_name = "RootPageTableRequest", variant = "MakeLeaf" }},
     { Input = "vaddr" },
 ]
 
@@ -109,7 +109,7 @@ in_args = [
     { name = "prot", kind = { BitflagSet = "UserPteFlags" } },
 ]
 out_args = [
-    { EnumVariant = "AllocLeaf" },
+    { EnumVariant = { enum_name = "RootPageTableRequest", variant = "AllocLeaf" }},
     { Input = "vaddr" },
     { Input = "prot" },
 ]
@@ -122,7 +122,7 @@ in_args = [
     { name = "prot", kind = { BitflagSet = "UserPteFlags"} },
 ]
 out_args = [
-    { EnumVariant = "PutPage" },
+    { EnumVariant = { enum_name = "RootPageTableRequest", variant = "PutPage" }},
     { Input = "src" },
     { Input = "dst" },
     { Input = "prot" },
@@ -136,7 +136,7 @@ in_args = [
     { name = "prot", kind = { BitflagSet = "UserPteFlags"} },
 ]
 out_args = [
-    { EnumVariant = "FetchPage" },
+    { EnumVariant = { enum_name = "RootPageTableRequest", variant = "FetchPage" }},
     { Input = "src" },
     { Input = "dst" },
     { Input = "prot" },
@@ -148,7 +148,7 @@ in_args = [
     { name = "target", kind = "U64" },
 ]
 out_args = [
-    { EnumVariant = "DropPage" },
+    { EnumVariant = { enum_name = "RootPageTableRequest", variant = "DropPage" }},
     { Input = "target" },
 ]
 
@@ -159,7 +159,7 @@ in_args = [
     { name = "prot", kind = { BitflagSet = "UserPteFlags"} },
 ]
 out_args = [
-    { EnumVariant = "SetProtection" },
+    { EnumVariant = { enum_name = "RootPageTableRequest", variant = "SetProtection" }},
     { Input = "target" },
     { Input = "prot" },
 ]

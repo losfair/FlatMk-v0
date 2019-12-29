@@ -98,3 +98,81 @@ bitflags! {
 
 }
 
+/// Capability to a root page table.
+pub struct RootPageTable {
+    cap: CPtr
+}
+
+impl Into<CPtr> for RootPageTable {
+    fn into(self) -> CPtr {
+        self.cap
+    }
+}
+
+impl RootPageTable {
+    pub const unsafe fn new(cap: CPtr) -> Self {
+        Self {
+            cap,
+        }
+    }
+
+    pub const fn cptr(&self) -> &CPtr {
+        &self.cap
+    }
+
+	/// Alllocates a page at a leaf entry in this root page table.
+	pub unsafe fn alloc_leaf(
+		&self,
+		vaddr: u64,
+		prot: UserPteFlags,
+	) -> i64 {
+		self.cap.call(RootPageTableRequest::AllocLeaf as i64, vaddr as i64, prot.bits() as i64, 0i64, )
+	}
+
+	/// Drops a page.
+	pub unsafe fn drop_page(
+		&self,
+		target: u64,
+	) -> i64 {
+		self.cap.call(RootPageTableRequest::DropPage as i64, target as i64, 0i64, 0i64, )
+	}
+
+	/// Clones reference to a page in this page table to the current task's page table.
+	pub unsafe fn fetch_page(
+		&self,
+		src: u64,
+		dst: u64,
+		prot: UserPteFlags,
+	) -> i64 {
+		self.cap.call(RootPageTableRequest::FetchPage as i64, src as i64, dst as i64, prot.bits() as i64, )
+	}
+
+	/// Creates a leaf entry in this root page table, without allocating page for it.
+	pub unsafe fn make_leaf(
+		&self,
+		vaddr: u64,
+	) -> i64 {
+		self.cap.call(RootPageTableRequest::MakeLeaf as i64, vaddr as i64, 0i64, 0i64, )
+	}
+
+	/// Clones reference to a page in the current task's page table to this page table.
+	pub unsafe fn put_page(
+		&self,
+		src: u64,
+		dst: u64,
+		prot: UserPteFlags,
+	) -> i64 {
+		self.cap.call(RootPageTableRequest::PutPage as i64, src as i64, dst as i64, prot.bits() as i64, )
+	}
+
+	/// Sets protection flags for a page table entry.
+	pub unsafe fn set_protection(
+		&self,
+		target: u64,
+		prot: UserPteFlags,
+	) -> i64 {
+		self.cap.call(RootPageTableRequest::SetProtection as i64, target as i64, prot.bits() as i64, 0i64, )
+	}
+
+}
+

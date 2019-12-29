@@ -3,7 +3,7 @@ use crate::error::*;
 use crate::multilevel::*;
 use core::fmt;
 use core::ptr::NonNull;
-use crate::paging::UserPteFlags;
+use crate::spec::UserPteFlags;
 
 #[repr(align(4096))]
 #[derive(Clone)]

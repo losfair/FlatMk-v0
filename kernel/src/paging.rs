@@ -13,15 +13,9 @@ use crate::pagealloc::*;
 use bootloader::bootinfo::MemoryRegionType;
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
+use crate::spec::UserPteFlags;
 
 pub(crate) static mut PHYSICAL_OFFSET: u64 = 0;
-
-bitflags! {
-    pub struct UserPteFlags: u64 {
-        const WRITABLE = 1 << 0;
-        const EXECUTABLE = 1 << 1;
-    }
-}
 
 pub struct PageTableEntryFilter;
 impl EntryFilter for PageTableEntryFilter {
