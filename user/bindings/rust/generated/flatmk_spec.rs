@@ -66,6 +66,20 @@ pub enum IpcRequest {
 	Ping = 6,
 }
 
+/// Kernel error codes.
+#[repr(i64)]
+#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+pub enum KernelError {
+	OutOfMemory = -8,
+	InvalidReference = -7,
+	EmptyCapability = -6,
+	EmptyObject = -5,
+	InvalidAddress = -4,
+	InvalidState = -3,
+	NotImplemented = -2,
+	InvalidArgument = -1,
+}
+
 /// A request to a root page table.
 #[repr(i64)]
 #[derive(Debug, Copy, Clone, TryFromPrimitive)]
@@ -86,6 +100,7 @@ pub enum RootTaskCapRequest {
 	Mmio = 1,
 	MakeIdle = 2,
 	Interrupt = 3,
+	DebugPutchar = 4,
 }
 
 /// A request to an X86 I/O port.
@@ -96,16 +111,24 @@ pub enum X86IoPortRequest {
 	Write = 1,
 }
 
+	/// Flags for a task endpoint.
 bitflags! {
+	pub struct TaskEndpointFlags: u64 {
+		const CAP_TRANSFER = 1 << 0;
+		const TAGGABLE = 1 << 1;
+	}
+}
+
 	/// Flags for a user page table entry.
+bitflags! {
 	pub struct UserPteFlags: u64 {
 		const WRITABLE = 1 << 0;
 		const EXECUTABLE = 1 << 1;
 	}
-
 }
 
 /// A strong or weak reference to a task.
+#[derive(Copy, Clone, Debug)]
 pub struct BasicTask {
     cap: CPtr
 }
@@ -267,6 +290,7 @@ impl BasicTask {
 }
 
 /// A capability set.
+#[derive(Copy, Clone, Debug)]
 pub struct CapabilitySet {
     cap: CPtr
 }
@@ -359,7 +383,41 @@ impl CapabilitySet {
 
 }
 
+/// Debugging utility used during early init to print a character to the serial port.
+#[derive(Copy, Clone, Debug)]
+pub struct DebugPutchar {
+    cap: CPtr
+}
+
+impl Into<CPtr> for DebugPutchar {
+    fn into(self) -> CPtr {
+        self.cap
+    }
+}
+
+impl DebugPutchar {
+    pub const unsafe fn new(cap: CPtr) -> Self {
+        Self {
+            cap,
+        }
+    }
+
+    pub const fn cptr(&self) -> &CPtr {
+        &self.cap
+    }
+
+	/// Prints a character to the serial port.
+	pub unsafe fn putchar(
+		&self,
+		value: u64,
+	) -> i64 {
+		self.cap.call(value as i64, 0i64, 0i64, 0i64, )
+	}
+
+}
+
 /// Capability to an interrupt.
+#[derive(Copy, Clone, Debug)]
 pub struct Interrupt {
     cap: CPtr
 }
@@ -381,10 +439,10 @@ impl Interrupt {
         &self.cap
     }
 
-	/// Bind the interrupt to a task.
+	/// Binds the interrupt to a task.
 	pub unsafe fn bind(
 		&self,
-		task: &TaskEndpoint,
+		task: &BasicTask,
 		pc: u64,
 		user_context: u64,
 	) -> i64 {
@@ -394,6 +452,7 @@ impl Interrupt {
 }
 
 /// Memory-mapped I/O on one memory page.
+#[derive(Copy, Clone, Debug)]
 pub struct Mmio {
     cap: CPtr
 }
@@ -427,6 +486,7 @@ impl Mmio {
 }
 
 /// Capability to a root page table.
+#[derive(Copy, Clone, Debug)]
 pub struct RootPageTable {
     cap: CPtr
 }
@@ -505,6 +565,7 @@ impl RootPageTable {
 }
 
 /// The "privileged" root task capability. Hardware capabilities are derived from this.
+#[derive(Copy, Clone, Debug)]
 pub struct RootTask {
     cap: CPtr
 }
@@ -531,6 +592,14 @@ impl RootTask {
 		&self,
 	) -> i64 {
 		self.cap.call(RootTaskCapRequest::MakeIdle as i64, 0i64, 0i64, 0i64, )
+	}
+
+	/// Creates a `DebugPutchar` endpoint.
+	pub unsafe fn new_debug_putchar(
+		&self,
+		out: &CPtr,
+	) -> i64 {
+		self.cap.call(RootTaskCapRequest::DebugPutchar as i64, out.index() as i64, 0i64, 0i64, )
 	}
 
 	/// Creates an `Interrupt` endpoint for an interrupt index.
@@ -564,6 +633,7 @@ impl RootTask {
 }
 
 /// An IPC endpoint.
+#[derive(Copy, Clone, Debug)]
 pub struct TaskEndpoint {
     cap: CPtr
 }
@@ -638,6 +708,7 @@ impl TaskEndpoint {
 }
 
 /// Capability to an X86 I/O port.
+#[derive(Copy, Clone, Debug)]
 pub struct X86IoPort {
     cap: CPtr
 }

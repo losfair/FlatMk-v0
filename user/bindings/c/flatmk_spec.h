@@ -56,6 +56,18 @@ enum IpcRequest {
 	IpcRequest_Ping = 6,
 };
 
+// Kernel error codes.
+enum KernelError {
+	KernelError_OutOfMemory = -8,
+	KernelError_InvalidReference = -7,
+	KernelError_EmptyCapability = -6,
+	KernelError_EmptyObject = -5,
+	KernelError_InvalidAddress = -4,
+	KernelError_InvalidState = -3,
+	KernelError_NotImplemented = -2,
+	KernelError_InvalidArgument = -1,
+};
+
 // A request to a root page table.
 enum RootPageTableRequest {
 	RootPageTableRequest_MakeLeaf = 0,
@@ -72,6 +84,7 @@ enum RootTaskCapRequest {
 	RootTaskCapRequest_Mmio = 1,
 	RootTaskCapRequest_MakeIdle = 2,
 	RootTaskCapRequest_Interrupt = 3,
+	RootTaskCapRequest_DebugPutchar = 4,
 };
 
 // A request to an X86 I/O port.
@@ -79,6 +92,10 @@ enum X86IoPortRequest {
 	X86IoPortRequest_Read = 0,
 	X86IoPortRequest_Write = 1,
 };
+
+// Flags for a task endpoint.
+#define TaskEndpointFlags_CAP_TRANSFER (1 << 0)
+#define TaskEndpointFlags_TAGGABLE (1 << 1)
 
 // Flags for a user page table entry.
 #define UserPteFlags_WRITABLE (1 << 0)
@@ -100,6 +117,15 @@ struct CapabilitySet {
 
 struct CapabilitySet CapabilitySet_new(CPtr cap) {
     struct CapabilitySet result = { .cap = cap };
+    return result;
+}
+// Debugging utility used during early init to print a character to the serial port.
+struct DebugPutchar {
+    CPtr cap;
+};
+
+struct DebugPutchar DebugPutchar_new(CPtr cap) {
+    struct DebugPutchar result = { .cap = cap };
     return result;
 }
 // Capability to an interrupt.
@@ -392,11 +418,20 @@ static inline int64_t CapabilitySet_put_cap_move(
 	return cptr_invoke(me.cap, CapSetRequest_PutCapMove, src, dst, 0ll);
 }
 
-// Bind the interrupt to a task.
+// Prints a character to the serial port.
+static inline int64_t DebugPutchar_putchar(
+	struct DebugPutchar me,
+	// The 8-bit character to print.
+	uint64_t value
+) {
+	return cptr_invoke(me.cap, value, 0ll, 0ll, 0ll);
+}
+
+// Binds the interrupt to a task.
 static inline int64_t Interrupt_bind(
 	struct Interrupt me,
 	// The task to bind to.
-	struct TaskEndpoint task,
+	struct BasicTask task,
 	// Program Counter/Instruction Pointer value for the IPC entry.
 	uint64_t pc,
 	// User context for the IPC entry.
@@ -475,6 +510,15 @@ static inline int64_t RootTask_make_idle(
 	struct RootTask me
 ) {
 	return cptr_invoke(me.cap, RootTaskCapRequest_MakeIdle, 0ll, 0ll, 0ll);
+}
+
+// Creates a `DebugPutchar` endpoint.
+static inline int64_t RootTask_new_debug_putchar(
+	struct RootTask me,
+	// A capability pointer in the current task's capability set to write to.
+	CPtr out
+) {
+	return cptr_invoke(me.cap, RootTaskCapRequest_DebugPutchar, out, 0ll, 0ll);
 }
 
 // Creates an `Interrupt` endpoint for an interrupt index.
