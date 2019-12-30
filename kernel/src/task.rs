@@ -18,6 +18,7 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use spin::Mutex;
 use core::convert::TryFrom;
+use crate::spec::TaskEndpointFlags;
 
 pub const ROOT_TASK_FULL_MAP_BASE: u64 = 0x20000000u64;
 
@@ -137,16 +138,6 @@ pub struct TaskEndpoint {
 
     /// Flags.
     pub flags: TaskEndpointFlags,
-}
-
-bitflags! {
-    pub struct TaskEndpointFlags: u16 {
-        /// Whether capability transfer is performed for this endpoint.
-        const CAP_TRANSFER = 1 << 0;
-
-        /// Whether this endpoint can be used to add tags.
-        const TAGGABLE = 1 << 1;
-    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

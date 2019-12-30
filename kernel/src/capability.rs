@@ -5,8 +5,8 @@ use crate::kobj::*;
 use crate::multilevel::*;
 use crate::pagealloc::*;
 use crate::paging::{PageTableMto, PageTableObject};
-use crate::spec::UserPteFlags;
-use crate::task::{IpcEntry, EntryType, StateRestoreMode, Task, TaskEndpoint, TaskEndpointFlags, EntryDirection, IpcReason, TaskFaultState, enter_user_mode};
+use crate::spec::{UserPteFlags, TaskEndpointFlags};
+use crate::task::{IpcEntry, EntryType, StateRestoreMode, Task, TaskEndpoint, EntryDirection, IpcReason, TaskFaultState, enter_user_mode};
 use core::convert::TryFrom;
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
@@ -26,6 +26,7 @@ pub trait TryClone: Sized {
 pub struct CapPtr(pub u64);
 
 #[repr(C)]
+#[derive(Debug)]
 pub struct CapabilityInvocation {
     pub registers: TaskRegisters,
 }
@@ -140,7 +141,9 @@ pub enum CapabilityEndpointObject {
     RootPageTable(KernelObjectRef<PageTableObject>),
     TaskEndpoint(TaskEndpoint),
     CapabilitySet(KernelObjectRef<CapabilitySet>),
+    CapabilitySetWeak(WeakKernelObjectRef<CapabilitySet>),
     Interrupt(u8),
+    DebugPutchar,
 }
 
 #[derive(Clone)]
@@ -222,7 +225,12 @@ impl CapabilityEndpointObject {
             CapabilityEndpointObject::CapabilitySet(set) => {
                 invoke_cap_capability_set(invocation, set)
             }
+            CapabilityEndpointObject::CapabilitySetWeak(set) => {
+                let set = KernelObjectRef::try_from(set)?;
+                invoke_cap_capability_set(invocation, set)
+            }
             CapabilityEndpointObject::Interrupt(index) => invoke_cap_interrupt(invocation, index),
+            CapabilityEndpointObject::DebugPutchar => invoke_cap_debug_putchar(invocation),
         }
     }
 }
@@ -253,7 +261,11 @@ fn invoke_cap_basic_task(
         BasicTaskRequest::FetchCapSet => {
             let dst = CapPtr(invocation.arg(1)? as u64);
             current.capabilities.get().entry_endpoint(dst, |endpoint| {
-                endpoint.object = CapabilityEndpointObject::CapabilitySet(task.capabilities.get());
+                // This is by default a weak reference because having a strong reference in a capability set
+                // to itself will prevent destruction of the capability set.
+                endpoint.object = CapabilityEndpointObject::CapabilitySetWeak(
+                    WeakKernelObjectRef::from(task.capabilities.get())
+                );
             })?;
             Ok(0)
         }
@@ -281,7 +293,7 @@ fn invoke_cap_basic_task(
         BasicTaskRequest::FetchTaskEndpoint => {
             let mixed_arg1 = invocation.arg(1)? as u64;
             let cptr = CapPtr(mixed_arg1.get_bits(0..=47));
-            let flags = TaskEndpointFlags::from_bits(mixed_arg1.get_bits(48..=62) as u16)?;
+            let flags = TaskEndpointFlags::from_bits(mixed_arg1.get_bits(48..=62))?;
             let reply = mixed_arg1.get_bit(63);
 
             let entry_pc = invocation.arg(2)? as u64;
@@ -476,6 +488,16 @@ fn invoke_cap_root_task(invocation: &CapabilityInvocation) -> KernelResult<i64> 
                 .get()
                 .entry_endpoint(cptr, |endpoint| {
                     endpoint.object = CapabilityEndpointObject::Interrupt(interrupt_index);
+                })?;
+            Ok(0)
+        }
+        RootTaskCapRequest::DebugPutchar => {
+            let cptr = CapPtr(invocation.arg(1)? as u64);
+            current
+                .capabilities
+                .get()
+                .entry_endpoint(cptr, |endpoint| {
+                    endpoint.object = CapabilityEndpointObject::DebugPutchar;
                 })?;
             Ok(0)
         }
@@ -773,4 +795,13 @@ fn invoke_cap_interrupt(invocation: &mut CapabilityInvocation, index: u8) -> Ker
             Ok(0)
         }
     }
+}
+
+fn invoke_cap_debug_putchar(invocation: &mut CapabilityInvocation) -> KernelResult<i64> {
+    use crate::serial::with_serial_port;
+    use core::fmt::Write;
+
+    let ch = invocation.arg(0)? as u8;
+    with_serial_port(|p| write!(p, "{}", char::from(ch))).unwrap();
+    Ok(0)
 }

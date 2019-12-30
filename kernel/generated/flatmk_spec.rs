@@ -66,6 +66,20 @@ pub enum IpcRequest {
 	Ping = 6,
 }
 
+/// Kernel error codes.
+#[repr(i64)]
+#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+pub enum KernelError {
+	OutOfMemory = -8,
+	InvalidReference = -7,
+	EmptyCapability = -6,
+	EmptyObject = -5,
+	InvalidAddress = -4,
+	InvalidState = -3,
+	NotImplemented = -2,
+	InvalidArgument = -1,
+}
+
 /// A request to a root page table.
 #[repr(i64)]
 #[derive(Debug, Copy, Clone, TryFromPrimitive)]
@@ -86,6 +100,7 @@ pub enum RootTaskCapRequest {
 	Mmio = 1,
 	MakeIdle = 2,
 	Interrupt = 3,
+	DebugPutchar = 4,
 }
 
 /// A request to an X86 I/O port.
@@ -96,12 +111,19 @@ pub enum X86IoPortRequest {
 	Write = 1,
 }
 
+	/// Flags for a task endpoint.
 bitflags! {
+	pub struct TaskEndpointFlags: u64 {
+		const CAP_TRANSFER = 1 << 0;
+		const TAGGABLE = 1 << 1;
+	}
+}
+
 	/// Flags for a user page table entry.
+bitflags! {
 	pub struct UserPteFlags: u64 {
 		const WRITABLE = 1 << 0;
 		const EXECUTABLE = 1 << 1;
 	}
-
 }
 
