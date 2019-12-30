@@ -421,9 +421,6 @@ fn generate_enums(spec: &Spec, lang: TargetLanguage, out: &mut String) {
 
 fn generate_bitflags(spec: &Spec, lang: TargetLanguage, out: &mut String) {
     match lang {
-        TargetLanguage::Rust => {
-            out.push_str("bitflags! {\n");
-        }
         TargetLanguage::Markdown => {
             out.push_str("## Bitflags\n\n");
         }
@@ -441,7 +438,7 @@ fn generate_bitflags(spec: &Spec, lang: TargetLanguage, out: &mut String) {
                 if let Some(ref desc) = set.description {
                     lang.format_multiline_comment(desc.as_str(), 1, out);
                 }
-                out.push_str(format!("\tpub struct {}: u64 {{\n", set_name).as_str());
+                out.push_str(format!("bitflags! {{\n\tpub struct {}: u64 {{\n", set_name).as_str());
             }
             TargetLanguage::Markdown => {
                 out.push_str(format!("- `{}`\n\n", set_name).as_str());
@@ -475,19 +472,12 @@ fn generate_bitflags(spec: &Spec, lang: TargetLanguage, out: &mut String) {
                 out.push_str("\n");
             }
             TargetLanguage::Rust => {
-                out.push_str("\t}\n\n");
+                out.push_str("\t}\n}\n\n");
             }
             TargetLanguage::Markdown => {
                 out.push_str("\n");
             }
         }
-    }
-
-    match lang {
-        TargetLanguage::Rust => {
-            out.push_str("}\n\n");
-        }
-        _ => {}
     }
 }
 
@@ -533,7 +523,8 @@ struct {} {}_new(CPtr cap) {{
                 }
                 out.push_str(
                     format!(
-                        r#"pub struct {} {{
+                        r#"#[derive(Copy, Clone, Debug)]
+pub struct {} {{
     cap: CPtr
 }}
 
