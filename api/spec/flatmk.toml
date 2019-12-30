@@ -1,6 +1,28 @@
 # This file contains the types and methods for the FlatMk usermode interface.
 # Bindings and documentation are automatically generated from this file.
 
+
+[enums.KernelError]
+description = "Kernel error codes."
+
+[enums.KernelError.variants]
+# General error that indicates at least one argument is invalid.
+InvalidArgument = -1
+# Not implemented.
+NotImplemented = -2
+# Some state is invalid for the requested operation.
+InvalidState = -3
+# Invalid memory address.
+InvalidAddress = -4
+# Some object is empty when processing invocation request.
+EmptyObject = -5
+# An empty capability is invoked.
+EmptyCapability = -6
+# The object referred to by a weak reference is no longer valid.
+InvalidReference = -7
+# No available memory.
+OutOfMemory = -8
+
 [enums.BasicTaskRequest]
 description = "A request to a BasicTask/BasicTaskWeak endpoint."
 
@@ -29,6 +51,7 @@ X86IoPort = 0
 Mmio = 1
 MakeIdle = 2
 Interrupt = 3
+DebugPutchar = 4
 
 [enums.RootPageTableRequest]
 description = "A request to a root page table."
@@ -95,6 +118,13 @@ description = "Flags for a user page table entry."
 [bitflags.UserPteFlags.bits]
 WRITABLE = 0
 EXECUTABLE = 1
+
+[bitflags.TaskEndpointFlags]
+description = "Flags for a task endpoint."
+
+[bitflags.TaskEndpointFlags.bits]
+CAP_TRANSFER = 0
+TAGGABLE = 1
 
 [types.RootPageTable]
 description = "Capability to a root page table."
@@ -362,9 +392,9 @@ out_args = [
 description = "Capability to an interrupt."
 
 [types.Interrupt.methods.bind]
-description = "Bind the interrupt to a task."
+description = "Binds the interrupt to a task."
 in_args = [
-    { name = "task", kind = { TypeRef = "TaskEndpoint" }, description = "The task to bind to." },
+    { name = "task", kind = { TypeRef = "BasicTask" }, description = "The task to bind to." },
     { name = "pc", kind = "U64", description = "Program Counter/Instruction Pointer value for the IPC entry." },
     { name = "user_context", kind = "U64", description = "User context for the IPC entry." },
 ]
@@ -564,6 +594,15 @@ out_args = [
     { Input = "index" },
 ]
 
+[types.RootTask.methods.new_debug_putchar]
+description = "Creates a `DebugPutchar` endpoint."
+in_args = [
+    { name = "out", kind = "CPtrRef", description = "A capability pointer in the current task's capability set to write to." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "RootTaskCapRequest", variant = "DebugPutchar" } },
+    { Input = "out" },
+]
 
 [types.RootTask.methods.make_idle]
 description = "Make the current task an idle task. Never returns if succeeded."
@@ -592,4 +631,16 @@ in_args = []
 out_args = [
     { EnumVariant = { enum_name = "X86IoPortRequest", variant = "Read" } },
     { Constant = 1 }, # 1 byte
+]
+
+[types.DebugPutchar]
+description = "Debugging utility used during early init to print a character to the serial port."
+
+[types.DebugPutchar.methods.putchar]
+description = "Prints a character to the serial port."
+in_args = [
+    { name = "value", kind = "U64", description = "The 8-bit character to print." }
+]
+out_args = [
+    { Input = "value" },
 ]
