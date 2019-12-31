@@ -163,7 +163,6 @@ pub extern "C" fn _start() -> ! {
         flatrt_allocator::init(HEAP_START, caps::RPT);
         flatrt_capalloc::init(caps::CAPSET, DYN_CAP_START);
 
-        spec::to_result(caps::IDLE_REPLY.set_tag(IDLE_TAG)).expect("Cannot set idle tag");
         init_pit();
 
         setup_interrupt_handler();
@@ -196,6 +195,23 @@ unsafe fn setup_interrupt_handler() {
         owner_capset: caps::CAPSET,
         new_task: caps::THREAD_TIMER,
     });
+
+    // Initialize the tag on the idle task.
+    {
+        let idle_initializer_cptr = flatrt_capalloc::allocate();
+        let idle_initializer = th_timer.make_ipc_endpoint(
+            spec::TaskEndpointFlags::empty(),
+            false,
+            &idle_initializer_cptr,
+            |task, _| {
+                spec::to_result(caps::IDLE_REPLY.set_tag(IDLE_TAG)).expect("setup_interrupt_handler: Cannot set idle tag.");
+            }
+        );
+        spec::to_result(spec::TaskEndpoint::new(idle_initializer_cptr).invoke()).unwrap();
+        th_timer.drop_ipc_endpoint(idle_initializer);
+        flatrt_capalloc::release(idle_initializer_cptr);
+    }
+    
     let (entry, index) = th_timer.make_ipc_endpoint_raw(on_timer);
     spec::to_result(caps::TIMER_INTERRUPT.bind(
         &caps::THREAD_TIMER,
@@ -240,28 +256,29 @@ fn on_sched_create(this_task: spec::BasicTask, tag: u64) {
                 // Validate that the incoming capability is actually a `TaskEndpoint` with `reply` property.
                 if
                     caps::CAPSET.get_cap_type(incoming_task.cptr()) != spec::CapType::TaskEndpoint as i64 ||
-                    incoming_task.is_reply() != 1 {
+                    incoming_task.is_reply() != 1 ||
+                    incoming_task.is_taggable() != 1 ||
+                    incoming_task.is_cap_transfer() != 0 {
                         debug!(
-                            "scheduler: on_sched_create: Invalid incoming task. is_reply = {}, cptr = {:016x}",
-                            incoming_task.is_reply(),
+                            "scheduler: on_sched_create: Invalid incoming task. cptr = {:016x}",
                             backing_cptr.index(),
                         );
                         flatrt_capalloc::release(backing_cptr);
                         ipc_payload.data[0] = -1i64 as _;
                         ipc_payload.write();
-                        return_or_idle(this_task, guard);
+                        do_ipc_return(this_task, guard);
                 }
 
                 SCHED_QUEUE.try_lock().unwrap().push_back(SchedEntity {
                     endpoint: incoming_task,
                     xsave: Box::new(Xsave::default()),
                 });
-                return_or_idle(this_task, guard);
+                do_ipc_return(this_task, guard);
             }
             _ => {
                 ipc_payload.data[0] = -1i64 as _;
                 ipc_payload.write();
-                return_or_idle(this_task, guard);
+                do_ipc_return(this_task, guard);
             }
         }
         
@@ -302,7 +319,7 @@ fn on_sched_yield(this_task: spec::BasicTask, tag: u64) {
                 None => {
                     ipc_payload.data[0] = -1i64 as _;
                     ipc_payload.write();
-                    return_or_idle(this_task, guard);
+                    do_ipc_return(this_task, guard);
                 }
             };
 
@@ -325,7 +342,7 @@ fn on_sched_yield(this_task: spec::BasicTask, tag: u64) {
         _ => {
             ipc_payload.data[0] = -1i64 as _;
             ipc_payload.write();
-            return_or_idle(this_task, guard);
+            do_ipc_return(this_task, guard);
         }
     }
 }
@@ -344,13 +361,19 @@ fn on_timer(this_task: spec::BasicTask, tag: u64) {
     }
 
     // A switch from the idle task should trigger an immediate resched.
+    //
+    // But before that, we need to update the idle task endpoint, since previously we used it
+    // to enter the idle task and a reply endpoint can be used only once.
     if tag == IDLE_TAG {
+        unsafe {
+            spec::to_result(this_task.fetch_ipc_cap(caps::IDLE_REPLY.cptr(), 0)).unwrap();
+        }
         resched(this_task, guard);
     }
 
     // Do not reschedule if the task hasn't used up its time slice.
     if nanosecs - begin < MAX_TIME_SLICE_NS {
-        return_or_idle(this_task, guard);
+        do_ipc_return(this_task, guard);
     }
 
     // Take the previous task.
@@ -378,22 +401,17 @@ fn on_timer(this_task: spec::BasicTask, tag: u64) {
     resched(this_task, guard);
 }
 
-/// Tries returning to the previous task.
-/// 
-/// If fails, switches to the idle task.
-fn return_or_idle(this_task: spec::BasicTask, guard: ReentrancyGuard) -> ! {
+/// Returns to the previous task. Never fails.
+fn do_ipc_return(this_task: spec::BasicTask, guard: ReentrancyGuard) -> ! {
     drop(guard);
-    _do_return_or_idle(this_task);
+    _do_ipc_return_assuming_guard_dropped(this_task);
 }
 
-/// Tries returning to the previous task, assuming we have dropped the reentrancy guard.
-/// 
-/// If fails, switches to the idle task.
-fn _do_return_or_idle(this_task: spec::BasicTask) -> ! {
+/// Returns to the previous task, assuming we have dropped the reentrancy guard.
+fn _do_ipc_return_assuming_guard_dropped(this_task: spec::BasicTask) -> ! {
     unsafe {
         this_task.ipc_return();
-        caps::IDLE_REPLY.invoke();
-        panic!("_do_return_or_idle: Cannot invoke idle task.");
+        panic!("_do_ipc_return_assuming_guard_dropped: ipc_return failed.");
     }
 }
 
@@ -418,7 +436,7 @@ fn resched(this_task: spec::BasicTask, guard: ReentrancyGuard) -> ! {
         drop(task);
 
         // Switch task.
-        return_or_idle(this_task, guard);
+        do_ipc_return(this_task, guard);
     } else {
         // No pending task is available.
         // Drop the guard and directly invoke the idle task.
@@ -447,12 +465,12 @@ fn update_timed_tasks() {
     }
 }
 
-/// Tries taking the reentrancy guard. If fails, calls `_do_return_or_idle`.
+/// Tries taking the reentrancy guard. If fails, calls `_do_ipc_return_assuming_guard_dropped`.
 fn try_take_guard_or_return(this_task: spec::BasicTask) -> ReentrancyGuard {
     match ReentrancyGuard::new() {
         Some(x) => x,
         None => {
-            _do_return_or_idle(this_task);
+            _do_ipc_return_assuming_guard_dropped(this_task);
         }
     }
 }
