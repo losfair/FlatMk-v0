@@ -11,3 +11,4 @@ flatmk-sys = { path = "../../bindings/rust" }
 flatrt-allocator = { path = "../flatrt-allocator" }
 flatrt-elfloader = { path = "../flatrt-elfloader" }
 flatrt-thread = { path = "../flatrt-thread" }
+flatrt-fastipc = { path = "../flatrt-fastipc" }

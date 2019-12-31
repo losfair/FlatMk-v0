@@ -18,6 +18,7 @@ mod layout;
 use flatmk_sys::spec::{self, KernelError};
 use flatrt_thread::{Thread, ThreadCapSet};
 use flatrt_elfloader::ElfTempMapBase;
+use flatrt_fastipc::FastIpcPayload;
 
 /// Start address for heap allocation.
 const HEAP_START: usize = 0x7fff00000000;
@@ -57,8 +58,16 @@ unsafe extern "C" fn init_start() -> ! {
 
     start_scheduler();
 
-    debug!("Initialized.");
-    loop {}
+    debug!("init: Finished setting up initial environment.");
+
+    loop {
+        let mut payload = FastIpcPayload::default();
+        payload.data[0] = 1;
+        payload.data[1] = 1_000_000_000; // 1 second
+        payload.write();
+        spec::to_result(caps::SCHED_YIELD.invoke()).unwrap();
+        debug!("init: tick");
+    }
 }
 
 #[panic_handler]
@@ -110,6 +119,7 @@ fn load_elf_task(
     };
     Ok(())
 }
+
 /// Starts the `scheduler` task.
 fn start_scheduler() {
     load_elf_task(
@@ -168,6 +178,32 @@ fn start_scheduler() {
         // Cleanup.
         spec::to_result(caps::CAPSET.drop_cap(&caps::BUFFER)).unwrap();
 
+        // Call the initialize function.
         spec::to_result(caps::scheduler::ENDPOINT.invoke()).expect("start_scheduler: Cannot invoke task.");
+
+        // SCHED_CREATE endpoint.
+        fetch_and_check_remote_task_endpoint(0x11, &caps::SCHED_CREATE, &caps::scheduler::CAPSET);
+
+        // SCHED_YIELD endpoint.
+        fetch_and_check_remote_task_endpoint(0x13, &caps::SCHED_YIELD, &caps::scheduler::CAPSET);
+    }
+}
+
+/// Fetches and checks a task endpoint from a remote capability set.
+/// 
+/// This function requires the fetch to succeed, and the endpoint to be a non-reply task endpoint.
+/// 
+/// Panics if failed.
+fn fetch_and_check_remote_task_endpoint(src: u64, dst: &spec::TaskEndpoint, remote: &spec::CapabilitySet) {
+    unsafe {
+        spec::to_result(remote.fetch_cap(&spec::CPtr::new(src), dst.cptr())).expect("fetch_and_check_remote_task_endpoint: Cannot fetch remote capability.");
+        assert_eq!(
+            spec::to_result(caps::CAPSET.get_cap_type(dst.cptr())).expect("fetch_and_check_remote_task_endpoint: Cannot get capability type."),
+            spec::CapType::TaskEndpoint as i64 as u64,
+        );
+        assert_eq!(
+            spec::to_result(dst.is_reply()).expect("fetch_and_check_remote_task_endpoint: Cannot check task endpoint type."),
+            0,
+        );
     }
 }

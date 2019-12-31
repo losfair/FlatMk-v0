@@ -10,3 +10,7 @@ edition = "2018"
 flatmk-sys = { path = "../../bindings/rust" }
 flatrt-thread = { path = "../flatrt-thread" }
 flatrt-allocator = { path = "../flatrt-allocator" }
+flatrt-fastipc = { path = "../flatrt-fastipc" }
+flatrt-capalloc = { path = "../flatrt-capalloc" }
+lazy_static = { version = "1.4", features = ["spin_no_std"] }
+spin = "0.5"

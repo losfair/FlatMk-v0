@@ -19,6 +19,8 @@ pub static PUTCHAR: spec::DebugPutchar = unsafe { spec::DebugPutchar::new(spec::
 
 // These capabilities are created by ourselves.
 
+pub static BUFFER: spec::CPtr = unsafe { spec::CPtr::new(0x0b) };
+
 pub static RPT: spec::RootPageTable = unsafe { spec::RootPageTable::new(spec::CPtr::new(0x0c)) };
 
 pub static CAPSET: spec::CapabilitySet = unsafe { spec::CapabilitySet::new(spec::CPtr::new(0x0d)) };
@@ -27,9 +29,11 @@ pub static THREAD_TIMER: spec::BasicTask = unsafe { spec::BasicTask::new(spec::C
 
 pub static THREAD_TIMER_ENDPOINT: spec::TaskEndpoint = unsafe { spec::TaskEndpoint::new(spec::CPtr::new(0x0f)) };
 
-pub static THREAD_SCHED_CREATE: spec::BasicTask = unsafe { spec::BasicTask::new(spec::CPtr::new(0x10)) };
+pub static THREAD_SCHED_API: spec::BasicTask = unsafe { spec::BasicTask::new(spec::CPtr::new(0x10)) };
 
 pub static THREAD_SCHED_CREATE_ENDPOINT: spec::TaskEndpoint = unsafe { spec::TaskEndpoint::new(spec::CPtr::new(0x11)) };
+
+pub static THREAD_SCHED_YIELD_ENDPOINT: spec::TaskEndpoint = unsafe { spec::TaskEndpoint::new(spec::CPtr::new(0x13)) };
 
 /// Derive our own capabilities from the provided ones.
 pub unsafe fn init() {

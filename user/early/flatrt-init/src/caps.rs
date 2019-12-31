@@ -42,7 +42,9 @@ pub static IDLE: spec::BasicTask = unsafe { spec::BasicTask::new(spec::CPtr::new
 /// Reply endpoint of the idle task.
 pub static IDLE_REPLY: spec::TaskEndpoint = unsafe { spec::TaskEndpoint::new(spec::CPtr::new(0x07)) };
 
-define_task!(scheduler, 0x200);
+define_task!(scheduler, 0x100);
+pub static SCHED_CREATE: spec::TaskEndpoint = unsafe { spec::TaskEndpoint::new(spec::CPtr::new(0x110)) };
+pub static SCHED_YIELD: spec::TaskEndpoint = unsafe { spec::TaskEndpoint::new(spec::CPtr::new(0x111)) };
 
 /// Initializes all the static capabilities defined above.
 /// 
