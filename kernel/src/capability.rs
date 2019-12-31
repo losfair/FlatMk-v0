@@ -612,6 +612,22 @@ fn invoke_cap_task_endpoint(
 
     match req {
         IpcRequest::SwitchTo => {
+            let endpoint = if endpoint.entry.direction() == EntryDirection::Pop {
+                // We must take the endpoint again with move instead of using the one passed in `endpoint`
+                // because with multi-core there's a race condition where a task on another core modifies
+                // the capability slot which the input `endpoint` was originally taken from, between the entry
+                // to this function and the IPC is actually invoked.
+                drop(endpoint);
+                match Task::current()
+                    .capabilities
+                    .get()
+                    .lookup_cptr_take(invocation.cptr())?.object {
+                        CapabilityEndpointObject::TaskEndpoint(x) => x,
+                        _ => return Err(KernelError::InvalidArgument),
+                    }
+            } else {
+                endpoint
+            };
             let e = Task::invoke_ipc(
                 endpoint,
                 IpcReason::CapInvoke,
