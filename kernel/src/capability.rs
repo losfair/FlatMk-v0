@@ -306,15 +306,14 @@ fn invoke_cap_basic_task(
                     let entry = if reply {
                         // In the call tree, attempt to assign the current task as the parent node of `task`.
                         task.block_ipc()?;
-                        EntryType::CooperativeReply
+                        EntryType::CooperativeReply(task)
                     } else {
-                        EntryType::Call(IpcEntry {
+                        EntryType::Call(task.into(), IpcEntry {
                             pc: entry_pc,
                             user_context
                         })
                     };
                     endpoint.object = CapabilityEndpointObject::TaskEndpoint(TaskEndpoint {
-                        task: WeakKernelObjectRef::from(task),
                         entry,
                         flags,
                     });
@@ -399,10 +398,8 @@ fn invoke_cap_basic_task(
             let cap = core::mem::replace(&mut current.ipc_caps.lock()[0], Default::default());
             if let CapabilityEndpointObject::TaskEndpoint(endpoint) = cap.object {
                 drop(current);
-                let task = KernelObjectRef::try_from(endpoint.task.clone())?;
-                let (_, e) = Task::invoke_ipc(
+                let e = Task::invoke_ipc(
                     endpoint,
-                    task,
                     IpcReason::CapInvoke,
                     &invocation.registers,
                 );
@@ -612,13 +609,11 @@ fn invoke_cap_task_endpoint(
     endpoint: TaskEndpoint,
 ) -> KernelResult<i64> {
     let req = IpcRequest::try_from(invocation.arg(0)? as i64)?;
-    let task = KernelObjectRef::try_from(endpoint.task.clone())?;
 
     match req {
         IpcRequest::SwitchTo => {
-            let (_, e) = Task::invoke_ipc(
+            let e = Task::invoke_ipc(
                 endpoint,
-                task,
                 IpcReason::CapInvoke,
                 &invocation.registers,
             );
@@ -659,11 +654,14 @@ fn invoke_cap_task_endpoint(
                 }
             let current = Task::current();
             let tag = invocation.arg(1)? as u64;
+
+            let task = endpoint.get_task()?;
             task.set_tag(current.id, tag)?;
             Ok(0)
         }
         IpcRequest::GetTag => {
             let current = Task::current();
+            let task = endpoint.get_task()?;
             let tag = task.get_tag(current.id)?;
             Ok(tag as _)
         }

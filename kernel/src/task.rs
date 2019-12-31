@@ -121,18 +121,21 @@ pub struct IpcEntry {
     pub user_context: u64,
 }
 
-#[derive(Copy, Clone, Debug)]
+/// Entry point information for a task endpoint.
+#[derive(Clone)]
 pub enum EntryType {
-    Call(IpcEntry),
-    CooperativeReply,
-    PreemptiveReply,
+    /// A call endpoint.
+    Call(WeakKernelObjectRef<Task>, IpcEntry),
+
+    /// A cooperative reply endpoint.
+    CooperativeReply(KernelObjectRef<Task>),
+
+    /// A preemptiv reply endpoint.
+    PreemptiveReply(KernelObjectRef<Task>),
 }
 
 #[derive(Clone)]
 pub struct TaskEndpoint {
-    /// Task object to send IPC messages to.
-    pub task: WeakKernelObjectRef<Task>,
-
     /// Entry point information.
     pub entry: EntryType,
 
@@ -140,17 +143,27 @@ pub struct TaskEndpoint {
     pub flags: TaskEndpointFlags,
 }
 
+impl TaskEndpoint {
+    pub fn get_task(&self) -> KernelResult<KernelObjectRef<Task>> {
+        Ok(match self.entry {
+            EntryType::Call(ref t, _) => KernelObjectRef::try_from(t.clone())?,
+            EntryType::PreemptiveReply(ref t) => t.clone(),
+            EntryType::CooperativeReply(ref t) => t.clone(),
+        })
+    }
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum IpcReason {
-    Interrupt,
+    Interrupt(u8),
     CapInvoke,
 }
 
 impl EntryType {
     pub fn direction(&self) -> EntryDirection {
         match *self {
-            EntryType::Call(_) => EntryDirection::Push,
-            EntryType::CooperativeReply | EntryType::PreemptiveReply => EntryDirection::Pop,
+            EntryType::Call(_, _) => EntryDirection::Push,
+            EntryType::CooperativeReply(_) | EntryType::PreemptiveReply(_) => EntryDirection::Pop,
         }
     }
 }
@@ -281,12 +294,30 @@ impl Task {
     /// Invokes IPC on this task.
     /// 
     /// This function never returns if succeeded.
+    /// 
+    /// Also, this function should never fail on both `PreemptiveReply` and `CooperativeReply` endpoints, since
+    /// they are not used for interrupts and use strong references to point to the underlying task.
     pub fn invoke_ipc(
         target: TaskEndpoint,
-        task: KernelObjectRef<Task>,
         reason: IpcReason,
         old_registers: &TaskRegisters,
-    ) -> (KernelObjectRef<Task>, KernelError) {
+    ) -> KernelError {
+        // Try to get a strong reference to the task.
+        let task = match target.get_task() {
+            Ok(x) => x,
+            Err(e) => return e,
+        };
+
+        // Block interrupt on this task.
+        if let IpcReason::Interrupt(index) = reason {
+            match task.block_interrupt(index) {
+                Ok(()) => {},
+                Err(e) => {
+                    return e;
+                }
+            }
+        }
+
         let prev = Task::current();
 
         // Attempts to block IPC for the target task, before switching to it.
@@ -296,7 +327,16 @@ impl Task {
 
             if task.block_ipc().is_err() {
                 // We are trying to re-enter a task whose IPC is already blocked. This is not allowed.
-                return (task, KernelError::InvalidState);
+
+                // First, unblock interrupt if needed.
+                if let IpcReason::Interrupt(_) = reason {
+                    task.unblock_interrupt().expect(
+                        "invoke_ipc: block_ipc failed on an interrupt endpoint but cannot unblock interrupt."
+                    );
+                }
+
+                // Then, we are ready to return.
+                return KernelError::InvalidState;
             }
         }
 
@@ -326,19 +366,17 @@ impl Task {
 
         // For the `Call` entry type, initialize program counter and the reply endpoint.
         match target.entry {
-            EntryType::Call(entrypoint) => {
+            EntryType::Call(_, entrypoint) => {
+                // Set up the entry and flags for the reply endpoint.
+                // 
                 // Determine the entry type from the provided IPC reason.
                 // Just use the same flags as the target endpoint for now.
                 let (entry_type, flags) = match reason {
-                    IpcReason::Interrupt => (EntryType::PreemptiveReply, target.flags),
-                    IpcReason::CapInvoke => (EntryType::CooperativeReply, target.flags),
+                    IpcReason::Interrupt(_) => (EntryType::PreemptiveReply(prev.clone()), target.flags),
+                    IpcReason::CapInvoke => (EntryType::CooperativeReply(prev.clone()), target.flags),
                 };
 
                 let reply_endpoint = TaskEndpoint {
-                    // Return to the previous task.
-                    task: WeakKernelObjectRef::from(prev.clone()),
-        
-                    // Use the entry type and flags we determined just now.
                     entry: entry_type,
                     flags,
                 };
@@ -356,14 +394,14 @@ impl Task {
                 // Use syscall mode, since the target task is aware of the switch.
                 state_restore_mode = StateRestoreMode::Syscall;
             }
-            EntryType::PreemptiveReply => {
+            EntryType::PreemptiveReply(_) => {
                 // Check invariant.
                 assert_eq!(reason, IpcReason::CapInvoke);
 
                 // Preemptive switch requires full state restore.
                 state_restore_mode = StateRestoreMode::Full;
             }
-            EntryType::CooperativeReply => {
+            EntryType::CooperativeReply(_) => {
                 // Check invariant.
                 assert_eq!(reason, IpcReason::CapInvoke);
 
@@ -548,8 +586,7 @@ lazy_static! {
 
 pub fn bind_interrupt(index: u8, handler: KernelObjectRef<Task>, entry: IpcEntry) {
     INTERRUPT_BINDINGS.lock()[index as usize] = Some(TaskEndpoint {
-        task: handler.into(),
-        entry: EntryType::Call(entry),
+        entry: EntryType::Call(handler.into(), entry),
         flags: TaskEndpointFlags::TAGGABLE,
     });
 }
@@ -564,22 +601,7 @@ pub fn invoke_interrupt(
 ) -> KernelError {
     let endpoint = INTERRUPT_BINDINGS.lock()[index as usize].clone();
     if let Some(endpoint) = endpoint {
-        let task = match KernelObjectRef::try_from(endpoint.task.clone()) {
-            Ok(x) => x,
-            Err(e) => {
-                // The backing task is dropped.
-                return e;
-            }
-        };
-        if let Err(e) = task.block_interrupt(index) {
-            println!("WARNING: invoke_interrupt/block_interrupt: {:?}", e);
-            return e;
-        }
-        let (task, e) = Task::invoke_ipc(endpoint, task, IpcReason::Interrupt, old_registers);
-        // FIXME: This needs to be fixed for multicore support.
-        task.unblock_interrupt().expect(
-            "invoke_interrupt: invoke_ipc returned error but unblock_interrupt failed",
-        );
+        let e = Task::invoke_ipc(endpoint, IpcReason::Interrupt(index), old_registers);
         println!("WARNING: invoke_interrupt: {:?}", e);
         e
     } else {
