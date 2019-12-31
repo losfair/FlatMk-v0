@@ -22,6 +22,12 @@ pub fn load(image: &[u8], base: u64, max_size: u64) -> (Vec<u8>, u64) {
         }
         out[out_start..out_end].copy_from_slice(data);
     }
+
+    // Pad to page size.
+    while out.len() % 4096 != 0 {
+        out.push(0);
+    }
+
     (out, elf.header.e_entry)
 }
 
