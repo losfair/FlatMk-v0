@@ -1,0 +1,15 @@
+[package]
+name = "flatrt-capalloc"
+version = "0.1.0"
+authors = ["losfair <zhy20000919@hotmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+flatmk-sys = { path = "../../bindings/rust" }
+lazy_static = { version = "1.4", features = ["spin_no_std"] }
+spin = "0.5"
+
+# Enable no-std support.
+slab = { git = "https://github.com/dingelish/slab.git", rev = "3afc42283c1995dd83ad258401062bb6f1b75e1c" }
