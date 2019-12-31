@@ -8,8 +8,12 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use alloc::collections::btree_map::BTreeMap;
+use alloc::sync::Arc;
 use core::mem::ManuallyDrop;
 use flatmk_sys::spec;
+use spin::RwLock;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// DWARF index of SP(RSP) on x86-64.
 const SP_INDEX: u64 = 7;
@@ -39,7 +43,19 @@ pub struct Thread {
     cptr_set: ThreadCapSet,
     direct_tls: ManuallyDrop<Box<DirectTls>>,
     stack: ManuallyDrop<Box<ThreadStack>>,
-    ipc_entries: ManuallyDrop<Box<Vec<Box<ThreadEntry>>>>,
+
+    // The next index to be allocated to an IPC entry.
+    next_ipc_entry_index: AtomicU64,
+
+    /// IPC entries for endpoints shared with other tasks.
+    /// 
+    /// Since this can be modified after/during the thread being invoked, we need to use a RwLock
+    /// for it. Mutex is not good because this is a spinlock and with multitasking there can be high latency
+    /// due to contention.
+    /// 
+    /// Here we also cannot use more efficient, linear structures like Slab because there should never be
+    /// duplicate keys.
+    ipc_entries: ManuallyDrop<Box<RwLock<BTreeMap<u64, Arc<ThreadEntry>>>>>,
 }
 
 /// Capability pointers used by a thread.
@@ -54,7 +70,7 @@ pub struct ThreadCapSet {
 pub struct DirectTls {
     stack_end: *mut ThreadStack,
     task: spec::CPtr,
-    ipc_entries: *mut Vec<Box<ThreadEntry>>,
+    ipc_entries: *mut RwLock<BTreeMap<u64, Arc<ThreadEntry>>>,
 }
 
 impl Thread {
@@ -67,7 +83,7 @@ impl Thread {
             (&mut *stack as *mut ThreadStack).offset(1)
         };
 
-        let mut ipc_entries: Box<Vec<Box<ThreadEntry>>> = Box::new(Vec::new());
+        let mut ipc_entries: Box<RwLock<BTreeMap<u64, Arc<ThreadEntry>>>> = Box::new(RwLock::new(BTreeMap::new()));
 
         let mut direct_tls = Box::new(DirectTls {
             stack_end: stack_end,
@@ -87,6 +103,7 @@ impl Thread {
             cptr_set,
             direct_tls: ManuallyDrop::new(direct_tls),
             stack: ManuallyDrop::new(stack),
+            next_ipc_entry_index: AtomicU64::new(1),
             ipc_entries: ManuallyDrop::new(ipc_entries),
         }
     }
@@ -124,33 +141,46 @@ impl Thread {
         }
     }
 
-    pub fn make_ipc_endpoint_raw<F: Fn(spec::BasicTask, u64) + Send + 'static>(&mut self, f: F) -> (u64, u64) {
-        let index = self.ipc_entries.len();
-        self.ipc_entries.push(Box::new(f));
+    pub fn make_ipc_endpoint_raw<F: Fn(spec::BasicTask, u64) + Send + 'static>(&self, f: F) -> (u64, u64) {
+        let mut ipc_entries = self.ipc_entries.write();
+        let index = self.next_ipc_entry_index.fetch_add(1, Ordering::SeqCst);
+        ipc_entries.insert(index, Arc::new(f));
 
         (ipc_entry as u64, index as u64)
     }
 
     /// Makes an IPC endpoint to this task with entry function `f`.
     /// 
-    /// Returns (ipc_entry, user_context).
-    /// 
-    /// This function is unsafe because this is no longer allowed to be called after the thread has been invoked.
-    pub unsafe fn make_ipc_endpoint<F: Fn(spec::BasicTask, u64) + Send + 'static>(&mut self, flags: spec::TaskEndpointFlags, reply: bool, out: &spec::CPtr, f: F) {
+    /// Returns the index of the entry.
+    pub fn make_ipc_endpoint<F: Fn(spec::BasicTask, u64) + Send + 'static>(&self, flags: spec::TaskEndpointFlags, reply: bool, out: &spec::CPtr, f: F) -> u64 {
         let (entry, index) = self.make_ipc_endpoint_raw(f);
 
-        spec::to_result(
-            self.cptr_set.new_task.fetch_task_endpoint(
-                out.index() | (flags.bits() << 48) | ((if reply { 1 } else { 0 }) << 63),
-                entry,
-                index, // context
-            )
-        ).expect("Thread::make_ipc_endpoint: Cannot fetch task endpoint.");
+        unsafe {
+            spec::to_result(
+                self.cptr_set.new_task.fetch_task_endpoint(
+                    out.index() | (flags.bits() << 48) | ((if reply { 1 } else { 0 }) << 63),
+                    entry,
+                    index, // context
+                )
+            ).expect("Thread::make_ipc_endpoint: Cannot fetch task endpoint.");
 
-        // Entry parameters aren't used for reply. We need to set the registers directly.
-        if reply {
-            spec::to_result(self.cptr_set.new_task.set_register(PC_INDEX, entry)).unwrap();
-            spec::to_result(self.cptr_set.new_task.set_register(FIRST_ARG_REG_INDEX, index)).unwrap();
+            // Entry parameters aren't used for reply. We need to set the registers directly.
+            if reply {
+                spec::to_result(self.cptr_set.new_task.set_register(PC_INDEX, entry)).unwrap();
+                spec::to_result(self.cptr_set.new_task.set_register(FIRST_ARG_REG_INDEX, index)).unwrap();
+            }
+        }
+
+        index
+    }
+
+    /// Drops an IPC endpoint.
+    /// 
+    /// Panics if the index doesn't exist.
+    pub fn drop_ipc_endpoint(&self, index: u64) {
+        let mut entries = self.ipc_entries.write();
+        if entries.remove(&index).is_none() {
+            panic!("Thread::drop_ipc_endpoint: Attempting to drop a non-existing entry.");
         }
     }
 }
@@ -173,11 +203,16 @@ unsafe extern "C" fn __flatrt_thread_ipc_entry(
     context: u64,
     tag: u64,
     task: spec::CPtr,
-    ipc_entries: &Vec<Box<ThreadEntry>>,
+    ipc_entries: &RwLock<BTreeMap<u64, Arc<ThreadEntry>>>,
 ) -> ! {
     let task = spec::BasicTask::new(task);
-    let entry = &ipc_entries[context as usize];
-    entry(task, tag);
+
+    // get() will return None if the endpoint is dropped.
+    let entry = ipc_entries.read().get(&context).cloned();
+    if let Some(entry) = entry {
+        entry(task, tag);
+    }
+
     task.ipc_return();
     unreachable!()
 }

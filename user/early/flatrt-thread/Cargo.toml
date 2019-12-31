@@ -9,3 +9,4 @@ edition = "2018"
 [dependencies]
 flatmk-sys = { path = "../../bindings/rust" }
 flatrt-allocator = { path = "../flatrt-allocator" }
+spin = "0.5"
