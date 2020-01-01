@@ -161,18 +161,16 @@ impl<T> KernelPageRef<T> {
     }
 }
 
-// TODO: Better atomic ordering?
 unsafe fn inc_refcount(phys: PhysAddr) -> u64 {
     let metadata = phys.page_metadata().as_nonnull().unwrap();
     let metadata: &AtomicU64 = metadata.as_ref();
-    metadata.fetch_add(1, Ordering::SeqCst)
+    metadata.fetch_add(1, Ordering::Acquire)
 }
 
-// TODO: Better atomic ordering?
 unsafe fn dec_refcount(phys: PhysAddr) -> u64 {
     let metadata = phys.page_metadata().as_nonnull().unwrap();
     let metadata: &AtomicU64 = metadata.as_ref();
-    metadata.fetch_sub(1, Ordering::SeqCst)
+    metadata.fetch_sub(1, Ordering::Release)
 }
 
 impl<T> Drop for KernelPageRef<T> {
