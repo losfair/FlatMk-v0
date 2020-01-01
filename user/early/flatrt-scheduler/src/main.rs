@@ -319,7 +319,7 @@ fn on_sched_yield(env: ThreadEndpointEnv) {
                 None => {
                     ipc_payload.data[0] = -1i64 as _;
                     ipc_payload.write();
-                    do_ipc_return(env.task, guard);
+                    return;
                 }
             };
 
@@ -342,7 +342,7 @@ fn on_sched_yield(env: ThreadEndpointEnv) {
         _ => {
             ipc_payload.data[0] = -1i64 as _;
             ipc_payload.write();
-            do_ipc_return(env.task, guard);
+            return;
         }
     }
 }
@@ -355,10 +355,6 @@ fn on_timer(env: ThreadEndpointEnv) {
     let guard = try_take_guard_or_return(env.task);
 
     let begin = CURRENT_BEGIN.load(Ordering::SeqCst);
-
-    if (nanosecs + PIC_NANOSECS_PER_CYCLE) / 1000000000 > nanosecs / 1000000000 {
-        debug!("scheduler: timer tick: {}, tag = {}", nanosecs, env.tag);
-    }
 
     // A switch from the idle task should trigger an immediate resched.
     //

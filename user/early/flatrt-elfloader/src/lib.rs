@@ -100,11 +100,15 @@ pub fn load(image: &[u8], temp_base: &ElfTempMapBase, out: &spec::RootPageTable)
             if start % spec::PAGE_SIZE != 0 {
                 return Err(KernelError::InvalidArgument);
             }
-            let end = match start.checked_add(ph.p_filesz as usize) {
+            let mem_end = match start.checked_add(ph.p_memsz as usize) {
                 Some(x) => x,
                 None => return Err(KernelError::InvalidArgument),
             };
-            if end - start > image.len() {
+            let file_end = match start.checked_add(ph.p_filesz as usize) {
+                Some(x) => x,
+                None => return Err(KernelError::InvalidArgument),
+            };
+            if file_end - start > image.len() {
                 return Err(KernelError::InvalidArgument);
             }
 
@@ -116,11 +120,15 @@ pub fn load(image: &[u8], temp_base: &ElfTempMapBase, out: &spec::RootPageTable)
                 prot |= spec::UserPteFlags::EXECUTABLE;
             }
 
-            for i in (start..end).step_by(spec::PAGE_SIZE) {
-                let data = &image[(ph.p_offset as usize) + (i - start)..];
-
+            for i in (start..mem_end).step_by(spec::PAGE_SIZE) {
                 spec::to_result(out.make_leaf(i as u64))?;
                 spec::to_result(out.alloc_leaf(i as u64, prot))?;
+
+                if i >= file_end {
+                    continue;
+                }
+
+                let data = &image[(ph.p_offset as usize) + (i - start)..];
 
                 let temp_base = temp_base.0.lock();
 
@@ -132,8 +140,8 @@ pub fn load(image: &[u8], temp_base: &ElfTempMapBase, out: &spec::RootPageTable)
                     *temp_base as *mut u8,
                     spec::PAGE_SIZE,
                 );
-                let copy_end = if end - i < spec::PAGE_SIZE {
-                    end - i
+                let copy_end = if file_end - i < spec::PAGE_SIZE {
+                    file_end - i
                 } else {
                     spec::PAGE_SIZE
                 };

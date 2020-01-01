@@ -7,6 +7,8 @@ use flatmk_sys::spec;
 
 pub static ME: spec::BasicTask = unsafe { spec::BasicTask::new(spec::CPtr::new(0x00)) };
 
+pub static PUTCHAR: spec::DebugPutchar = unsafe { spec::DebugPutchar::new(spec::CPtr::new(0x01)) };
+
 // These capabilities are created by ourselves.
 
 pub static RPT: spec::RootPageTable = unsafe { spec::RootPageTable::new(spec::CPtr::new(0x08)) };

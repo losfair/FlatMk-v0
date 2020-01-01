@@ -9,6 +9,9 @@ extern crate lazy_static;
 
 extern crate alloc;
 
+#[macro_use]
+mod debug;
+
 mod caps;
 
 use flatmk_sys::spec;
@@ -71,7 +74,7 @@ pub extern "C" fn _start() -> ! {
 
 /// Handles shared memory creation.
 fn on_shmem_create(env: ThreadEndpointEnv) {
-    let mut payload = FastIpcPayload::default();
+    let mut payload = FastIpcPayload::read();
     let command = payload.data[0];
     match command {
         0 => {
@@ -131,7 +134,7 @@ fn on_shmem_create(env: ThreadEndpointEnv) {
 }
 
 fn on_shmem_map(env: ThreadEndpointEnv, map_cptr: spec::CPtr, pages: &Vec<u64>) {
-    let mut payload = FastIpcPayload::default();
+    let mut payload = FastIpcPayload::read();
     let command = payload.data[0];
 
     match command {
@@ -192,6 +195,8 @@ fn on_shmem_map(env: ThreadEndpointEnv, map_cptr: spec::CPtr, pages: &Vec<u64>) 
             flatrt_capalloc::release(remote_rpt.into());
             payload.data[0] = 0;
             payload.write();
+
+            debug!("shmem: Mapped region starting from 0x{:016x}.", remote_start_address);
         }
         1 => {
             // Drop pages.
@@ -211,6 +216,8 @@ fn on_shmem_map(env: ThreadEndpointEnv, map_cptr: spec::CPtr, pages: &Vec<u64>) 
 
             payload.data[0] = 0;
             payload.write();
+
+            debug!("shmem: Dropped shared memory {}.", env.index);
         }
         _ => {
             payload.data[0] = -1i64 as _;

@@ -19,6 +19,7 @@ use flatmk_sys::spec::{self, KernelError};
 use flatrt_thread::{Thread, ThreadCapSet};
 use flatrt_elfloader::ElfTempMapBase;
 use flatrt_fastipc::FastIpcPayload;
+use core::arch::x86_64::_rdtsc;
 
 /// Start address for heap allocation.
 const HEAP_START: usize = 0x7fff00000000;
@@ -59,15 +60,19 @@ unsafe extern "C" fn init_start() -> ! {
     start_scheduler();
     start_shmem();
 
-    debug!("init: Finished setting up initial environment.");
+    debug!("init: Finished setting up initial environment. Now starting drivers.");
+    debug!("- vga");
+    start_driver_vga();
+    debug!("- gclock");
+    start_driver_gclock();
+    debug!("init: All drivers started.");
 
     loop {
         let mut payload = FastIpcPayload::default();
         payload.data[0] = 1;
-        payload.data[1] = 1_000_000_000; // 1 second
+        payload.data[1] = 10_000_000_000; // 10 seconds
         payload.write();
         spec::to_result(caps::SCHED_YIELD.invoke()).unwrap();
-        debug!("init: tick");
     }
 }
 
@@ -211,11 +216,130 @@ fn start_shmem() {
             &spec::CPtr::new(0),
         )).unwrap();
 
+        // Debug putchar.
+        spec::to_result(caps::shmem::CAPSET.put_cap(
+            caps::PUTCHAR.cptr(),
+            &spec::CPtr::new(1),
+        )).unwrap();
+
         // Call the initialize function.
         spec::to_result(caps::shmem::ENDPOINT.invoke()).expect("start_shmem: Cannot invoke task.");
 
         // SHMEM_CREATE endpoint.
         fetch_and_check_remote_task_endpoint(0x0b, &caps::SHMEM_CREATE, &caps::shmem::CAPSET);
+    }
+}
+
+unsafe fn initialize_driver_std(
+    image: &[u8],
+    task: &spec::BasicTask,
+    rpt: &spec::RootPageTable,
+    capset: &spec::CapabilitySet,
+    start_endpoint: &spec::TaskEndpoint,
+) {
+    load_elf_task(
+        image,
+        task,
+        rpt,
+        capset,
+        start_endpoint,
+    ).expect("initialize_driver_std: Cannot load ELF for task.");
+
+    // The first leaf set.
+    spec::to_result(capset.make_leaf(&spec::CPtr::new(0))).unwrap();
+
+    // The task itself.
+    spec::to_result(task.fetch_weak(&caps::BUFFER)).unwrap();
+    spec::to_result(capset.put_cap(
+        &caps::BUFFER,
+        &spec::CPtr::new(0),
+    )).unwrap();
+
+    // Debug putchar.
+    spec::to_result(capset.put_cap(
+        caps::PUTCHAR.cptr(),
+        &spec::CPtr::new(1),
+    )).unwrap();
+
+    // SCHED_CREATE
+    spec::to_result(capset.put_cap(
+        caps::SCHED_CREATE.cptr(),
+        &spec::CPtr::new(2),
+    )).unwrap();
+
+    // SCHED_YIELD
+    spec::to_result(capset.put_cap(
+        caps::SCHED_YIELD.cptr(),
+        &spec::CPtr::new(3),
+    )).unwrap();
+
+    // SHMEM_CREATE
+    spec::to_result(capset.put_cap(
+        caps::SHMEM_CREATE.cptr(),
+        &spec::CPtr::new(4),
+    )).unwrap();
+}
+
+/// Starts the `vga` driver.
+fn start_driver_vga() {
+    unsafe {
+        let start = _rdtsc();
+        debug!("Loading VGA driver...");
+
+        initialize_driver_std(
+            image::DRIVER_VGA,
+            &caps::driver_vga::TASK,
+            &caps::driver_vga::RPT,
+            &caps::driver_vga::CAPSET,
+            &caps::driver_vga::ENDPOINT,
+        );
+
+        // Identity-map VGA MMIO memory.
+        for i in (0xa0000u64..0xc0000u64).step_by(4096) {
+            spec::to_result(caps::ROOT_TASK.new_mmio(&caps::BUFFER, &caps::driver_vga::RPT, i)).unwrap();
+            spec::to_result(caps::driver_vga::RPT.make_leaf(i)).unwrap();
+            spec::to_result(spec::Mmio::new(caps::BUFFER).alloc_at(i, spec::UserPteFlags::WRITABLE)).unwrap();
+        }
+
+        // VGA I/O Ports.
+        spec::to_result(caps::driver_vga::CAPSET.make_leaf(&spec::CPtr::new(0x1000))).unwrap();
+        for i in 0x3c0u64..0x3e0u64 {
+            spec::to_result(caps::ROOT_TASK.new_x86_io_port(&caps::BUFFER, i)).unwrap();
+            spec::to_result(caps::driver_vga::CAPSET.put_cap(&caps::BUFFER, &spec::CPtr::new(0x1000u64 + i - 0x3c0u64))).unwrap();
+        }
+
+        // Cleanup.
+        spec::to_result(caps::CAPSET.drop_cap(&caps::BUFFER)).unwrap();
+
+        // Call the initialize function.
+        spec::to_result(caps::driver_vga::ENDPOINT.invoke()).expect("start_driver_vga: Cannot invoke task.");
+
+        // Fetch shared memory.
+        fetch_and_check_remote_task_endpoint(0x12, &caps::DRIVER_VGA_SHMEM_MAP, &caps::driver_vga::CAPSET);
+
+        let end = _rdtsc();
+        debug!("VGA initialized in {} cycles.", end - start);
+    }
+}
+
+/// Starts the `gclock` driver.
+fn start_driver_gclock() {
+    unsafe {
+        debug!("Loading gclock driver...");
+
+        initialize_driver_std(
+            image::DRIVER_GCLOCK,
+            &caps::driver_gclock::TASK,
+            &caps::driver_gclock::RPT,
+            &caps::driver_gclock::CAPSET,
+            &caps::driver_gclock::ENDPOINT,
+        );
+
+        // VGA shared framebuffer memory.
+        spec::to_result(caps::driver_gclock::CAPSET.put_cap(caps::DRIVER_VGA_SHMEM_MAP.cptr(), &spec::CPtr::new(0x10))).unwrap();
+
+        // Call the initialize function.
+        spec::to_result(caps::driver_gclock::ENDPOINT.invoke()).expect("start_driver_gclock: Cannot invoke task.");
     }
 }
 

@@ -49,6 +49,11 @@ pub static SCHED_YIELD: spec::TaskEndpoint = unsafe { spec::TaskEndpoint::new(sp
 define_task!(shmem, 0x200);
 pub static SHMEM_CREATE: spec::TaskEndpoint = unsafe { spec::TaskEndpoint::new(spec::CPtr::new(0x210)) };
 
+define_task!(driver_vga, 0x300);
+pub static DRIVER_VGA_SHMEM_MAP: spec::TaskEndpoint = unsafe { spec::TaskEndpoint::new(spec::CPtr::new(0x310)) };
+
+define_task!(driver_gclock, 0x400);
+
 /// Initializes all the static capabilities defined above.
 /// 
 /// Must be called before using any of those caps.
@@ -71,5 +76,13 @@ pub unsafe fn initialize_static_caps() {
 
     if CAPSET.make_leaf(shmem::TASK.cptr()) < 0 {
         panic!("initialize_static_caps: Cannot allocate leaf for shmem.");
+    }
+
+    if CAPSET.make_leaf(driver_vga::TASK.cptr()) < 0 {
+        panic!("initialize_static_caps: Cannot allocate leaf for driver_vga.");
+    }
+
+    if CAPSET.make_leaf(driver_gclock::TASK.cptr()) < 0 {
+        panic!("initialize_static_caps: Cannot allocate leaf for driver_gclock.");
     }
 }
