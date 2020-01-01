@@ -6,6 +6,10 @@ echo "Building flatrt-schduler"
 cd early/flatrt-scheduler
 cargo xbuild --target ../x86_64-flatmk-early.json --release || exit 1
 
+echo "Building flatrt-shmem"
+cd ../flatrt-shmem
+cargo xbuild --target ../x86_64-flatmk-early.json --release || exit 1
+
 echo "Building flatrt-init"
 cd ../flatrt-init || exit 1
 cargo xbuild --target ../x86_64-flatmk-early.json --release || exit 1

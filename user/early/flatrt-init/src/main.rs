@@ -57,6 +57,7 @@ unsafe extern "C" fn init_start() -> ! {
     initialize_idle_task();
 
     start_scheduler();
+    start_shmem();
 
     debug!("init: Finished setting up initial environment.");
 
@@ -83,7 +84,7 @@ unsafe fn initialize_idle_task() {
         owner_capset: caps::CAPSET,
         new_task: caps::IDLE,
     });
-    th.make_ipc_endpoint(spec::TaskEndpointFlags::TAGGABLE, true, caps::IDLE_REPLY.cptr(), |task, x| {
+    th.make_ipc_endpoint(spec::TaskEndpointFlags::TAGGABLE, true, caps::IDLE_REPLY.cptr(), |env| {
         caps::ROOT_TASK.make_idle();
         unreachable!()
     });
@@ -186,6 +187,35 @@ fn start_scheduler() {
 
         // SCHED_YIELD endpoint.
         fetch_and_check_remote_task_endpoint(0x13, &caps::SCHED_YIELD, &caps::scheduler::CAPSET);
+    }
+}
+
+/// Starts the `shmem` task.
+fn start_shmem() {
+    load_elf_task(
+        image::SHMEM,
+        &caps::shmem::TASK,
+        &caps::shmem::RPT,
+        &caps::shmem::CAPSET,
+        &caps::shmem::ENDPOINT,
+    ).expect("start_shmem: Cannot load ELF for task.");
+
+    unsafe {
+        // The first leaf set.
+        spec::to_result(caps::shmem::CAPSET.make_leaf(&spec::CPtr::new(0))).unwrap();
+
+        // The task itself.
+        spec::to_result(caps::shmem::TASK.fetch_weak(&caps::BUFFER)).unwrap();
+        spec::to_result(caps::shmem::CAPSET.put_cap(
+            &caps::BUFFER,
+            &spec::CPtr::new(0),
+        )).unwrap();
+
+        // Call the initialize function.
+        spec::to_result(caps::shmem::ENDPOINT.invoke()).expect("start_shmem: Cannot invoke task.");
+
+        // SHMEM_CREATE endpoint.
+        fetch_and_check_remote_task_endpoint(0x0b, &caps::SHMEM_CREATE, &caps::shmem::CAPSET);
     }
 }
 

@@ -46,6 +46,9 @@ define_task!(scheduler, 0x100);
 pub static SCHED_CREATE: spec::TaskEndpoint = unsafe { spec::TaskEndpoint::new(spec::CPtr::new(0x110)) };
 pub static SCHED_YIELD: spec::TaskEndpoint = unsafe { spec::TaskEndpoint::new(spec::CPtr::new(0x111)) };
 
+define_task!(shmem, 0x200);
+pub static SHMEM_CREATE: spec::TaskEndpoint = unsafe { spec::TaskEndpoint::new(spec::CPtr::new(0x210)) };
+
 /// Initializes all the static capabilities defined above.
 /// 
 /// Must be called before using any of those caps.
@@ -64,5 +67,9 @@ pub unsafe fn initialize_static_caps() {
 
     if CAPSET.make_leaf(scheduler::TASK.cptr()) < 0 {
         panic!("initialize_static_caps: Cannot allocate leaf for scheduler.");
+    }
+
+    if CAPSET.make_leaf(shmem::TASK.cptr()) < 0 {
+        panic!("initialize_static_caps: Cannot allocate leaf for shmem.");
     }
 }
