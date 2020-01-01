@@ -501,7 +501,7 @@ fn generate_types(spec: &Spec, lang: TargetLanguage, out: &mut String) {
     CPtr cap;
 }};
 
-struct {} {}_new(CPtr cap) {{
+static inline struct {} {}_new(CPtr cap) {{
     struct {} result = {{ .cap = cap }};
     return result;
 }}

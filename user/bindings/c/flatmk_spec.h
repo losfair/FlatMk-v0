@@ -106,7 +106,7 @@ struct BasicTask {
     CPtr cap;
 };
 
-struct BasicTask BasicTask_new(CPtr cap) {
+static inline struct BasicTask BasicTask_new(CPtr cap) {
     struct BasicTask result = { .cap = cap };
     return result;
 }
@@ -115,7 +115,7 @@ struct CapabilitySet {
     CPtr cap;
 };
 
-struct CapabilitySet CapabilitySet_new(CPtr cap) {
+static inline struct CapabilitySet CapabilitySet_new(CPtr cap) {
     struct CapabilitySet result = { .cap = cap };
     return result;
 }
@@ -124,7 +124,7 @@ struct DebugPutchar {
     CPtr cap;
 };
 
-struct DebugPutchar DebugPutchar_new(CPtr cap) {
+static inline struct DebugPutchar DebugPutchar_new(CPtr cap) {
     struct DebugPutchar result = { .cap = cap };
     return result;
 }
@@ -133,7 +133,7 @@ struct Interrupt {
     CPtr cap;
 };
 
-struct Interrupt Interrupt_new(CPtr cap) {
+static inline struct Interrupt Interrupt_new(CPtr cap) {
     struct Interrupt result = { .cap = cap };
     return result;
 }
@@ -142,7 +142,7 @@ struct Mmio {
     CPtr cap;
 };
 
-struct Mmio Mmio_new(CPtr cap) {
+static inline struct Mmio Mmio_new(CPtr cap) {
     struct Mmio result = { .cap = cap };
     return result;
 }
@@ -151,7 +151,7 @@ struct RootPageTable {
     CPtr cap;
 };
 
-struct RootPageTable RootPageTable_new(CPtr cap) {
+static inline struct RootPageTable RootPageTable_new(CPtr cap) {
     struct RootPageTable result = { .cap = cap };
     return result;
 }
@@ -160,7 +160,7 @@ struct RootTask {
     CPtr cap;
 };
 
-struct RootTask RootTask_new(CPtr cap) {
+static inline struct RootTask RootTask_new(CPtr cap) {
     struct RootTask result = { .cap = cap };
     return result;
 }
@@ -169,7 +169,7 @@ struct TaskEndpoint {
     CPtr cap;
 };
 
-struct TaskEndpoint TaskEndpoint_new(CPtr cap) {
+static inline struct TaskEndpoint TaskEndpoint_new(CPtr cap) {
     struct TaskEndpoint result = { .cap = cap };
     return result;
 }
@@ -178,7 +178,7 @@ struct X86IoPort {
     CPtr cap;
 };
 
-struct X86IoPort X86IoPort_new(CPtr cap) {
+static inline struct X86IoPort X86IoPort_new(CPtr cap) {
     struct X86IoPort result = { .cap = cap };
     return result;
 }
