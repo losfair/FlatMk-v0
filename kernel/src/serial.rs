@@ -24,38 +24,25 @@ impl SerialPort {
     }
 
     pub unsafe fn init(&mut self) {
-        outb(self.base_port + 1, 0x00); // Disable interrupts
-        outb(self.base_port + 3, 0x00); // Set baud rate divisor
-        outb(self.base_port + 0, 0x00); // Set baud rate to 38400 baud
-        outb(self.base_port + 1, 0x00); //
-        outb(self.base_port + 3, 0x00); // 8 bits, no parity, one stop bit
-        outb(self.base_port + 2, 0x00); // Enable FIFO, clear them, with 14-byte threshold
-        outb(self.base_port + 4, 0x00); // Enable IRQs, RTS/DSR set
-        outb(self.base_port + 1, 0x00); // Disable Interrupts
+        outb(self.base_port + 1, 0x00); // Disable all interrupts
+        outb(self.base_port + 3, 0x80); // Enable DLAB (set baud rate divisor)
+        outb(self.base_port + 0, 0x01); // Set baud rate to 115200 baud
+        outb(self.base_port + 1, 0x00); // (hi byte)
+        outb(self.base_port + 3, 0x03); // 8 bits, no parity, one stop bit
+        outb(self.base_port + 2, 0xc7); // Enable FIFO, clear them, with 14-byte threshold
+        outb(self.base_port + 4, 0x0b); // Enable IRQs, RTS/DSR set
     }
 
-    pub fn get_lsts(&mut self) -> u8 {
+    fn is_transmit_empty(&mut self) -> bool {
         unsafe {
-            inb(self.base_port + 5) // line status register is on port 5.
+            inb(self.base_port + 5) & 0x20 != 0
         }
     }
 
     pub fn send(&mut self, data: u8) {
         unsafe {
-            match data {
-                8 | 0x7F => {
-                    while (!self.get_lsts() & 1) == 0 {}
-                    outb(self.base_port, 8);
-                    while (!self.get_lsts() & 1) == 0 {}
-                    outb(self.base_port, b' ');
-                    while (!self.get_lsts() & 1) == 0 {}
-                    outb(self.base_port, 8);
-                }
-                _ => {
-                    while (!self.get_lsts() & 1) == 0 {}
-                    outb(self.base_port, data);
-                }
-            }
+            while !self.is_transmit_empty() {}
+            outb(self.base_port, data);
         }
     }
 }
