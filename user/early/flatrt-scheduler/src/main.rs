@@ -19,7 +19,7 @@ mod debug;
 mod caps;
 
 use flatmk_sys::spec;
-use flatrt_thread::{Thread, ThreadCapSet};
+use flatrt_thread::{Thread, ThreadCapSet, ThreadEndpointEnv};
 use flatrt_fastipc::FastIpcPayload;
 use core::sync::atomic::{AtomicU64, Ordering};
 use alloc::{
@@ -203,7 +203,7 @@ unsafe fn setup_interrupt_handler() {
             spec::TaskEndpointFlags::empty(),
             false,
             &idle_initializer_cptr,
-            |task, _| {
+            |_env| {
                 spec::to_result(caps::IDLE_REPLY.set_tag(IDLE_TAG)).expect("setup_interrupt_handler: Cannot set idle tag.");
             }
         );
@@ -240,8 +240,8 @@ unsafe fn setup_sched_api() {
     );
 }
 
-fn on_sched_create(this_task: spec::BasicTask, tag: u64) {
-    let guard = try_take_guard_or_return(this_task);
+fn on_sched_create(env: ThreadEndpointEnv) {
+    let guard = try_take_guard_or_return(env.task);
 
     let mut ipc_payload = FastIpcPayload::read();
     let command = ipc_payload.data[0];
@@ -250,7 +250,7 @@ fn on_sched_create(this_task: spec::BasicTask, tag: u64) {
         match command {
             0 => {
                 let backing_cptr = flatrt_capalloc::allocate();
-                spec::to_result(this_task.fetch_ipc_cap(&backing_cptr, 1)).unwrap();
+                spec::to_result(env.task.fetch_ipc_cap(&backing_cptr, 1)).unwrap();
                 let incoming_task = spec::TaskEndpoint::new(backing_cptr);
 
                 // Validate that the incoming capability is actually a `TaskEndpoint` with `reply` property.
@@ -266,27 +266,27 @@ fn on_sched_create(this_task: spec::BasicTask, tag: u64) {
                         flatrt_capalloc::release(backing_cptr);
                         ipc_payload.data[0] = -1i64 as _;
                         ipc_payload.write();
-                        do_ipc_return(this_task, guard);
+                        do_ipc_return(env.task, guard);
                 }
 
                 SCHED_QUEUE.try_lock().unwrap().push_back(SchedEntity {
                     endpoint: incoming_task,
                     xsave: Box::new(Xsave::default()),
                 });
-                do_ipc_return(this_task, guard);
+                do_ipc_return(env.task, guard);
             }
             _ => {
                 ipc_payload.data[0] = -1i64 as _;
                 ipc_payload.write();
-                do_ipc_return(this_task, guard);
+                do_ipc_return(env.task, guard);
             }
         }
         
     }
 }
 
-fn on_sched_yield(this_task: spec::BasicTask, tag: u64) {
-    let guard = try_take_guard_or_return(this_task);
+fn on_sched_yield(env: ThreadEndpointEnv) {
+    let guard = try_take_guard_or_return(env.task);
 
     let mut ipc_payload = FastIpcPayload::read();
     let command = ipc_payload.data[0];
@@ -297,7 +297,7 @@ fn on_sched_yield(this_task: spec::BasicTask, tag: u64) {
             // Busy yield. Allow the scheduler to switch to the next task.
             let backing_cptr = flatrt_capalloc::allocate();
             unsafe {
-                spec::to_result(this_task.fetch_ipc_cap(&backing_cptr, 0)).unwrap();
+                spec::to_result(env.task.fetch_ipc_cap(&backing_cptr, 0)).unwrap();
             }
             let incoming_task = unsafe {
                 spec::TaskEndpoint::new(backing_cptr)
@@ -306,7 +306,7 @@ fn on_sched_yield(this_task: spec::BasicTask, tag: u64) {
                 endpoint: incoming_task,
                 xsave: Box::new(Xsave::default()),
             });
-            resched(this_task, guard);
+            resched(env.task, guard);
         }
         1 => {
             // Sleep for a given period of time.
@@ -319,13 +319,13 @@ fn on_sched_yield(this_task: spec::BasicTask, tag: u64) {
                 None => {
                     ipc_payload.data[0] = -1i64 as _;
                     ipc_payload.write();
-                    do_ipc_return(this_task, guard);
+                    do_ipc_return(env.task, guard);
                 }
             };
 
             let backing_cptr = flatrt_capalloc::allocate();
             unsafe {
-                spec::to_result(this_task.fetch_ipc_cap(&backing_cptr, 0)).unwrap();
+                spec::to_result(env.task.fetch_ipc_cap(&backing_cptr, 0)).unwrap();
             }
             let incoming_task = unsafe {
                 spec::TaskEndpoint::new(backing_cptr)
@@ -337,49 +337,49 @@ fn on_sched_yield(this_task: spec::BasicTask, tag: u64) {
                     xsave: Box::new(Xsave::default()),
                 }),
             });
-            resched(this_task, guard);
+            resched(env.task, guard);
         }
         _ => {
             ipc_payload.data[0] = -1i64 as _;
             ipc_payload.write();
-            do_ipc_return(this_task, guard);
+            do_ipc_return(env.task, guard);
         }
     }
 }
 
 /// Timer interrupt handler.
-fn on_timer(this_task: spec::BasicTask, tag: u64) {
+fn on_timer(env: ThreadEndpointEnv) {
     // Update timestamp before trying to take guard to keep the time accurate.
     let nanosecs = NANOSEC.fetch_add(PIC_NANOSECS_PER_CYCLE, Ordering::SeqCst);
 
-    let guard = try_take_guard_or_return(this_task);
+    let guard = try_take_guard_or_return(env.task);
 
     let begin = CURRENT_BEGIN.load(Ordering::SeqCst);
 
     if (nanosecs + PIC_NANOSECS_PER_CYCLE) / 1000000000 > nanosecs / 1000000000 {
-        debug!("scheduler: timer tick: {}, tag = {}", nanosecs, tag);
+        debug!("scheduler: timer tick: {}, tag = {}", nanosecs, env.tag);
     }
 
     // A switch from the idle task should trigger an immediate resched.
     //
     // But before that, we need to update the idle task endpoint, since previously we used it
     // to enter the idle task and a reply endpoint can be used only once.
-    if tag == IDLE_TAG {
+    if env.tag == IDLE_TAG {
         unsafe {
-            spec::to_result(this_task.fetch_ipc_cap(caps::IDLE_REPLY.cptr(), 0)).unwrap();
+            spec::to_result(env.task.fetch_ipc_cap(caps::IDLE_REPLY.cptr(), 0)).unwrap();
         }
-        resched(this_task, guard);
+        resched(env.task, guard);
     }
 
     // Do not reschedule if the task hasn't used up its time slice.
     if nanosecs - begin < MAX_TIME_SLICE_NS {
-        do_ipc_return(this_task, guard);
+        do_ipc_return(env.task, guard);
     }
 
     // Take the previous task.
     let backing_cptr = flatrt_capalloc::allocate();
     unsafe {
-        spec::to_result(this_task.fetch_ipc_cap(&backing_cptr, 0)).unwrap();
+        spec::to_result(env.task.fetch_ipc_cap(&backing_cptr, 0)).unwrap();
     }
     let incoming_task = unsafe {
         spec::TaskEndpoint::new(backing_cptr)
@@ -398,7 +398,7 @@ fn on_timer(this_task: spec::BasicTask, tag: u64) {
     });
 
     // Resched.
-    resched(this_task, guard);
+    resched(env.task, guard);
 }
 
 /// Returns to the previous task. Never fails.
