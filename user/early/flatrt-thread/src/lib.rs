@@ -58,6 +58,9 @@ pub struct Thread {
     ipc_entries: ManuallyDrop<Box<RwLock<BTreeMap<u64, Arc<ThreadEntry>>>>>,
 }
 
+unsafe impl Send for Thread {}
+unsafe impl Sync for Thread {}
+
 /// Capability pointers used by a thread.
 pub struct ThreadCapSet {
     pub owner_task: spec::BasicTask,
@@ -65,9 +68,23 @@ pub struct ThreadCapSet {
     pub new_task: spec::BasicTask,
 }
 
+/// The environment of a thread's task endpoint.
+/// 
+/// Passed to the endpoint's handler function.
+pub struct ThreadEndpointEnv {
+    /// The backing FlatMk task.
+    pub task: spec::BasicTask,
+
+    /// The source-specific tag associated with the caller.
+    pub tag: u64,
+
+    /// The index of the endpoint, in the current thread.
+    pub index: u64,
+}
+
 /// The type stored in the platform-specific TLS register, e.g. `gs` on x86-64.
 #[repr(C)]
-pub struct DirectTls {
+struct DirectTls {
     stack_end: *mut ThreadStack,
     task: spec::CPtr,
     ipc_entries: *mut RwLock<BTreeMap<u64, Arc<ThreadEntry>>>,
@@ -141,10 +158,16 @@ impl Thread {
         }
     }
 
-    pub fn make_ipc_endpoint_raw<F: Fn(spec::BasicTask, u64) + Send + 'static>(&self, f: F) -> (u64, u64) {
+    pub fn make_ipc_endpoint_raw<F: Fn(ThreadEndpointEnv) + Send + 'static>(&self, f: F) -> (u64, u64) {
         let mut ipc_entries = self.ipc_entries.write();
         let index = self.next_ipc_entry_index.fetch_add(1, Ordering::SeqCst);
-        ipc_entries.insert(index, Arc::new(f));
+        ipc_entries.insert(index, Arc::new(move |task, tag| {
+            f(ThreadEndpointEnv {
+                task,
+                tag,
+                index,
+            })
+        }));
 
         (ipc_entry as u64, index as u64)
     }
@@ -152,7 +175,7 @@ impl Thread {
     /// Makes an IPC endpoint to this task with entry function `f`.
     /// 
     /// Returns the index of the entry.
-    pub fn make_ipc_endpoint<F: Fn(spec::BasicTask, u64) + Send + 'static>(&self, flags: spec::TaskEndpointFlags, reply: bool, out: &spec::CPtr, f: F) -> u64 {
+    pub fn make_ipc_endpoint<F: Fn(ThreadEndpointEnv) + Send + 'static>(&self, flags: spec::TaskEndpointFlags, reply: bool, out: &spec::CPtr, f: F) -> u64 {
         let (entry, index) = self.make_ipc_endpoint_raw(f);
 
         unsafe {
@@ -206,11 +229,13 @@ unsafe extern "C" fn __flatrt_thread_ipc_entry(
     ipc_entries: &RwLock<BTreeMap<u64, Arc<ThreadEntry>>>,
 ) -> ! {
     let task = spec::BasicTask::new(task);
-
-    // get() will return None if the endpoint is dropped.
-    let entry = ipc_entries.read().get(&context).cloned();
-    if let Some(entry) = entry {
-        entry(task, tag);
+    
+    {
+        // get() will return None if the endpoint is dropped.
+        let entry = ipc_entries.read().get(&context).cloned();
+        if let Some(entry) = entry {
+            entry(task, tag);
+        }
     }
 
     task.ipc_return();
