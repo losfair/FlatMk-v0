@@ -68,6 +68,7 @@ pub extern "C" fn kstart(boot_info: &'static BootInfo) -> ! {
 
     // Early init.
     unsafe {
+        println!("Boot info: \n{:#?}", boot_info);
         boot::set_boot_info(boot_info);
         arch_early_init();
         paging::init();
