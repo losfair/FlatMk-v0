@@ -65,6 +65,8 @@ unsafe extern "C" fn init_start() -> ! {
     start_driver_vga();
     debug!("- gclock");
     start_driver_gclock();
+    debug!("- sequencer-linux");
+    start_driver_sequencer_linux();
     debug!("init: All drivers started.");
 
     loop {
@@ -342,6 +344,25 @@ fn start_driver_gclock() {
         spec::to_result(caps::driver_gclock::ENDPOINT.invoke()).expect("start_driver_gclock: Cannot invoke task.");
     }
 }
+
+/// Starts the `sequencer-linux` driver.
+fn start_driver_sequencer_linux() {
+    unsafe {
+        debug!("Loading sequencer-linux driver...");
+
+        initialize_driver_std(
+            image::DRIVER_SEQUENCER_LINUX,
+            &caps::driver_sequencer_linux::TASK,
+            &caps::driver_sequencer_linux::RPT,
+            &caps::driver_sequencer_linux::CAPSET,
+            &caps::driver_sequencer_linux::ENDPOINT,
+        );
+
+        // Call the initialize function.
+        spec::to_result(caps::driver_sequencer_linux::ENDPOINT.invoke()).expect("start_driver_sequencer_linux: Cannot invoke task.");
+    }
+}
+
 
 /// Fetches and checks a task endpoint from a remote capability set.
 /// 

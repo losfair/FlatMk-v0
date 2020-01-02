@@ -54,6 +54,8 @@ pub static DRIVER_VGA_SHMEM_MAP: spec::TaskEndpoint = unsafe { spec::TaskEndpoin
 
 define_task!(driver_gclock, 0x400);
 
+define_task!(driver_sequencer_linux, 0x500);
+
 /// Initializes all the static capabilities defined above.
 /// 
 /// Must be called before using any of those caps.
@@ -84,5 +86,9 @@ pub unsafe fn initialize_static_caps() {
 
     if CAPSET.make_leaf(driver_gclock::TASK.cptr()) < 0 {
         panic!("initialize_static_caps: Cannot allocate leaf for driver_gclock.");
+    }
+
+    if CAPSET.make_leaf(driver_sequencer_linux::TASK.cptr()) < 0 {
+        panic!("initialize_static_caps: Cannot allocate leaf for driver_sequencer_linux.");
     }
 }
