@@ -180,16 +180,26 @@ void rerender() {
         VGAWriteReg(VGA_SEQ, VGA__SEQ__MAP, 1<<plane);
         VGAWriteReg(VGA_GCT, VGA__GCT__RDM, plane);
         for(y = 0; y < FB_HEIGHT; y++) {
+            int any_changed = 0;
+            uint8_t pixelbuf = 0;
+
             for(x = 0; x < FB_WIDTH; x++) {
                 int index = y * FB_WIDTH + x;
                 if(fb_changed[index]) {
-                    volatile uint8_t *pixel = vga_memory_start + (index >> 3);
                     uint8_t mask = 1 << (7 - (x & 7));
                     uint8_t color = local_fb[index];
                     if(color & (1 << plane)) {
-                        *pixel |= mask;
-                    } else {
-                        *pixel &= ~mask;
+                        pixelbuf |= mask;
+                    }
+                    any_changed = 1;
+                }
+
+                if((x + 1) % 8 == 0) {
+                    if(any_changed) {
+                        volatile uint8_t *pixel = vga_memory_start + (index >> 3);
+                        *pixel = pixelbuf;
+                        pixelbuf = 0;
+                        any_changed = 0;
                     }
                 }
             }
