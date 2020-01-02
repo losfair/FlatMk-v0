@@ -234,7 +234,7 @@ interrupt!(intr_divide_error, __intr_divide_error, frame, _registers, {
     if !is_user_fault(frame) {
         panic!("Kernel divide error");
     }
-    Task::current().raise_fault(TaskFaultState::IntegerDivision);
+    Task::raise_fault(Task::current(), TaskFaultState::IntegerDivision);
 });
 
 interrupt!(
@@ -249,7 +249,7 @@ interrupt!(
         if !is_user_fault(frame) {
             panic!("Kernel invalid opcode");
         }
-        Task::current().raise_fault(TaskFaultState::IllegalInstruction);
+        Task::raise_fault(Task::current(), TaskFaultState::IllegalInstruction);
     }
 );
 
@@ -260,7 +260,7 @@ interrupt_with_code!(intr_gpf, __intr_gpf, frame, _registers, code, {
     if !is_user_fault(frame) {
         panic!("Kernel GPF");
     }
-    Task::current().raise_fault(TaskFaultState::GeneralProtection);
+    Task::raise_fault(Task::current(), TaskFaultState::GeneralProtection);
 });
 
 interrupt_with_code!(
@@ -283,7 +283,7 @@ interrupt_with_code!(
         if !is_user_fault(frame) {
             panic!("Kernel page fault");
         }
-        Task::current().raise_fault(TaskFaultState::PageFault);
+        Task::raise_fault(Task::current(), TaskFaultState::PageFault);
     }
 );
 
@@ -306,7 +306,7 @@ interrupt_with_code!(
         if !is_user_fault(frame) {
             panic!("Kernel stack segment fault");
         }
-        Task::current().raise_fault(TaskFaultState::PageFault);
+        Task::raise_fault(Task::current(), TaskFaultState::PageFault);
     }
 );
 

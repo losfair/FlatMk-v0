@@ -41,6 +41,7 @@ pub enum TaskFaultState {
     GeneralProtection,
     IllegalInstruction,
     IntegerDivision,
+    InvalidCapability,
 }
 
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
@@ -286,9 +287,8 @@ impl Task {
         })
     }
 
-    pub fn raise_fault(&self, fault: TaskFaultState) -> ! {
+    pub fn raise_fault(me: KernelObjectRef<Task>, fault: TaskFaultState) -> ! {
         panic!("fault not handled: {:?}", fault);
-        *self.pending_fault.lock() = fault;
     }
 
     /// Invokes IPC on this task.

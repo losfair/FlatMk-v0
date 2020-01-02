@@ -189,7 +189,7 @@ pub(super) fn get_hlt() -> u64 {
 /// Invalidates registers as defined by the calling convention, but is usually faster.
 pub unsafe fn arch_enter_user_mode_syscall(registers: *const TaskRegisters) -> ! {
     if !super::addr::address_is_canonical((*registers).rip) {
-        Task::current().raise_fault(TaskFaultState::GeneralProtection);
+        Task::raise_fault(Task::current(), TaskFaultState::GeneralProtection);
     }
 
     asm!(
