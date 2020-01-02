@@ -3,4 +3,4 @@ all:
 		-I../include -I../../bindings/c \
 		-mgeneral-regs-only \
 		-o ../bin/vga.driver \
-		main.c vgamode.c
+		../support/*.c main.c vgamode.c

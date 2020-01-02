@@ -3,4 +3,4 @@ all:
 		-I../include -I../../bindings/c \
 		-mgeneral-regs-only \
 		-o ../bin/gclock.driver \
-		main.c
+		../support/*.c main.c

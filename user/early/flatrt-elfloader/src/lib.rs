@@ -96,9 +96,10 @@ pub fn load(image: &[u8], temp_base: &ElfTempMapBase, out: &spec::RootPageTable)
             if ph.p_type != PT_LOAD {
                 continue;
             }
+            let mut padding_before: usize = 0;
             let start = ph.p_vaddr as usize;
             if start % spec::PAGE_SIZE != 0 {
-                return Err(KernelError::InvalidArgument);
+                padding_before = start % spec::PAGE_SIZE;
             }
             let mem_end = match start.checked_add(ph.p_memsz as usize) {
                 Some(x) => x,
@@ -120,15 +121,13 @@ pub fn load(image: &[u8], temp_base: &ElfTempMapBase, out: &spec::RootPageTable)
                 prot |= spec::UserPteFlags::EXECUTABLE;
             }
 
-            for i in (start..mem_end).step_by(spec::PAGE_SIZE) {
+            for i in (start - padding_before..mem_end).step_by(spec::PAGE_SIZE) {
                 spec::to_result(out.make_leaf(i as u64))?;
                 spec::to_result(out.alloc_leaf(i as u64, prot))?;
 
                 if i >= file_end {
                     continue;
                 }
-
-                let data = &image[(ph.p_offset as usize) + (i - start)..];
 
                 let temp_base = temp_base.0.lock();
 
@@ -140,12 +139,21 @@ pub fn load(image: &[u8], temp_base: &ElfTempMapBase, out: &spec::RootPageTable)
                     *temp_base as *mut u8,
                     spec::PAGE_SIZE,
                 );
-                let copy_end = if file_end - i < spec::PAGE_SIZE {
-                    file_end - i
+
+                if i < start {
+                    // Handle padding.
+                    let data = &image[ph.p_offset as usize..];
+                    slice[padding_before..spec::PAGE_SIZE].copy_from_slice(&data[..spec::PAGE_SIZE - padding_before]);
                 } else {
-                    spec::PAGE_SIZE
-                };
-                slice[..copy_end].copy_from_slice(&data[..copy_end]);
+                    let copy_end = if file_end - i < spec::PAGE_SIZE {
+                        file_end - i
+                    } else {
+                        spec::PAGE_SIZE
+                    };
+                    let data = &image[(ph.p_offset as usize) + (i - start)..];
+                    slice[..copy_end].copy_from_slice(&data[..copy_end]);
+                }
+                
             }
         }
         Ok(ElfMetadata {

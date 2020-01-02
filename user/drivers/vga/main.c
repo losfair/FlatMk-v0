@@ -1,5 +1,5 @@
 #include <stdio.h>
-#include <driver_start.h>
+#include <stddriver.h>
 #include <x86intrin.h>
 #include <stdatomic.h>
 #include "vgamode.h"
@@ -273,8 +273,8 @@ void main() {
     flatmk_debug_puts(buf);
 
     // Start worker threads.
-    start_thread(BasicTask_new(log_task_cap), (uint64_t) log_entry, (uint64_t) __log_stack + sizeof(__log_stack) - 8, GLOBAL_TLS);
-    start_thread(BasicTask_new(render_task_cap), (uint64_t) render_loop, (uint64_t) __render_stack + sizeof(__render_stack) - 8, GLOBAL_TLS);
+    start_thread(BasicTask_new(log_task_cap), (uint64_t) log_entry, (uint64_t) __log_stack + sizeof(__log_stack) - 8, FLATRT_DRIVER_GLOBAL_TLS, NULL);
+    start_thread(BasicTask_new(render_task_cap), (uint64_t) render_loop, (uint64_t) __render_stack + sizeof(__render_stack) - 8, FLATRT_DRIVER_GLOBAL_TLS, NULL);
 
     sprintf(buf, "vga: Started. Initial TSC frequency: %llu\n", tsc_freq);
     flatmk_debug_puts(buf);

@@ -1,17 +1,15 @@
-// This header should only be included once, in the `main` source.
-
 #include <stddriver.h>
 
 void main();
 
-static unsigned char GLOBAL_TLS[4096 * 16];
+unsigned char FLATRT_DRIVER_GLOBAL_TLS[4096 * 16];
 
 // FIXME: Copy TLS image?
 static __attribute__((noinline)) void flatmk_init() {
     // This causes "Page fault at 0xd8".
     //__copy_tls(TLS);
 
-    flatmk_set_fs_base((uint64_t) GLOBAL_TLS);
+    flatmk_set_fs_base((uint64_t) FLATRT_DRIVER_GLOBAL_TLS);
 
     BasicTask_fetch_capset(CAP_ME, CAP_CAPSET.cap);
     BasicTask_fetch_root_page_table(CAP_ME, CAP_RPT.cap);

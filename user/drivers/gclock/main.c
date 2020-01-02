@@ -1,4 +1,4 @@
-#include <driver_start.h>
+#include <stddriver.h>
 
 #define FB_WIDTH 640
 #define FB_HEIGHT 480
@@ -100,7 +100,7 @@ void main() {
         framebuffer[i].b = 0;
     }
 
-    start_thread(CAP_THREAD_TIMER, thread_timer, (uint64_t) __thread_timer_stack + sizeof(__thread_timer_stack) - 8, GLOBAL_TLS);
+    start_thread(CAP_THREAD_TIMER, (uint64_t) thread_timer, (uint64_t) __thread_timer_stack + sizeof(__thread_timer_stack) - 8, FLATRT_DRIVER_GLOBAL_TLS, NULL);
 
     // Return.
     TaskEndpoint_invoke(CAP_BUFFER_INITRET);
