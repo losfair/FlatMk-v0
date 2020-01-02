@@ -381,6 +381,10 @@ impl Task {
                 *regs.usermode_arg_mut(0).unwrap() = entrypoint.user_context;
                 *regs.usermode_arg_mut(1).unwrap() = prev.get_tag(task.id).unwrap_or(0);
 
+                if let IpcReason::Fault(fault) = reason {
+                    *regs.usermode_arg_mut(2).unwrap() = fault as i64 as u64;
+                }
+
                 // Use syscall mode, since the target task is aware of the switch.
                 state_restore_mode = StateRestoreMode::Syscall;
             }

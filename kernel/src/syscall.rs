@@ -1,6 +1,5 @@
 use crate::arch::task::arch_init_syscall;
 use crate::capability::{CapabilityInvocation, INVALID_CAP};
-use crate::error::*;
 use crate::task::{Task};
 use crate::spec::TaskFaultReason;
 
@@ -9,16 +8,14 @@ pub unsafe fn init() {
 }
 
 fn dispatch_syscall(invocation: &mut CapabilityInvocation) -> i64 {
-    if *invocation.registers.return_value_mut() != 0 {
-        println!("dispatch_syscall: warning: return register not set to zero before syscall: {}", *invocation.registers.return_value_mut());
-    }
     let cptr = invocation.cptr();
     if cptr.0 == INVALID_CAP {
-        KernelError::InvalidArgument as i32 as i64
+        Task::raise_fault(Task::current(), TaskFaultReason::InvalidCapability, &invocation.registers);
     } else {
         let cap = {
             let task = Task::current();
-            match task.capabilities.get().lookup_cptr_no_check_clone(cptr) {
+            let maybe_cap = task.capabilities.get().lookup_cptr_no_check_clone(cptr);
+            match maybe_cap {
                 Ok(x) => x,
                 Err(_) => {
                     Task::raise_fault(task, TaskFaultReason::InvalidCapability, &invocation.registers);
