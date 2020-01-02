@@ -12,7 +12,8 @@
     untagged_unions,
     const_if_match,
     const_panic,
-    try_trait
+    try_trait,
+    global_asm
 )]
 
 #[macro_use]

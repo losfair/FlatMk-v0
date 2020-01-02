@@ -1,12 +1,12 @@
 use crate::addr::*;
-use crate::arch::task::TaskRegisters;
+use crate::arch::task::{TaskRegisters, copy_from_user_typed, copy_to_user_typed};
 use crate::error::*;
 use crate::kobj::*;
 use crate::multilevel::*;
 use crate::pagealloc::*;
 use crate::paging::{PageTableMto, PageTableObject};
 use crate::spec::{UserPteFlags, TaskEndpointFlags};
-use crate::task::{IpcEntry, EntryType, StateRestoreMode, Task, TaskEndpoint, EntryDirection, IpcReason, TaskFaultState, enter_user_mode};
+use crate::task::{IpcEntry, EntryType, StateRestoreMode, Task, TaskEndpoint, EntryDirection, IpcReason, enter_user_mode};
 use core::convert::TryFrom;
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
@@ -168,15 +168,29 @@ impl CapabilitySet {
         })??)
     }
 
+    /// Looks up and clones a capability endpoint, without checking whether the endpoint is clonable.
+    #[inline]
+    pub fn lookup_cptr_no_check_clone(&self, cptr: CapPtr) -> KernelResult<CapabilityEndpoint> {
+        self.entry_endpoint(cptr, |x| x.clone())
+    }
+
     #[inline]
     pub fn lookup_cptr(&self, cptr: CapPtr) -> KernelResult<CapabilityEndpoint> {
-        self.entry_endpoint(cptr, |x| x.clone())
+        self.entry_endpoint(cptr, |x| x.try_clone())?
     }
 
     #[inline]
     pub fn lookup_cptr_take(&self, cptr: CapPtr) -> KernelResult<CapabilityEndpoint> {
         self.entry_endpoint(cptr, |x| {
             core::mem::replace(x, CapabilityEndpoint::default())
+        })
+    }
+}
+
+impl TryClone for CapabilityEndpoint {
+    fn try_clone(&self) -> KernelResult<Self> {
+        self.object.try_clone().map(|x| CapabilityEndpoint {
+            object: x,
         })
     }
 }
@@ -425,6 +439,40 @@ fn invoke_cap_basic_task(
             } else {
                 0
             })
+        }
+        BasicTaskRequest::PutFaultHandler => {
+            let cptr = CapPtr(invocation.arg(1)? as u64);
+            let handler = match current.capabilities.get().lookup_cptr(cptr)?.object {
+                CapabilityEndpointObject::TaskEndpoint(x) => x,
+                _ => return Err(KernelError::InvalidArgument),
+            };
+            // Here `lookup_cptr` has checked that the endpoint can be cloned.
+            // Therefore the handler has a `Call` entry.
+            *task.fault_handler.lock() = Some(handler);
+            Ok(0)
+        }
+        BasicTaskRequest::GetAllRegisters => {
+            let ptr = UserAddr::new(invocation.arg(1)? as u64)?;
+            let len = invocation.arg(2)? as u64;
+            if len != core::mem::size_of::<TaskRegisters>() as u64 {
+                return Err(KernelError::InvalidArgument);
+            }
+            copy_to_user_typed(core::slice::from_ref(&*task.registers.lock()), ptr)?;
+            Ok(0)
+        }
+        BasicTaskRequest::SetAllRegisters => {
+            let ptr = UserAddr::new(invocation.arg(1)? as u64)?;
+            let len = invocation.arg(2)? as u64;
+            if len != core::mem::size_of::<TaskRegisters>() as u64 {
+                return Err(KernelError::InvalidArgument);
+            }
+            task.registers.lock().preserve_critical_registers(|registers| {
+                unsafe {
+                    copy_from_user_typed(ptr, core::slice::from_mut(registers))
+                }
+            })?;
+            
+            Ok(0)
         }
     }
 }

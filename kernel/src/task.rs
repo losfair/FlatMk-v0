@@ -18,7 +18,7 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use spin::Mutex;
 use core::convert::TryFrom;
-use crate::spec::TaskEndpointFlags;
+use crate::spec::{TaskEndpointFlags, TaskFaultReason};
 
 pub const ROOT_TASK_FULL_MAP_BASE: u64 = 0x20000000u64;
 
@@ -33,16 +33,6 @@ static ROOT_IMAGE: &'static AlignTo<Page, RootImageBytes> = &AlignTo {
     _align: [],
     value: *include_bytes!("../generated/user_init.img"),
 };
-
-#[derive(Clone, Debug)]
-pub enum TaskFaultState {
-    NoFault,
-    PageFault,
-    GeneralProtection,
-    IllegalInstruction,
-    IntegerDivision,
-    InvalidCapability,
-}
 
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -85,11 +75,8 @@ pub struct Task {
     /// Saved registers when scheduled out.
     pub registers: Mutex<TaskRegisters>,
 
-    /// Pending fault.
-    pub pending_fault: Mutex<TaskFaultState>,
-
     /// Fault handler table.
-    pub fault_handlers: Mutex<FaultHandlerTable>,
+    pub fault_handler: Mutex<Option<TaskEndpoint>>,
 
     /// Tags.
     pub tags: Mutex<[TaskTag; 8]>,
@@ -100,11 +87,6 @@ pub struct Task {
 pub struct TaskTag {
     pub owner: u64,
     pub tag: u64,
-}
-
-#[derive(Default, Clone)]
-pub struct FaultHandlerTable {
-    pub page_fault: Option<FaultHandler>,
 }
 
 #[derive(Clone)]
@@ -158,6 +140,7 @@ impl TaskEndpoint {
 pub enum IpcReason {
     Interrupt(u8),
     CapInvoke,
+    Fault(TaskFaultReason),
 }
 
 impl EntryType {
@@ -212,9 +195,8 @@ impl Task {
             page_table_root: AtomicKernelObjectRef::new(page_table_root),
             capabilities: AtomicKernelObjectRef::new(cap_root),
             ipc_caps: Mutex::new(Default::default()),
-            pending_fault: Mutex::new(TaskFaultState::NoFault),
             registers: Mutex::new(TaskRegisters::new()),
-            fault_handlers: Mutex::new(FaultHandlerTable::default()),
+            fault_handler: Mutex::new(None),
             running: AtomicBool::new(false),
             interrupt_blocked: AtomicU8::new(0),
             ipc_blocked: AtomicBool::new(true),
@@ -276,9 +258,8 @@ impl Task {
             page_table_root: AtomicKernelObjectRef::new(self.page_table_root.get()),
             capabilities: AtomicKernelObjectRef::new(self.capabilities.get()),
             ipc_caps: Mutex::new(Default::default()),
-            pending_fault: Mutex::new(TaskFaultState::NoFault),
             registers: Mutex::new(TaskRegisters::new()),
-            fault_handlers: Mutex::new(self.fault_handlers.lock().clone()),
+            fault_handler: Mutex::new(self.fault_handler.lock().clone()),
             running: AtomicBool::new(false),
             interrupt_blocked: AtomicU8::new(0),
             ipc_blocked: AtomicBool::new(false),
@@ -287,8 +268,17 @@ impl Task {
         })
     }
 
-    pub fn raise_fault(me: KernelObjectRef<Task>, fault: TaskFaultState) -> ! {
-        panic!("fault not handled: {:?}", fault);
+    /// Raises a fault on a task.
+    /// 
+    /// Panicks if no fault handler is registered. Never returns.
+    pub fn raise_fault(me: KernelObjectRef<Task>, fault: TaskFaultReason, old_registers: &TaskRegisters) -> ! {
+        let endpoint = match *me.fault_handler.lock() {
+            Some(ref x) => x.clone(),
+            None => panic!("Task::raise_fault: Got fault `{:?}` but no handler was registered.", fault),
+        };
+        drop(me);
+        Task::invoke_ipc(endpoint, IpcReason::Fault(fault), old_registers);
+        panic!("Task::raise_fault: Cannot invoke fault handler for fault: {:?}.", fault);
     }
 
     /// Invokes IPC on this task.
@@ -372,7 +362,7 @@ impl Task {
                 // Determine the entry type from the provided IPC reason.
                 // Just use the same flags as the target endpoint for now.
                 let (entry_type, flags) = match reason {
-                    IpcReason::Interrupt(_) => (EntryType::PreemptiveReply(prev.clone()), target.flags),
+                    IpcReason::Interrupt(_) | IpcReason::Fault(_) => (EntryType::PreemptiveReply(prev.clone()), target.flags),
                     IpcReason::CapInvoke => (EntryType::CooperativeReply(prev.clone()), target.flags),
                 };
 

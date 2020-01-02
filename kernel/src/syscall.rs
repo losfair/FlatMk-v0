@@ -1,7 +1,8 @@
 use crate::arch::task::arch_init_syscall;
 use crate::capability::{CapabilityInvocation, INVALID_CAP};
 use crate::error::*;
-use crate::task::{Task, TaskFaultState};
+use crate::task::{Task};
+use crate::spec::TaskFaultReason;
 
 pub unsafe fn init() {
     arch_init_syscall();
@@ -17,10 +18,10 @@ fn dispatch_syscall(invocation: &mut CapabilityInvocation) -> i64 {
     } else {
         let cap = {
             let task = Task::current();
-            match task.capabilities.get().lookup_cptr(cptr) {
+            match task.capabilities.get().lookup_cptr_no_check_clone(cptr) {
                 Ok(x) => x,
                 Err(_) => {
-                    Task::raise_fault(task, TaskFaultState::InvalidCapability);
+                    Task::raise_fault(task, TaskFaultReason::InvalidCapability, &invocation.registers);
                 }
             }
         };

@@ -1,9 +1,11 @@
 use crate::error::*;
-use crate::task::{Task, TaskFaultState};
+use crate::task::{Task};
+use crate::spec::TaskFaultReason;
 use x86_64::registers::{
     model_specific::{Efer, EferFlags, FsBase, GsBase, KernelGsBase, Msr},
     rflags::RFlags,
 };
+use crate::addr::*;
 
 #[repr(C)]
 #[derive(Clone, Debug)]
@@ -133,6 +135,14 @@ impl TaskRegisters {
             KernelGsBase::MSR.write(self.gs_base);
         }
     }
+
+    /// Call `f` on `self`, but preserve critical registers that are unsafe to modify from userspace.
+    pub fn preserve_critical_registers<F: FnOnce(&mut Self) -> R, R>(&mut self, f: F) -> R {
+        let rflags = self.rflags;
+        let ret = f(self);
+        self.rflags = rflags;
+        ret
+    }
 }
 
 #[repr(C)]
@@ -184,12 +194,76 @@ pub(super) fn get_hlt() -> u64 {
     result
 }
 
+/// Safely copies a range of memory from userspace.
+pub fn copy_from_user(uaddr: UserAddr, out: &mut [u8]) -> KernelResult<()> {
+    let end = match uaddr.get().checked_add(out.len() as u64) {
+        Some(x) => x,
+        None => return Err(KernelError::InvalidAddress)
+    };
+
+    // `end` is exclusive.
+    if end > super::config::KERNEL_VM_START {
+        return Err(KernelError::InvalidAddress);
+    }
+
+    let out_len = out.len();
+    let n = unsafe {
+        super::asm_import::__copy_user_checked_argreversed(out.as_mut_ptr() as u64, uaddr.get(), out_len as u64)
+    };
+    if n != 0 {
+        Err(KernelError::InvalidAddress)
+    } else {
+        Ok(())
+    }
+}
+
+/// Copies a range of typed values from userspace.
+/// 
+/// This function is unsafe because the caller must ensure that `T` is valid for any bit patterns.
+pub unsafe fn copy_from_user_typed<T>(uaddr: UserAddr, out: &mut [T]) -> KernelResult<()> {
+    let len = out.len() * core::mem::size_of::<T>();
+    copy_from_user(uaddr, core::slice::from_raw_parts_mut(
+        out.as_mut_ptr() as *mut u8, len
+    ))
+}
+
+/// Safely copies a range of memory to userspace.
+pub fn copy_to_user(data: &[u8], uaddr: UserAddr) -> KernelResult<()> {
+    let end = match uaddr.get().checked_add(data.len() as u64) {
+        Some(x) => x,
+        None => return Err(KernelError::InvalidAddress)
+    };
+
+    // `end` is exclusive.
+    if end > super::config::KERNEL_VM_START {
+        return Err(KernelError::InvalidAddress);
+    }
+
+    let data_len = data.len();
+    let n = unsafe {
+        super::asm_import::__copy_user_checked_argreversed(uaddr.get(), data.as_ptr() as u64, data_len as u64)
+    };
+    if n != 0 {
+        Err(KernelError::InvalidAddress)
+    } else {
+        Ok(())
+    }
+}
+
+/// Safely copies a few typed values to userspace.
+pub fn copy_to_user_typed<T>(data: &[T], uaddr: UserAddr) -> KernelResult<()> {
+    let len = data.len() * core::mem::size_of::<T>();
+    copy_to_user(unsafe {
+        core::slice::from_raw_parts(data.as_ptr() as *const u8, len)
+    }, uaddr)
+}
+
 /// The syscall path of entering user mode.
 ///
 /// Invalidates registers as defined by the calling convention, but is usually faster.
 pub unsafe fn arch_enter_user_mode_syscall(registers: *const TaskRegisters) -> ! {
     if !super::addr::address_is_canonical((*registers).rip) {
-        Task::raise_fault(Task::current(), TaskFaultState::GeneralProtection);
+        Task::raise_fault(Task::current(), TaskFaultReason::VMAccess, &*registers);
     }
 
     asm!(

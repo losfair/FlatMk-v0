@@ -1,7 +1,8 @@
 use super::config::*;
 use super::task::{get_hlt, set_hlt, TaskRegisters};
 use crate::serial::with_serial_port;
-use crate::task::{invoke_interrupt, Task, TaskFaultState};
+use crate::task::{invoke_interrupt, Task};
+use crate::spec::TaskFaultReason;
 use core::fmt::Write;
 use pic8259_simple::ChainedPics;
 use spin::Mutex;
@@ -227,21 +228,21 @@ interrupt_with_code!(
     }
 );
 
-interrupt!(intr_divide_error, __intr_divide_error, frame, _registers, {
+interrupt!(intr_divide_error, __intr_divide_error, frame, registers, {
     with_serial_port(|p| {
         writeln!(p, "Divide error: {:#?}", frame).unwrap();
     });
     if !is_user_fault(frame) {
         panic!("Kernel divide error");
     }
-    Task::raise_fault(Task::current(), TaskFaultState::IntegerDivision);
+    Task::raise_fault(Task::current(), TaskFaultReason::InvalidOperation, registers);
 });
 
 interrupt!(
     intr_invalid_opcode,
     __intr_invalid_opcode,
     frame,
-    _registers,
+    registers,
     {
         with_serial_port(|p| {
             writeln!(p, "Invalid opcode: {:#?}", frame).unwrap();
@@ -249,27 +250,44 @@ interrupt!(
         if !is_user_fault(frame) {
             panic!("Kernel invalid opcode");
         }
-        Task::raise_fault(Task::current(), TaskFaultState::IllegalInstruction);
+        Task::raise_fault(Task::current(), TaskFaultReason::IllegalInstruction, registers);
     }
 );
 
-interrupt_with_code!(intr_gpf, __intr_gpf, frame, _registers, code, {
+interrupt_with_code!(intr_gpf, __intr_gpf, frame, registers, code, {
     with_serial_port(|p| {
         writeln!(p, "General protection fault: code = {} {:#?}", code, frame).unwrap();
     });
     if !is_user_fault(frame) {
         panic!("Kernel GPF");
     }
-    Task::raise_fault(Task::current(), TaskFaultState::GeneralProtection);
+    Task::raise_fault(Task::current(), TaskFaultReason::InvalidOperation, registers);
 });
 
 interrupt_with_code!(
     intr_page_fault,
     __intr_page_fault,
     frame,
-    _registers,
+    registers,
     code,
     {
+        // Handle copy from/to user faults.
+        if !is_user_fault(frame) && registers.rip == super::asm_import::__copy_user_checked_argreversed__copyinst as u64 {
+            unsafe {
+                asm!(
+                    r#"
+                        jmp *%rax
+                    "# :
+                    : "{rax}"(super::asm_import::__copy_user_checked_argreversed__copyend as u64),
+                        "{r12}"(registers.r12), "{r13}"(registers.r13),
+                        "{r14}"(registers.r14), "{r15}"(registers.r15),
+                        "{rbx}"(registers.rbx), "{rbp}"(registers.rbp),
+                        "{rsp}"(registers.rsp)
+                        :: "volatile"
+                );
+                unreachable!()
+            }
+        }
         with_serial_port(|p| {
             writeln!(
                 p,
@@ -283,7 +301,7 @@ interrupt_with_code!(
         if !is_user_fault(frame) {
             panic!("Kernel page fault");
         }
-        Task::raise_fault(Task::current(), TaskFaultState::PageFault);
+        Task::raise_fault(Task::current(), TaskFaultReason::VMAccess, registers);
     }
 );
 
@@ -291,7 +309,7 @@ interrupt_with_code!(
     intr_stack_segment_fault,
     __intr_stack_segment_fault,
     frame,
-    _registers,
+    registers,
     code,
     {
         with_serial_port(|p| {
@@ -306,7 +324,7 @@ interrupt_with_code!(
         if !is_user_fault(frame) {
             panic!("Kernel stack segment fault");
         }
-        Task::raise_fault(Task::current(), TaskFaultState::PageFault);
+        Task::raise_fault(Task::current(), TaskFaultReason::VMAccess, registers);
     }
 );
 
