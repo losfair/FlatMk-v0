@@ -2,7 +2,7 @@
 
 /// A request to a BasicTask/BasicTaskWeak endpoint.
 #[repr(i64)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
 pub enum BasicTaskRequest {
 	Ping = 0,
 	FetchShallowClone = 1,
@@ -19,11 +19,14 @@ pub enum BasicTaskRequest {
 	SetRegister = 12,
 	HasWeak = 13,
 	IpcReturn = 14,
+	PutFaultHandler = 15,
+	GetAllRegisters = 16,
+	SetAllRegisters = 17,
 }
 
 /// A request to a capability set.
 #[repr(i64)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
 pub enum CapSetRequest {
 	MakeLeafSet = 0,
 	CloneCap = 1,
@@ -38,7 +41,7 @@ pub enum CapSetRequest {
 
 /// The type of a capability endpoint.
 #[repr(i64)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
 pub enum CapType {
 	Other = 0,
 	TaskEndpoint = 1,
@@ -47,7 +50,7 @@ pub enum CapType {
 
 /// A request to an interrupt endpoint.
 #[repr(i64)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
 pub enum InterruptRequest {
 	Bind = 0,
 	Unbind = 1,
@@ -55,7 +58,7 @@ pub enum InterruptRequest {
 
 /// A request to an IPC endpoint for another task.
 #[repr(i64)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
 pub enum IpcRequest {
 	SwitchTo = 0,
 	IsCapTransfer = 1,
@@ -68,7 +71,7 @@ pub enum IpcRequest {
 
 /// Kernel error codes.
 #[repr(i64)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
 pub enum KernelError {
 	OutOfMemory = -8,
 	InvalidReference = -7,
@@ -82,7 +85,7 @@ pub enum KernelError {
 
 /// A request to a root page table.
 #[repr(i64)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
 pub enum RootPageTableRequest {
 	MakeLeaf = 0,
 	AllocLeaf = 1,
@@ -94,7 +97,7 @@ pub enum RootPageTableRequest {
 
 /// A request to the root capability.
 #[repr(i64)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
 pub enum RootTaskCapRequest {
 	X86IoPort = 0,
 	Mmio = 1,
@@ -103,9 +106,19 @@ pub enum RootTaskCapRequest {
 	DebugPutchar = 4,
 }
 
+/// Reason of a fault from a user-mode task.
+#[repr(i64)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
+pub enum TaskFaultReason {
+	VMAccess = 0,
+	IllegalInstruction = 1,
+	InvalidCapability = 2,
+	InvalidOperation = 3,
+}
+
 /// A request to an X86 I/O port.
 #[repr(i64)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
 pub enum X86IoPortRequest {
 	Read = 0,
 	Write = 1,

@@ -17,6 +17,9 @@ enum BasicTaskRequest {
 	BasicTaskRequest_SetRegister = 12,
 	BasicTaskRequest_HasWeak = 13,
 	BasicTaskRequest_IpcReturn = 14,
+	BasicTaskRequest_PutFaultHandler = 15,
+	BasicTaskRequest_GetAllRegisters = 16,
+	BasicTaskRequest_SetAllRegisters = 17,
 };
 
 // A request to a capability set.
@@ -85,6 +88,14 @@ enum RootTaskCapRequest {
 	RootTaskCapRequest_MakeIdle = 2,
 	RootTaskCapRequest_Interrupt = 3,
 	RootTaskCapRequest_DebugPutchar = 4,
+};
+
+// Reason of a fault from a user-mode task.
+enum TaskFaultReason {
+	TaskFaultReason_VMAccess = 0,
+	TaskFaultReason_IllegalInstruction = 1,
+	TaskFaultReason_InvalidCapability = 2,
+	TaskFaultReason_InvalidOperation = 3,
 };
 
 // A request to an X86 I/O port.
@@ -257,6 +268,17 @@ static inline int64_t BasicTask_fetch_weak(
 	return cptr_invoke(me.cap, BasicTaskRequest_FetchWeak, out, 0ll, 0ll);
 }
 
+// Gets all registers of this task.
+static inline int64_t BasicTask_get_all_registers(
+	struct BasicTask me,
+	// Pointer to write to.
+	uint64_t ptr,
+	// Length of the memory `ptr` points to.
+	uint64_t len
+) {
+	return cptr_invoke(me.cap, BasicTaskRequest_GetAllRegisters, ptr, len, 0ll);
+}
+
 // Returns whether there exists weak references to this task.
 static inline int64_t BasicTask_has_weak(
 	struct BasicTask me
@@ -305,6 +327,15 @@ static inline int64_t BasicTask_put_capset(
 	return cptr_invoke(me.cap, BasicTaskRequest_PutCapSet, cptr.cap, 0ll, 0ll);
 }
 
+// Sets the fault handler of this task.
+static inline int64_t BasicTask_put_fault_handler(
+	struct BasicTask me,
+	// The endpoint to the handler. Must have a `Call` entry type.
+	struct TaskEndpoint handler
+) {
+	return cptr_invoke(me.cap, BasicTaskRequest_PutFaultHandler, handler.cap, 0ll, 0ll);
+}
+
 // Puts a capability into the IPC capability buffer of this task. The capability is moved instead of cloned.
 static inline int64_t BasicTask_put_ipc_cap(
 	struct BasicTask me,
@@ -323,6 +354,17 @@ static inline int64_t BasicTask_put_root_page_table(
 	struct RootPageTable cptr
 ) {
 	return cptr_invoke(me.cap, BasicTaskRequest_PutRootPageTable, cptr.cap, 0ll, 0ll);
+}
+
+// Sets all registers of this task.
+static inline int64_t BasicTask_set_all_registers(
+	struct BasicTask me,
+	// Pointer to read from.
+	uint64_t ptr,
+	// Length of the memory `ptr` points to.
+	uint64_t len
+) {
+	return cptr_invoke(me.cap, BasicTaskRequest_SetAllRegisters, ptr, len, 0ll);
 }
 
 // Sets a saved register of this task. Calling this method on a running task has undefined result.

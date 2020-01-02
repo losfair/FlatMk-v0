@@ -42,6 +42,9 @@ MakeRootPageTable = 11
 SetRegister = 12
 HasWeak = 13
 IpcReturn = 14
+PutFaultHandler = 15
+GetAllRegisters = 16
+SetAllRegisters = 17
 
 [enums.RootTaskCapRequest]
 description = "A request to the root capability."
@@ -111,6 +114,15 @@ description = "A request to an X86 I/O port."
 [enums.X86IoPortRequest.variants]
 Read = 0
 Write = 1
+
+[enums.TaskFaultReason]
+description = "Reason of a fault from a user-mode task."
+
+[enums.TaskFaultReason.variants]
+VMAccess = 0
+IllegalInstruction = 1
+InvalidCapability = 2
+InvalidOperation = 3 # division by zero, etc.
 
 [bitflags.UserPteFlags]
 description = "Flags for a user page table entry."
@@ -386,6 +398,40 @@ description = "Returns whether there exists weak references to this task."
 in_args = []
 out_args = [
     { EnumVariant = { enum_name = "BasicTaskRequest", variant = "HasWeak" } },
+]
+
+[types.BasicTask.methods.put_fault_handler]
+description = "Sets the fault handler of this task."
+in_args = [
+    { name = "handler", kind = { TypeRef = "TaskEndpoint" }, description = "The endpoint to the handler. Must have a `Call` entry type." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "BasicTaskRequest", variant = "PutFaultHandler" } },
+    { Input = "handler" },
+]
+
+[types.BasicTask.methods.get_all_registers]
+description = "Gets all registers of this task."
+in_args = [
+    { name = "ptr", kind = "U64", description = "Pointer to write to." },
+    { name = "len", kind = "U64", description = "Length of the memory `ptr` points to." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "BasicTaskRequest", variant = "GetAllRegisters" } },
+    { Input = "ptr" },
+    { Input = "len" },
+]
+
+[types.BasicTask.methods.set_all_registers]
+description = "Sets all registers of this task."
+in_args = [
+    { name = "ptr", kind = "U64", description = "Pointer to read from." },
+    { name = "len", kind = "U64", description = "Length of the memory `ptr` points to." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "BasicTaskRequest", variant = "SetAllRegisters" } },
+    { Input = "ptr" },
+    { Input = "len" },
 ]
 
 [types.Interrupt]

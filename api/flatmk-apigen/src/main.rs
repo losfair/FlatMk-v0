@@ -376,7 +376,7 @@ fn generate_enums(spec: &Spec, lang: TargetLanguage, out: &mut String) {
                     lang.format_multiline_comment(desc.as_str(), 0, out);
                 }
                 out.push_str("#[repr(i64)]\n");
-                out.push_str("#[derive(Debug, Copy, Clone, TryFromPrimitive)]\n");
+                out.push_str("#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]\n");
                 out.push_str(format!("pub enum {} {{\n", k).as_str());
             }
             TargetLanguage::Markdown => {

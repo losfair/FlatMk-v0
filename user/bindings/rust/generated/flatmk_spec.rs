@@ -2,7 +2,7 @@
 
 /// A request to a BasicTask/BasicTaskWeak endpoint.
 #[repr(i64)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
 pub enum BasicTaskRequest {
 	Ping = 0,
 	FetchShallowClone = 1,
@@ -19,11 +19,14 @@ pub enum BasicTaskRequest {
 	SetRegister = 12,
 	HasWeak = 13,
 	IpcReturn = 14,
+	PutFaultHandler = 15,
+	GetAllRegisters = 16,
+	SetAllRegisters = 17,
 }
 
 /// A request to a capability set.
 #[repr(i64)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
 pub enum CapSetRequest {
 	MakeLeafSet = 0,
 	CloneCap = 1,
@@ -38,7 +41,7 @@ pub enum CapSetRequest {
 
 /// The type of a capability endpoint.
 #[repr(i64)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
 pub enum CapType {
 	Other = 0,
 	TaskEndpoint = 1,
@@ -47,7 +50,7 @@ pub enum CapType {
 
 /// A request to an interrupt endpoint.
 #[repr(i64)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
 pub enum InterruptRequest {
 	Bind = 0,
 	Unbind = 1,
@@ -55,7 +58,7 @@ pub enum InterruptRequest {
 
 /// A request to an IPC endpoint for another task.
 #[repr(i64)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
 pub enum IpcRequest {
 	SwitchTo = 0,
 	IsCapTransfer = 1,
@@ -68,7 +71,7 @@ pub enum IpcRequest {
 
 /// Kernel error codes.
 #[repr(i64)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
 pub enum KernelError {
 	OutOfMemory = -8,
 	InvalidReference = -7,
@@ -82,7 +85,7 @@ pub enum KernelError {
 
 /// A request to a root page table.
 #[repr(i64)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
 pub enum RootPageTableRequest {
 	MakeLeaf = 0,
 	AllocLeaf = 1,
@@ -94,7 +97,7 @@ pub enum RootPageTableRequest {
 
 /// A request to the root capability.
 #[repr(i64)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
 pub enum RootTaskCapRequest {
 	X86IoPort = 0,
 	Mmio = 1,
@@ -103,9 +106,19 @@ pub enum RootTaskCapRequest {
 	DebugPutchar = 4,
 }
 
+/// Reason of a fault from a user-mode task.
+#[repr(i64)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
+pub enum TaskFaultReason {
+	VMAccess = 0,
+	IllegalInstruction = 1,
+	InvalidCapability = 2,
+	InvalidOperation = 3,
+}
+
 /// A request to an X86 I/O port.
 #[repr(i64)]
-#[derive(Debug, Copy, Clone, TryFromPrimitive)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
 pub enum X86IoPortRequest {
 	Read = 0,
 	Write = 1,
@@ -216,6 +229,15 @@ impl BasicTask {
 		self.cap.call(BasicTaskRequest::FetchWeak as i64, out.index() as i64, 0i64, 0i64, )
 	}
 
+	/// Gets all registers of this task.
+	pub unsafe fn get_all_registers(
+		&self,
+		ptr: u64,
+		len: u64,
+	) -> i64 {
+		self.cap.call(BasicTaskRequest::GetAllRegisters as i64, ptr as i64, len as i64, 0i64, )
+	}
+
 	/// Returns whether there exists weak references to this task.
 	pub unsafe fn has_weak(
 		&self,
@@ -261,6 +283,14 @@ impl BasicTask {
 		self.cap.call(BasicTaskRequest::PutCapSet as i64, cptr.cptr().index() as i64, 0i64, 0i64, )
 	}
 
+	/// Sets the fault handler of this task.
+	pub unsafe fn put_fault_handler(
+		&self,
+		handler: &TaskEndpoint,
+	) -> i64 {
+		self.cap.call(BasicTaskRequest::PutFaultHandler as i64, handler.cptr().index() as i64, 0i64, 0i64, )
+	}
+
 	/// Puts a capability into the IPC capability buffer of this task. The capability is moved instead of cloned.
 	pub unsafe fn put_ipc_cap(
 		&self,
@@ -276,6 +306,15 @@ impl BasicTask {
 		cptr: &RootPageTable,
 	) -> i64 {
 		self.cap.call(BasicTaskRequest::PutRootPageTable as i64, cptr.cptr().index() as i64, 0i64, 0i64, )
+	}
+
+	/// Sets all registers of this task.
+	pub unsafe fn set_all_registers(
+		&self,
+		ptr: u64,
+		len: u64,
+	) -> i64 {
+		self.cap.call(BasicTaskRequest::SetAllRegisters as i64, ptr as i64, len as i64, 0i64, )
 	}
 
 	/// Sets a saved register of this task. Calling this method on a running task has undefined result.
