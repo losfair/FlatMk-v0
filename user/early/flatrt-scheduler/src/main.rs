@@ -39,14 +39,14 @@ const DYN_CAP_START: u64 = 0x100000;
 
 /// 903 = 902 + 1.
 /// 
-/// Divides the PIT clock (1193181.6666 Hz) by 902.
-/// So we get 1193181.6666 / 902 = 1322.817812195122 interrupts per second,
-/// and every cycle is 755962.0007993173 nanoseconds.
-const PIT_DIV: u16 = 903;
-const PIC_NANOSECS_PER_CYCLE: u64 = 755962;
+/// Divides the PIT clock (1193181.6666 Hz) by 1317.
+/// So we get 1193181.6666 / 1317 = 905.9845608200457 interrupts per second,
+/// and every cycle is 1103771.5687945685 nanoseconds.
+const PIT_DIV: u16 = 1318;
+const PIC_NANOSECS_PER_CYCLE: u64 = 1103771;
 
 /// The maximum time in nanoseconds that a task is allowed to execute before being preempted out.
-const MAX_TIME_SLICE_NS: u64 = 1_000_000_0; // 10 milliseconds
+const MAX_TIME_SLICE_NS: u64 = 5_000_000; // 5 milliseconds
 
 /// The tag applied to the idle task during initialization.
 const IDLE_TAG: u64 = core::u64::MAX;
