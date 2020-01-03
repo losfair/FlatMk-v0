@@ -5,6 +5,7 @@ use goblin::elf::{
     header::header64::Header, program_header::program_header64::ProgramHeader, program_header::*,
 };
 use spin::Mutex;
+use core::ops::Range;
 
 /// DWARF index of SP on x86-64.
 const SP_INDEX: u64 = 7;
@@ -64,6 +65,14 @@ pub struct ElfMetadata {
     pub entry_address: u64,
 }
 
+// ELF segment metadata.
+#[derive(Clone, Debug)]
+pub struct SegmentMetadata {
+    pub base: u64,
+    pub len: u64,
+    pub prot: spec::UserPteFlags,
+}
+
 impl ElfMetadata {
     pub fn apply_to_task(&self, task: &spec::BasicTask) -> Result<(), KernelError> {
         unsafe {
@@ -76,7 +85,7 @@ impl ElfMetadata {
 /// Loads an image into `out`.
 /// 
 /// The leaf entry of `temp_base` must first be built.
-pub fn load(image: &[u8], temp_base: &ElfTempMapBase, out: &spec::RootPageTable) -> Result<ElfMetadata, KernelError> {
+pub fn load<F: FnMut(&SegmentMetadata) -> Result<(), KernelError>>(image: &[u8], temp_base: &ElfTempMapBase, out: &spec::RootPageTable, va_space: Range<usize>, mut post_check: F) -> Result<ElfMetadata, KernelError> {
     unsafe {
         let header: Header = match image.read_raw() {
             Some(x) => x,
@@ -122,8 +131,20 @@ pub fn load(image: &[u8], temp_base: &ElfTempMapBase, out: &spec::RootPageTable)
             }
 
             for i in (start - padding_before..mem_end).step_by(spec::PAGE_SIZE) {
-                spec::to_result(out.make_leaf(i as u64))?;
-                spec::to_result(out.alloc_leaf(i as u64, prot))?;
+                // VA offsets & check.
+                let va_begin = match i.checked_add(va_space.start) {
+                    Some(x) => x as u64,
+                    None => return Err(KernelError::InvalidAddress),
+                };
+                let va_end = match va_begin.checked_add(spec::PAGE_SIZE as u64) {
+                    Some(x) => x,
+                    None => return Err(KernelError::InvalidAddress),
+                };
+                if va_end > va_space.end as u64 {
+                    return Err(KernelError::InvalidAddress);
+                }
+
+                spec::to_result(out.alloc_leaf(va_begin, prot))?;
 
                 if i >= file_end {
                     continue;
@@ -132,7 +153,7 @@ pub fn load(image: &[u8], temp_base: &ElfTempMapBase, out: &spec::RootPageTable)
                 let temp_base = temp_base.0.lock();
 
                 spec::to_result(
-                    out.fetch_page(i as u64, *temp_base, spec::UserPteFlags::WRITABLE)
+                    out.fetch_page(va_begin, *temp_base, spec::UserPteFlags::WRITABLE)
                 )?;
                 
                 let slice = core::slice::from_raw_parts_mut(
@@ -155,6 +176,11 @@ pub fn load(image: &[u8], temp_base: &ElfTempMapBase, out: &spec::RootPageTable)
                 }
                 
             }
+            post_check(&SegmentMetadata {
+                base: (start - padding_before) as u64,
+                len: (mem_end as u64) - (start - padding_before) as u64,
+                prot,
+            })?;
         }
         Ok(ElfMetadata {
             entry_address: header.e_entry,

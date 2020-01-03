@@ -113,7 +113,7 @@ fn load_elf_task(
         spec::to_result(task.put_root_page_table(rpt))?;
     }
 
-    let metadata = flatrt_elfloader::load(image, &ELF_TEMP_MAP_BASE, rpt)?;
+    let metadata = flatrt_elfloader::load(image, &ELF_TEMP_MAP_BASE, rpt, (0..core::usize::MAX), |_| Ok(()))?;
     metadata.apply_to_task(task)?;
 
     flatrt_elfloader::build_and_apply_stack(layout::STACK_START, layout::STACK_SIZE, rpt, task)?;
