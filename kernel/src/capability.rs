@@ -592,6 +592,7 @@ fn invoke_cap_root_page_table(
         RootPageTableRequest::AllocLeaf => {
             let target = UserAddr::new(invocation.arg(1)? as u64)?;
             let protection = UserPteFlags::from_bits(invocation.arg(2)? as u64)?;
+            pt.make_leaf_entry(target)?;
             pt.map_anonymous(target, protection)?;
             Ok(0)
         }
@@ -600,6 +601,7 @@ fn invoke_cap_root_page_table(
             let dst = UserAddr::new(invocation.arg(2)? as u64)?;
             let protection = UserPteFlags::from_bits(invocation.arg(3)? as u64)?;
             let page = current.page_table_root.get().0.get_leaf(src.get())?;
+            pt.make_leaf_entry(dst)?;
             pt.0.attach_leaf(dst.get(), page)?;
             pt.0.lookup_leaf_entry(dst.get(), |entry| {
                 entry.set_protection(protection);
@@ -613,6 +615,7 @@ fn invoke_cap_root_page_table(
             let protection = UserPteFlags::from_bits(invocation.arg(3)? as u64)?;
             let page = pt.0.get_leaf(src.get())?;
             let current_pt = current.page_table_root.get();
+            current_pt.make_leaf_entry(dst)?;
             current_pt.0.attach_leaf(dst.get(), page)?;
             current_pt.0.lookup_leaf_entry(dst.get(), |entry| {
                 entry.set_protection(protection);
