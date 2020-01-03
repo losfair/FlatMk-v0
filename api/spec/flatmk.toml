@@ -152,7 +152,7 @@ out_args = [
 ]
 
 [types.RootPageTable.methods.alloc_leaf]
-description = "Allocates a page at a leaf entry in this root page table."
+description = "Allocates a page at a leaf entry in this root page table. Will also create the leaf entry if not exists."
 in_args = [
     { name = "vaddr", kind = "U64" },
     { name = "prot", kind = { BitflagSet = "UserPteFlags" } },
@@ -164,7 +164,7 @@ out_args = [
 ]
 
 [types.RootPageTable.methods.put_page]
-description = "Clones reference to a page in the current task's page table to this page table."
+description = "Clones reference to a page in the current task's page table to this page table. Will also create the leaf entry if not exists."
 in_args = [
     { name = "src", kind = "U64" },
     { name = "dst", kind = "U64" },
@@ -178,7 +178,7 @@ out_args = [
 ]
 
 [types.RootPageTable.methods.fetch_page]
-description = "Clones reference to a page in this page table to the current task's page table."
+description = "Clones reference to a page in this page table to the current task's page table. Will also create the leaf entry if not exists."
 in_args = [
     { name = "src", kind = "U64" },
     { name = "dst", kind = "U64" },
