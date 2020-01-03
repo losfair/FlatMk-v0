@@ -29,6 +29,7 @@ use alloc::{
     },
     boxed::Box,
 };
+use core::mem::MaybeUninit;
 use spin::Mutex;
 
 /// Start address for heap allocation.
@@ -59,6 +60,9 @@ static REENTRANCY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The timestamp at which the current task started executing.
 static CURRENT_BEGIN: AtomicU64 = AtomicU64::new(0);
+
+/// The default Xsave value. Loaded during initialization.
+static mut DEFAULT_XSAVE: MaybeUninit<Xsave> = MaybeUninit::uninit();
 
 lazy_static! {
     /// The scheduling queue. Tasks get pushed to the back and popped from the front.
@@ -119,6 +123,7 @@ impl Ord for SchedEntity {
 
 /// x86-64 xsave region.
 #[repr(C, align(64))]
+#[derive(Clone)]
 struct Xsave {
     fxsave: [u8; 512],
     xsave_header: [u8; 64],
@@ -129,7 +134,7 @@ impl Default for Xsave {
     #[inline(always)]
     fn default() -> Xsave {
         unsafe {
-            core::mem::zeroed()
+            (*DEFAULT_XSAVE.as_mut_ptr()).clone()
         }
     }
 }
@@ -162,6 +167,8 @@ pub extern "C" fn _start() -> ! {
 
         flatrt_allocator::init(HEAP_START, caps::RPT);
         flatrt_capalloc::init(caps::CAPSET, DYN_CAP_START);
+
+        do_xsave(&mut *DEFAULT_XSAVE.as_mut_ptr());
 
         init_pit();
 
