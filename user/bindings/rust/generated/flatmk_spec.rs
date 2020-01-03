@@ -547,7 +547,7 @@ impl RootPageTable {
         &self.cap
     }
 
-	/// Allocates a page at a leaf entry in this root page table.
+	/// Allocates a page at a leaf entry in this root page table. Will also create the leaf entry if not exists.
 	pub unsafe fn alloc_leaf(
 		&self,
 		vaddr: u64,
@@ -564,7 +564,7 @@ impl RootPageTable {
 		self.cap.call(RootPageTableRequest::DropPage as i64, target as i64, 0i64, 0i64, )
 	}
 
-	/// Clones reference to a page in this page table to the current task's page table.
+	/// Clones reference to a page in this page table to the current task's page table. Will also create the leaf entry if not exists.
 	pub unsafe fn fetch_page(
 		&self,
 		src: u64,
@@ -582,7 +582,7 @@ impl RootPageTable {
 		self.cap.call(RootPageTableRequest::MakeLeaf as i64, vaddr as i64, 0i64, 0i64, )
 	}
 
-	/// Clones reference to a page in the current task's page table to this page table.
+	/// Clones reference to a page in the current task's page table to this page table. Will also create the leaf entry if not exists.
 	pub unsafe fn put_page(
 		&self,
 		src: u64,

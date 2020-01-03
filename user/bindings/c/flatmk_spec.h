@@ -493,7 +493,7 @@ static inline int64_t Mmio_alloc_at(
 	return cptr_invoke(me.cap, vaddr, prot, 0ll, 0ll);
 }
 
-// Allocates a page at a leaf entry in this root page table.
+// Allocates a page at a leaf entry in this root page table. Will also create the leaf entry if not exists.
 static inline int64_t RootPageTable_alloc_leaf(
 	struct RootPageTable me,
 	uint64_t vaddr,
@@ -510,7 +510,7 @@ static inline int64_t RootPageTable_drop_page(
 	return cptr_invoke(me.cap, RootPageTableRequest_DropPage, target, 0ll, 0ll);
 }
 
-// Clones reference to a page in this page table to the current task's page table.
+// Clones reference to a page in this page table to the current task's page table. Will also create the leaf entry if not exists.
 static inline int64_t RootPageTable_fetch_page(
 	struct RootPageTable me,
 	uint64_t src,
@@ -528,7 +528,7 @@ static inline int64_t RootPageTable_make_leaf(
 	return cptr_invoke(me.cap, RootPageTableRequest_MakeLeaf, vaddr, 0ll, 0ll);
 }
 
-// Clones reference to a page in the current task's page table to this page table.
+// Clones reference to a page in the current task's page table to this page table. Will also create the leaf entry if not exists.
 static inline int64_t RootPageTable_put_page(
 	struct RootPageTable me,
 	uint64_t src,
