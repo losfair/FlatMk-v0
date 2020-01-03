@@ -95,6 +95,10 @@ pub unsafe fn init_idt() {
 
     IDT.divide_error
         .set_handler_fn(core::mem::transmute(intr_divide_error as usize));
+    IDT.device_not_available
+        .set_handler_fn(core::mem::transmute(intr_device_not_available as usize));
+    IDT.simd_floating_point
+        .set_handler_fn(core::mem::transmute(intr_simd_floating_point as usize));
     IDT.invalid_opcode
         .set_handler_fn(core::mem::transmute(intr_invalid_opcode as usize));
     IDT.breakpoint
@@ -238,6 +242,26 @@ interrupt!(intr_divide_error, __intr_divide_error, frame, registers, {
     Task::raise_fault(Task::current(), TaskFaultReason::InvalidOperation, 0, registers);
 });
 
+interrupt!(intr_device_not_available, __intr_device_not_available, frame, registers, {
+    with_serial_port(|p| {
+        writeln!(p, "Device not available: {:#?}", frame).unwrap();
+    });
+    if !is_user_fault(frame) {
+        panic!("Kernel device not available");
+    }
+    Task::raise_fault(Task::current(), TaskFaultReason::InvalidOperation, 0, registers);
+});
+
+interrupt!(intr_simd_floating_point, __intr_simd_floating_point, frame, registers, {
+    with_serial_port(|p| {
+        writeln!(p, "SIMD floating point error: {:#?}", frame).unwrap();
+    });
+    if !is_user_fault(frame) {
+        panic!("Kernel SIMD floating point error");
+    }
+    Task::raise_fault(Task::current(), TaskFaultReason::InvalidOperation, 0, registers);
+});
+
 interrupt!(
     intr_invalid_opcode,
     __intr_invalid_opcode,
@@ -293,10 +317,10 @@ interrupt_with_code!(
         with_serial_port(|p| {
             writeln!(
                 p,
-                "Page fault at {:p}. code = {:?} {:#?}",
+                "Page fault at {:p}. CODE={:?} RIP={:p}",
                 fault_addr,
                 PageFaultErrorCode::from_bits(code),
-                frame
+                frame.instruction_pointer.as_ptr::<u8>(),
             )
             .unwrap();
         });
