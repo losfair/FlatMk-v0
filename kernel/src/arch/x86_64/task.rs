@@ -104,13 +104,13 @@ impl TaskRegisters {
 
     #[inline]
     pub fn usermode_arg_mut(&mut self, n: usize) -> KernelResult<&mut u64> {
+        // rcx is not used because it is clobbered during sysret.
         Ok(match n {
             0 => &mut self.rdi,
             1 => &mut self.rsi,
             2 => &mut self.rdx,
-            3 => &mut self.rcx,
-            4 => &mut self.r8,
-            5 => &mut self.r9,
+            3 => &mut self.r8,
+            4 => &mut self.r9,
             _ => return Err(KernelError::InvalidArgument),
         })
     }
@@ -263,7 +263,7 @@ pub fn copy_to_user_typed<T>(data: &[T], uaddr: UserAddr) -> KernelResult<()> {
 /// Invalidates registers as defined by the calling convention, but is usually faster.
 pub unsafe fn arch_enter_user_mode_syscall(registers: *const TaskRegisters) -> ! {
     if !super::addr::address_is_canonical((*registers).rip) {
-        Task::raise_fault(Task::current(), TaskFaultReason::VMAccess, &*registers);
+        Task::raise_fault(Task::current(), TaskFaultReason::VMAccess, (*registers).rip, &*registers);
     }
 
     asm!(

@@ -140,7 +140,7 @@ impl TaskEndpoint {
 pub enum IpcReason {
     Interrupt(u8),
     CapInvoke,
-    Fault(TaskFaultReason),
+    Fault(TaskFaultReason, u64),
 }
 
 impl EntryType {
@@ -271,13 +271,13 @@ impl Task {
     /// Raises a fault on a task.
     /// 
     /// Panicks if no fault handler is registered. Never returns.
-    pub fn raise_fault(me: KernelObjectRef<Task>, fault: TaskFaultReason, old_registers: &TaskRegisters) -> ! {
+    pub fn raise_fault(me: KernelObjectRef<Task>, fault: TaskFaultReason, code: u64, old_registers: &TaskRegisters) -> ! {
         let endpoint = match *me.fault_handler.lock() {
             Some(ref x) => x.clone(),
             None => panic!("Task::raise_fault: Got fault `{:?}` but no handler was registered.", fault),
         };
         drop(me);
-        Task::invoke_ipc(endpoint, IpcReason::Fault(fault), old_registers);
+        Task::invoke_ipc(endpoint, IpcReason::Fault(fault, code), old_registers);
         panic!("Task::raise_fault: Cannot invoke fault handler for fault: {:?}.", fault);
     }
 
@@ -362,7 +362,7 @@ impl Task {
                 // Determine the entry type from the provided IPC reason.
                 // Just use the same flags as the target endpoint for now.
                 let (entry_type, flags) = match reason {
-                    IpcReason::Interrupt(_) | IpcReason::Fault(_) => (EntryType::PreemptiveReply(prev.clone()), target.flags),
+                    IpcReason::Interrupt(_) | IpcReason::Fault(_, _) => (EntryType::PreemptiveReply(prev.clone()), target.flags),
                     IpcReason::CapInvoke => (EntryType::CooperativeReply(prev.clone()), target.flags),
                 };
 
@@ -381,8 +381,9 @@ impl Task {
                 *regs.usermode_arg_mut(0).unwrap() = entrypoint.user_context;
                 *regs.usermode_arg_mut(1).unwrap() = prev.get_tag(task.id).unwrap_or(0);
 
-                if let IpcReason::Fault(fault) = reason {
+                if let IpcReason::Fault(fault, code) = reason {
                     *regs.usermode_arg_mut(2).unwrap() = fault as i64 as u64;
+                    *regs.usermode_arg_mut(3).unwrap() = code;
                 }
 
                 // Use syscall mode, since the target task is aware of the switch.

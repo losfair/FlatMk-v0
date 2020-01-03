@@ -235,7 +235,7 @@ interrupt!(intr_divide_error, __intr_divide_error, frame, registers, {
     if !is_user_fault(frame) {
         panic!("Kernel divide error");
     }
-    Task::raise_fault(Task::current(), TaskFaultReason::InvalidOperation, registers);
+    Task::raise_fault(Task::current(), TaskFaultReason::InvalidOperation, 0, registers);
 });
 
 interrupt!(
@@ -250,7 +250,7 @@ interrupt!(
         if !is_user_fault(frame) {
             panic!("Kernel invalid opcode");
         }
-        Task::raise_fault(Task::current(), TaskFaultReason::IllegalInstruction, registers);
+        Task::raise_fault(Task::current(), TaskFaultReason::IllegalInstruction, 0, registers);
     }
 );
 
@@ -261,7 +261,7 @@ interrupt_with_code!(intr_gpf, __intr_gpf, frame, registers, code, {
     if !is_user_fault(frame) {
         panic!("Kernel GPF");
     }
-    Task::raise_fault(Task::current(), TaskFaultReason::InvalidOperation, registers);
+    Task::raise_fault(Task::current(), TaskFaultReason::InvalidOperation, 0, registers);
 });
 
 interrupt_with_code!(
@@ -288,11 +288,13 @@ interrupt_with_code!(
                 unreachable!()
             }
         }
+
+        let fault_addr = Cr2::read().as_ptr::<u8>();
         with_serial_port(|p| {
             writeln!(
                 p,
                 "Page fault at {:p}. code = {:?} {:#?}",
-                Cr2::read().as_ptr::<u8>(),
+                fault_addr,
                 PageFaultErrorCode::from_bits(code),
                 frame
             )
@@ -301,7 +303,7 @@ interrupt_with_code!(
         if !is_user_fault(frame) {
             panic!("Kernel page fault");
         }
-        Task::raise_fault(Task::current(), TaskFaultReason::VMAccess, registers);
+        Task::raise_fault(Task::current(), TaskFaultReason::VMAccess, fault_addr as u64, registers);
     }
 );
 
@@ -324,7 +326,7 @@ interrupt_with_code!(
         if !is_user_fault(frame) {
             panic!("Kernel stack segment fault");
         }
-        Task::raise_fault(Task::current(), TaskFaultReason::VMAccess, registers);
+        Task::raise_fault(Task::current(), TaskFaultReason::VMAccess, 0, registers);
     }
 );
 
