@@ -10,8 +10,8 @@ echo "Building flatrt-shmem"
 cd ../flatrt-shmem || exit 1
 cargo xbuild --target ../x86_64-flatmk-early.json --release || exit 1
 
-echo "Building driver library: libelfloader"
-cd ../../drivers/libelfloader || exit 1
+echo "Building driver library: libflatrt"
+cd ../../drivers/libflatrt || exit 1
 cargo xbuild --target ../../early/x86_64-flatmk-early.json --release || exit 1
 
 echo "Building driver: vga"

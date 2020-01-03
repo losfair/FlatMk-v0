@@ -1,14 +1,16 @@
 [package]
-name = "libelfloader"
+name = "libflatrt"
 version = "0.1.0"
 authors = ["losfair <zhy20000919@hotmail.com>"]
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
-name = "elfloader"
+name = "flatrt"
 crate-type = ["staticlib"]
 
 [dependencies]
-flatrt-elfloader = { path = "../../early/flatrt-elfloader" }
 flatmk-sys = { path = "../../bindings/rust" }
+flatrt-elfloader = { path = "../../early/flatrt-elfloader" }
+flatrt-allocator = { path = "../../early/flatrt-allocator" }
+byteorder = { version = "1.3", default-features = false }
