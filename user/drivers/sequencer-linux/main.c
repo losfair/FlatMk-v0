@@ -6,23 +6,27 @@
 #include <stdatomic.h>
 #include "elfloader.h"
 #include <stdio.h>
+#include <string.h>
+#include <elf.h>
+#include "mm.h"
+#include "io.h"
 #include "./linux/generated/init.h"
 
 struct TaskEndpoint CAP_BUFFER_INITRET = { 0x12 };
 
 #define MON_STACK_SIZE 65536ull
 #define PAGE_SIZE 4096ull
-#define SHADOW_MAP_SIZE 0x100000000
 
 _Atomic uint64_t next_linux_task_id = 1;
 _Atomic uint64_t next_cap_index_sequential = (0x1000 >> 8) << 5;
 _Atomic uint64_t next_task_page_va = 0x20000000;
-_Atomic uint64_t next_shadow_map_va = 0xa00000000000;
+_Atomic uint64_t next_shadow_map_va = 0x600000000000;
 
 const uint64_t elfload_temp_base = 0x1fff0000;
-const uint64_t target_stack_end = 0x80000000;
-const uint64_t target_stack_size = 1048576;
-const uint64_t target_stack_start = target_stack_end - target_stack_size;
+const uint64_t malloc_base = 0x90000000;
+
+
+void libmalloc_init(uint64_t heap_start, CPtr rpt);
 
 CPtr canonicalize_cap_index(uint64_t x) {
     return ((x >> 5) << 8) | (x & 0b11111);
@@ -43,7 +47,7 @@ void * acquire_uninitialized_pages(uint64_t n) {
 }
 
 uint64_t acquire_shadow_map_va() {
-    return atomic_fetch_add(&next_shadow_map_va, SHADOW_MAP_SIZE);
+    return atomic_fetch_add(&next_shadow_map_va, LT_SHADOW_MAP_SIZE);
 }
 
 void __attribute__((naked)) __host_entry_asm() {
@@ -54,7 +58,7 @@ void __attribute__((naked)) __host_entry_asm() {
     );
 }
 
-void host_entry(struct LinuxTask *lt, int tag, enum TaskFaultReason reason) {
+void host_entry(struct LinuxTask *lt, int tag, enum TaskFaultReason reason, uint64_t _unused, uint64_t code) {
     struct TaskRegisters regs;
     char buf[512];
 
@@ -64,10 +68,23 @@ void host_entry(struct LinuxTask *lt, int tag, enum TaskFaultReason reason) {
 
     ASSERT_OK(BasicTask_get_all_registers(lt->managed, (uint64_t) &regs, sizeof(regs)));
     switch(reason) {
-        case TaskFaultReason_VMAccess:
-            sprintf(buf, "linux: VM Access failure\n");
-            flatmk_debug_puts(buf);
+        case TaskFaultReason_VMAccess: {
+            uint64_t fault_va = code;
+            uint64_t fault_va_page = fault_va & (~(0xfffull));
+
+            uint64_t prot = 0;
+
+            // Lazy paging.
+            if(linux_mm_validate_target_va(lt->mm, fault_va, &prot)) {
+                ASSERT_OK(RootPageTable_put_page(lt->managed_rpt, lt->shadow_map_base + fault_va_page, fault_va_page, prot));
+                ASSERT_OK(BasicTask_ipc_return(lt->host));
+            } else {
+                sprintf(buf, "linux: VM access fault at 0x%p\n", (void *) fault_va);
+                flatmk_debug_puts(buf);
+            }
+            
             break;
+        }
         case TaskFaultReason_IllegalInstruction:
             sprintf(buf, "linux: Illegal instruction\n");
             flatmk_debug_puts(buf);
@@ -86,8 +103,121 @@ void host_entry(struct LinuxTask *lt, int tag, enum TaskFaultReason reason) {
     flatmk_throw();
 }
 
+void setup_initial_linux_stack(struct LinuxTask *lt, int argc, const char **argv, int envc, const char **envp) {
+    // Initialize target stack.
+    ASSERT_OK(libelfloader_build_and_apply_stack(lt->shadow_map_base + LT_STACK_START, LT_STACK_SIZE, CAP_RPT.cap, lt->managed.cap));
+
+    // Shadow-mapped stack.
+    uint8_t *stack_aux = (uint8_t *) (lt->shadow_map_base + LT_STACK_END);
+    uint8_t *stack_aux_end = (uint8_t *) (lt->shadow_map_base + LT_STACK_END - 8192);
+    uint64_t *stack_direct = (uint64_t *) stack_aux_end;
+    uint64_t *stack_direct_end = (uint64_t *) (lt->shadow_map_base + LT_STACK_START);
+
+    stack_aux -= 8;
+
+    // Auxiliary vector.
+    {
+        Elf64_auxv_t *aux_vec = (Elf64_auxv_t *) stack_direct;
+
+        {
+            Elf64_auxv_t *x = --aux_vec;
+            x->a_type = AT_NULL;
+            x->a_un.a_val = 0;
+        }
+
+        {
+            Elf64_auxv_t *x = --aux_vec;
+            x->a_type = AT_PLATFORM;
+
+            const char *platform = "x86_64";
+            int len = strlen(platform + 1);
+            stack_aux -= len;
+            memcpy(stack_aux, platform, len);
+            x->a_un.a_val = (uint64_t) stack_aux - lt->shadow_map_base;
+        }
+
+        {
+            Elf64_auxv_t *x = --aux_vec;
+            x->a_type = AT_SECURE;
+            x->a_un.a_val = 0;
+        }
+
+
+        {
+            Elf64_auxv_t *x = --aux_vec;
+            x->a_type = AT_RANDOM;
+
+            const uint8_t prand[16] = {0x42,0x42,0x42,0x42,0x42,0x42,0x42,0x42,0x42,0x42,0x42,0x42,0x42,0x42,0x42,0x42};
+            stack_aux -= sizeof(prand);
+            memcpy(stack_aux, prand, sizeof(prand));
+            x->a_un.a_val = (uint64_t) stack_aux - lt->shadow_map_base;
+        }
+
+        {
+            Elf64_auxv_t *x = --aux_vec;
+            x->a_type = AT_EGID;
+            x->a_un.a_val = 0;
+        }
+        {
+            Elf64_auxv_t *x = --aux_vec;
+            x->a_type = AT_GID;
+            x->a_un.a_val = 0;
+        }
+        {
+            Elf64_auxv_t *x = --aux_vec;
+            x->a_type = AT_EUID;
+            x->a_un.a_val = 0;
+        }
+        {
+            Elf64_auxv_t *x = --aux_vec;
+            x->a_type = AT_UID;
+            x->a_un.a_val = 0;
+        }
+        {
+            Elf64_auxv_t *x = --aux_vec;
+            x->a_type = AT_PAGESZ;
+            x->a_un.a_val = 4096;
+        }
+
+        stack_direct = (uint64_t *) aux_vec;
+    }
+
+    // Initialize env vars.
+    envp += envc;
+    if(*envp != NULL) flatmk_throw();
+    *(--stack_direct) = 0;
+    for(int i = 0; i < envc; i++) {
+        const char *s = *(--envp);
+        int len = strlen(s) + 1; // '\0'
+        stack_aux -= len;
+        memcpy(stack_aux, s, len);
+        *(--stack_direct) = (uint64_t) stack_aux - lt->shadow_map_base;
+    }
+
+    // Initialize args.
+    argv += argc;
+    if(*argv != NULL) flatmk_throw();
+    *(--stack_direct) = 0;
+    for(int i = 0; i < argc; i++) {
+        const char *s = *(--argv);
+        int len = strlen(s) + 1; // '\0'
+        stack_aux -= len;
+        memcpy(stack_aux, s, len);
+        *(--stack_direct) = (uint64_t) stack_aux - lt->shadow_map_base;
+    }
+
+    // Push argc.
+    *(--stack_direct) = argc;
+
+    // Set RSP.
+    ASSERT_OK(BasicTask_set_register(lt->managed, RSP_INDEX, (uint64_t) stack_direct - lt->shadow_map_base));
+    // Insert region.
+    ASSERT_OK(linux_mm_insert_region(lt->mm, LT_STACK_START, LT_STACK_END, UserPteFlags_WRITABLE));
+}
+
 void linux_task_start(const uint8_t *image, uint64_t image_len) {
     struct LinuxTask *lt = acquire_uninitialized_pages(1);
+    memset(lt, 0, sizeof(struct LinuxTask));
 
     // Allocate resources for LT.
     lt->host_stack = acquire_uninitialized_pages(MON_STACK_SIZE / PAGE_SIZE);
@@ -98,8 +228,13 @@ void linux_task_start(const uint8_t *image, uint64_t image_len) {
     lt->managed_rpt = RootPageTable_new(acquire_cap());
     lt->managed_fault_to_host = TaskEndpoint_new(acquire_cap());
     lt->managed_sched = TaskEndpoint_new(acquire_cap());
+    lt->mm = NULL;
     lt->shadow_map_base = acquire_shadow_map_va();
     lt->terminated = 0;
+    lt->current_brk = LT_HEAP_BASE;
+
+    // Set up stdio.
+    lt->fds[2].ops = &ops_stderr;
 
     // Initialized host & managed tasks.
     ASSERT_OK(BasicTask_fetch_shallow_clone(CAP_ME, lt->host.cap));
@@ -111,14 +246,18 @@ void linux_task_start(const uint8_t *image, uint64_t image_len) {
 
     // Set up the page table.
     ASSERT_OK(BasicTask_make_root_page_table(CAP_ME, lt->managed_rpt.cap));
-    ASSERT_OK(BasicTask_put_root_page_table(lt->managed, lt->managed_rpt));
+    ASSERT_OK(BasicTask_put_root_page_table(lt->managed, lt->managed_rpt)); 
+
+    // Set up MM.
+    lt->mm = linux_mm_new(lt->managed.cap, lt->shadow_map_base, lt->shadow_map_base + LT_SHADOW_MAP_SIZE);
 
     // Load image.
     uint64_t entry_address;
-    ASSERT_OK(libelfloader_load_and_apply(image, image_len, elfload_temp_base, lt->managed_rpt.cap, lt->managed.cap, &entry_address));
+    ASSERT_OK(libelfloader_load_and_apply(lt->mm, image, image_len, elfload_temp_base, CAP_RPT.cap, lt->managed.cap, &entry_address));
 
-    // Initialize target stack.
-    ASSERT_OK(libelfloader_build_and_apply_stack(target_stack_start, target_stack_size, lt->managed_rpt.cap, lt->managed.cap));
+    const char *argv[] = {"test_task", NULL};
+    const char *envp[] = {"PATH=/bin", NULL};
+    setup_initial_linux_stack(lt, 1, argv, 1, envp);
 
     // Set up TLS for monitor thread.
     ASSERT_OK(BasicTask_set_register(lt->host, FS_BASE_INDEX, (uint64_t) FLATRT_DRIVER_GLOBAL_TLS));
@@ -155,6 +294,8 @@ void main() {
     if(
         BasicTask_fetch_ipc_cap(CAP_ME, CAP_BUFFER_INITRET.cap, 0) < 0
     ) flatmk_throw();
+
+    libmalloc_init(malloc_base, CAP_RPT.cap);
 
     ASSERT_OK(RootPageTable_make_leaf(CAP_RPT, elfload_temp_base));
     
