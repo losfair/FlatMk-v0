@@ -63,8 +63,8 @@ unsafe extern "C" fn init_start() -> ! {
     debug!("init: Finished setting up initial environment. Now starting drivers.");
     debug!("- vga");
     start_driver_vga();
-    debug!("- gclock");
-    start_driver_gclock();
+    //debug!("- gclock");
+    //start_driver_gclock();
     debug!("- sequencer-linux");
     start_driver_sequencer_linux();
     debug!("init: All drivers started.");
@@ -296,22 +296,48 @@ fn start_driver_vga() {
             &caps::driver_vga::ENDPOINT,
         );
 
-        // Identity-map VGA MMIO memory.
-        for i in (0xa0000u64..0xc0000u64).step_by(4096) {
-            spec::to_result(caps::ROOT_TASK.new_mmio(&caps::BUFFER, &caps::driver_vga::RPT, i)).unwrap();
-            spec::to_result(caps::driver_vga::RPT.make_leaf(i)).unwrap();
-            spec::to_result(spec::Mmio::new(caps::BUFFER).alloc_at(i, spec::UserPteFlags::WRITABLE)).unwrap();
+        #[repr(C)]
+        #[derive(Default)]
+        struct FramebufferInfo {
+            physical_address: u64,
+            width: u32,
+            height: u32,
         }
 
-        // VGA I/O Ports.
-        spec::to_result(caps::driver_vga::CAPSET.make_leaf(&spec::CPtr::new(0x1000))).unwrap();
-        for i in 0x3c0u64..0x3e0u64 {
-            spec::to_result(caps::ROOT_TASK.new_x86_io_port(&caps::BUFFER, i)).unwrap();
-            spec::to_result(caps::driver_vga::CAPSET.put_cap(&caps::BUFFER, &spec::CPtr::new(0x1000u64 + i - 0x3c0u64))).unwrap();
+        let mut fb_info = FramebufferInfo::default();
+
+        // Read framebuffer info provided by the bootloader.
+        spec::to_result(caps::ROOT_TASK.get_boot_parameter(
+            spec::BootParameterKey::FramebufferInfo as i64,
+            &mut fb_info as *mut _ as u64,
+            core::mem::size_of::<FramebufferInfo>() as u64,
+        )).expect("init: Cannot fetch framebuffer info.");
+
+        // 24-bit pixels
+        let fb_size = (fb_info.width as u64) * (fb_info.height as u64) * 3;
+
+        // Map into the VGA process.
+        for i in (fb_info.physical_address..fb_info.physical_address + fb_size).step_by(4096) {
+            let target_va = i - fb_info.physical_address + 0x3c0000000000u64;
+
+            // Create an MMIO object for physical address `i`.
+            spec::to_result(caps::ROOT_TASK.new_mmio(&caps::BUFFER, &caps::driver_vga::RPT, i)).unwrap();
+
+            // Prepare a leaf entry at `target_va`.
+            spec::to_result(caps::driver_vga::RPT.make_leaf(target_va)).unwrap();
+
+            // Map the physical page into `target_va`.
+            spec::to_result(spec::Mmio::new(caps::BUFFER).alloc_at(target_va, spec::UserPteFlags::WRITABLE)).unwrap();
         }
 
         // Cleanup.
         spec::to_result(caps::CAPSET.drop_cap(&caps::BUFFER)).unwrap();
+
+        // Pass width and height.
+        let mut payload = FastIpcPayload::default();
+        payload.data[0] = fb_info.width as _;
+        payload.data[1] = fb_info.height as _;
+        payload.write();
 
         // Call the initialize function.
         spec::to_result(caps::driver_vga::ENDPOINT.invoke()).expect("start_driver_vga: Cannot invoke task.");
@@ -357,6 +383,9 @@ fn start_driver_sequencer_linux() {
             &caps::driver_sequencer_linux::CAPSET,
             &caps::driver_sequencer_linux::ENDPOINT,
         );
+
+        // VGA shared framebuffer memory.
+        spec::to_result(caps::driver_sequencer_linux::CAPSET.put_cap(caps::DRIVER_VGA_SHMEM_MAP.cptr(), &spec::CPtr::new(0x10))).unwrap();
 
         // Call the initialize function.
         spec::to_result(caps::driver_sequencer_linux::ENDPOINT.invoke()).expect("start_driver_sequencer_linux: Cannot invoke task.");
