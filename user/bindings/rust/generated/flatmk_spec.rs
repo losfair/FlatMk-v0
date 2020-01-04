@@ -24,6 +24,13 @@ pub enum BasicTaskRequest {
 	SetAllRegisters = 17,
 }
 
+/// A key to a boot parameter.
+#[repr(i64)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
+pub enum BootParameterKey {
+	FramebufferInfo = 0,
+}
+
 /// A request to a capability set.
 #[repr(i64)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
@@ -104,6 +111,7 @@ pub enum RootTaskCapRequest {
 	MakeIdle = 2,
 	Interrupt = 3,
 	DebugPutchar = 4,
+	GetBootParameter = 5,
 }
 
 /// Reason of a fault from a user-mode task.
@@ -625,6 +633,16 @@ impl RootTask {
     pub const fn cptr(&self) -> &CPtr {
         &self.cap
     }
+
+	/// Reads the boot parameter of key `key`. Returns 0 on succeed, negative error code on failure.
+	pub unsafe fn get_boot_parameter(
+		&self,
+		key: i64,
+		out: u64,
+		out_len: u64,
+	) -> i64 {
+		self.cap.call(RootTaskCapRequest::GetBootParameter as i64, key, out as i64, out_len as i64, )
+	}
 
 	/// Make the current task an idle task. Never returns if succeeded.
 	pub unsafe fn make_idle(

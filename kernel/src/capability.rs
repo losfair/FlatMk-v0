@@ -13,6 +13,7 @@ use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 use bit_field::BitField;
 use crate::spec::*;
+use crate::boot::BootParameter_FramebufferInfo;
 
 pub const N_ENDPOINT_SLOTS: usize = 32;
 pub const INVALID_CAP: u64 = core::u64::MAX;
@@ -545,6 +546,24 @@ fn invoke_cap_root_task(invocation: &CapabilityInvocation) -> KernelResult<i64> 
                     endpoint.object = CapabilityEndpointObject::DebugPutchar;
                 })?;
             Ok(0)
+        }
+        RootTaskCapRequest::GetBootParameter => {
+            let key = BootParameterKey::try_from(invocation.arg(1)? as i64)?;
+
+            let ptr = UserAddr::new(invocation.arg(2)? as u64)?;
+            let len = invocation.arg(3)? as u64;
+
+            match key {
+                BootParameterKey::FramebufferInfo => {
+                    if len != core::mem::size_of::<BootParameter_FramebufferInfo>() as u64 {
+                        return Err(KernelError::InvalidArgument);
+                    }
+        
+                    let info = BootParameter_FramebufferInfo::read()?;
+                    copy_to_user_typed(core::slice::from_ref(&info), ptr)?;
+                    Ok(0)
+                }
+            }
         }
     }
 }

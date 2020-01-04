@@ -55,6 +55,13 @@ Mmio = 1
 MakeIdle = 2
 Interrupt = 3
 DebugPutchar = 4
+GetBootParameter = 5
+
+[enums.BootParameterKey]
+description = "A key to a boot parameter."
+
+[enums.BootParameterKey.variants]
+FramebufferInfo = 0
 
 [enums.RootPageTableRequest]
 description = "A request to a root page table."
@@ -655,6 +662,20 @@ description = "Make the current task an idle task. Never returns if succeeded."
 in_args = []
 out_args = [
     { EnumVariant = { enum_name = "RootTaskCapRequest", variant = "MakeIdle" } },
+]
+
+[types.RootTask.methods.get_boot_parameter]
+description = "Reads the boot parameter of key `key`. Returns 0 on succeed, negative error code on failure."
+in_args = [
+    { name = "key", kind = "I64", description = "The key to the requested parameter. Is of type `BootParameterKey`." },
+    { name = "out", kind = "U64", description = "Output address." },
+    { name = "out_len", kind = "U64", description = "Length of the memory block `out` points to." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "RootTaskCapRequest", variant = "GetBootParameter" } },
+    { Input = "key" },
+    { Input = "out" },
+    { Input = "out_len" },
 ]
 
 [types.X86IoPort]

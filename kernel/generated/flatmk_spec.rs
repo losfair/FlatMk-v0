@@ -24,6 +24,13 @@ pub enum BasicTaskRequest {
 	SetAllRegisters = 17,
 }
 
+/// A key to a boot parameter.
+#[repr(i64)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
+pub enum BootParameterKey {
+	FramebufferInfo = 0,
+}
+
 /// A request to a capability set.
 #[repr(i64)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
@@ -104,6 +111,7 @@ pub enum RootTaskCapRequest {
 	MakeIdle = 2,
 	Interrupt = 3,
 	DebugPutchar = 4,
+	GetBootParameter = 5,
 }
 
 /// Reason of a fault from a user-mode task.

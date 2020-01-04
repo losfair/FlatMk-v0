@@ -22,6 +22,11 @@ enum BasicTaskRequest {
 	BasicTaskRequest_SetAllRegisters = 17,
 };
 
+// A key to a boot parameter.
+enum BootParameterKey {
+	BootParameterKey_FramebufferInfo = 0,
+};
+
 // A request to a capability set.
 enum CapSetRequest {
 	CapSetRequest_MakeLeafSet = 0,
@@ -88,6 +93,7 @@ enum RootTaskCapRequest {
 	RootTaskCapRequest_MakeIdle = 2,
 	RootTaskCapRequest_Interrupt = 3,
 	RootTaskCapRequest_DebugPutchar = 4,
+	RootTaskCapRequest_GetBootParameter = 5,
 };
 
 // Reason of a fault from a user-mode task.
@@ -545,6 +551,19 @@ static inline int64_t RootPageTable_set_protection(
 	uint64_t prot
 ) {
 	return cptr_invoke(me.cap, RootPageTableRequest_SetProtection, target, prot, 0ll);
+}
+
+// Reads the boot parameter of key `key`. Returns 0 on succeed, negative error code on failure.
+static inline int64_t RootTask_get_boot_parameter(
+	struct RootTask me,
+	// The key to the requested parameter. Is of type `BootParameterKey`.
+	int64_t key,
+	// Output address.
+	uint64_t out,
+	// Length of the memory block `out` points to.
+	uint64_t out_len
+) {
+	return cptr_invoke(me.cap, RootTaskCapRequest_GetBootParameter, key, out, out_len);
 }
 
 // Make the current task an idle task. Never returns if succeeded.
