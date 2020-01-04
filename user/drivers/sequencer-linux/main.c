@@ -12,8 +12,6 @@
 #include "io.h"
 #include "./linux/generated/init.h"
 
-struct TaskEndpoint CAP_BUFFER_INITRET = { 0x12 };
-
 #define MON_STACK_SIZE 65536ull
 #define PAGE_SIZE 4096ull
 
@@ -79,7 +77,7 @@ void host_entry(struct LinuxTask *lt, int tag, enum TaskFaultReason reason, uint
                 ASSERT_OK(RootPageTable_put_page(lt->managed_rpt, lt->shadow_map_base + fault_va_page, fault_va_page, prot));
                 ASSERT_OK(BasicTask_ipc_return(lt->host));
             } else {
-                sprintf(buf, "linux: VM access fault at 0x%p\n", (void *) fault_va);
+                sprintf(buf, "linux: VM access fault at %p. RIP=%p\n", (void *) fault_va, (void *) regs.rip);
                 flatmk_debug_puts(buf);
             }
             
@@ -232,8 +230,11 @@ void linux_task_start(const uint8_t *image, uint64_t image_len) {
     lt->shadow_map_base = acquire_shadow_map_va();
     lt->terminated = 0;
     lt->current_brk = LT_HEAP_BASE;
+    lt->current_mmap = LT_MMAP_BASE;
+    lt->syscall_ret_buffer = TaskEndpoint_new(acquire_cap());
 
     // Set up stdio.
+    lt->fds[1].ops = &ops_stdout;
     lt->fds[2].ops = &ops_stderr;
 
     // Initialized host & managed tasks.
@@ -246,7 +247,7 @@ void linux_task_start(const uint8_t *image, uint64_t image_len) {
 
     // Set up the page table.
     ASSERT_OK(BasicTask_make_root_page_table(CAP_ME, lt->managed_rpt.cap));
-    ASSERT_OK(BasicTask_put_root_page_table(lt->managed, lt->managed_rpt)); 
+    ASSERT_OK(BasicTask_put_root_page_table(lt->managed, lt->managed_rpt));
 
     // Set up MM.
     lt->mm = linux_mm_new(lt->managed.cap, lt->shadow_map_base, lt->shadow_map_base + LT_SHADOW_MAP_SIZE);

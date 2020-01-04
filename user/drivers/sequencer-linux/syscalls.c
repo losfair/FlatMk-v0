@@ -4,6 +4,12 @@
 #include <stdio.h>
 #include <sys/syscall.h>
 #include <sys/utsname.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <string.h>
+#include <errno.h>
+#include "io.h"
+#include <time.h>
 
 #define PAGE_SIZE 4096ull
 
@@ -41,11 +47,46 @@ static uint64_t round_up_to_page_size(uint64_t x) {
     return x;
 }
 
-void dispatch_syscall(struct LinuxTask *lt, struct TaskRegisters *registers) {
-    char buf[512];
+static int64_t do_anonymous_map(struct LinuxTask *lt, uint64_t addr, uint64_t length, int linux_prot, int linux_flags, uint64_t offset) {
+    // Must be readable.
+    if(!(linux_prot & PROT_READ)) {
+        return -1;
+    }
 
-    sprintf(buf, "SYSCALL: %d\n", (int) registers->rax);
+    // We don't yet support fixed mapping.
+    if(linux_flags & MAP_FIXED) {
+        return -1;
+    }
+
+    // Set up flags.
+    uint64_t flatmk_flags = 0;
+    if(linux_prot & PROT_WRITE) flatmk_flags |= UserPteFlags_WRITABLE;
+    if(linux_prot & PROT_EXEC) flatmk_flags |= UserPteFlags_EXECUTABLE;
+
+    uint64_t end = round_up_to_page_size(lt->current_mmap + length);
+    if(end < lt->current_mmap || end > LT_SHADOW_MAP_SIZE) return -1; // overflow
+    if(end == lt->current_mmap) return 0; // no need to allocate
+
+    for(uint64_t i = lt->current_mmap; i < end; i += PAGE_SIZE) {
+        ASSERT_OK(RootPageTable_alloc_leaf(CAP_RPT, lt->shadow_map_base + i, flatmk_flags));
+    }
+    ASSERT_OK(linux_mm_insert_region(lt->mm, LT_MMAP_BASE, end, flatmk_flags));
+    void *ret = (void *) lt->current_mmap;
+    lt->current_mmap = end;
+
+    char buf[128];
+    sprintf(buf, "mmap update: %p\n", (void *) lt->current_mmap);
     flatmk_debug_puts(buf);
+    return (int64_t) ret;
+}
+
+void dispatch_syscall(struct LinuxTask *lt, struct TaskRegisters *registers) {
+    char buf[256];
+
+    //sprintf(buf, "SYSCALL: %d\n", (int) registers->rax);
+    //flatmk_debug_puts(buf);
+
+    ASSERT_OK(BasicTask_fetch_ipc_cap(lt->host, lt->syscall_ret_buffer.cap, 0));
 
     switch(registers->rax) {
         case __NR_getuid:
@@ -76,11 +117,11 @@ void dispatch_syscall(struct LinuxTask *lt, struct TaskRegisters *registers) {
                     }
                     ASSERT_OK(linux_mm_insert_region(lt->mm, LT_HEAP_BASE, requested_top, UserPteFlags_WRITABLE));
                     lt->current_brk = registers->rdi;
-                    sprintf(buf, "brk update: %p\n", (void *) lt->current_brk);
-                    flatmk_debug_puts(buf);
                 }
-                registers->rax = lt->current_brk;
+                registers->rax = registers->rdi;
             }
+            sprintf(buf, "brk(%p) = %p\n", (void *) registers->rdi, (void *) registers->rax);
+            flatmk_debug_puts(buf);
             break;
         case __NR_uname: {
             struct utsname *un = acquire_umem(lt, registers->rdi, sizeof(struct utsname), 1);
@@ -114,9 +155,12 @@ void dispatch_syscall(struct LinuxTask *lt, struct TaskRegisters *registers) {
                 if(!namebuf[i]) break;
             }
             namebuf[sizeof(namebuf) - 1] = '\0';
-            sprintf(buf, "openat: %lx %s\n", dirfd, namebuf);
-            flatmk_debug_puts(buf);
-            registers->rax = 2;
+            if(dirfd == 0xffffff9c) {
+                // current directory
+                registers->rax = do_openat(lt, namebuf);
+            } else {
+                registers->rax = -1;
+            }
             break;
         }
         case __NR_readv:
@@ -124,9 +168,6 @@ void dispatch_syscall(struct LinuxTask *lt, struct TaskRegisters *registers) {
             int fd = registers->rdi;
             uint64_t iovs_u = registers->rsi;
             uint64_t iovcnt = registers->rdx;
-
-            sprintf(buf, "writev %d %p %d\n", fd, (void *) iovs_u, (int) iovcnt);
-            flatmk_debug_puts(buf);
 
             if(
                 fd < 0 || fd >= LT_FD_TABLE_SIZE || lt->fds[fd].ops == NULL ||
@@ -151,13 +192,85 @@ void dispatch_syscall(struct LinuxTask *lt, struct TaskRegisters *registers) {
             }
             break;
         }
+        case __NR_read:
+        case __NR_write: {
+            int fd = registers->rdi;
+            if(
+                fd < 0 || fd >= LT_FD_TABLE_SIZE || lt->fds[fd].ops == NULL
+            ) {
+                registers->rax = -1;
+                break;
+            }
+
+            struct iovec iov = {
+                .iov_base = (void *) registers->rsi,
+                .iov_len = registers->rdx
+            };
+            if(registers->rax == __NR_read) {
+                if(!lt->fds[fd].ops->readv) registers->rax = -1;
+                else registers->rax = lt->fds[fd].ops->readv(lt, &lt->fds[fd], &iov, 1);
+            } else {
+                if(!lt->fds[fd].ops->writev) registers->rax = -1;
+                else registers->rax = lt->fds[fd].ops->writev(lt, &lt->fds[fd], &iov, 1);
+            }
+            break;
+        }
+        case __NR_fstat: {
+            int fd = registers->rdi;
+            struct stat *statbuf = acquire_umem(lt, registers->rsi, sizeof(struct stat), 1);
+            if(!statbuf) {
+                registers->rax = -EFAULT;
+                break;
+            }
+            memset(statbuf, 0, sizeof(statbuf));
+            registers->rax = 0;
+            break;
+        }
+        case __NR_nanosleep: {
+            const struct timespec *req = acquire_umem(lt, registers->rdi, sizeof(struct timespec), 0);
+            struct timespec *rem = acquire_umem(lt, registers->rsi, sizeof(struct timespec), 1);
+            if(!req) {
+                registers->rax = -EFAULT;
+                break;
+            }
+            uint64_t ns = (uint64_t) req->tv_sec * 1000000000ull + req->tv_nsec;
+            sched_nanosleep(ns);
+            if(rem) memset(rem, 0, sizeof(struct timespec));
+            registers->rax = 0;
+            break;
+        }
         case __NR_exit_group:
             sprintf(buf, "Program exited with code %d.\n", (int) registers->rdi);
             flatmk_debug_puts(buf);
             while(1) sched_yield();
             break;
+        case __NR_mmap: {
+            uint64_t addr = registers->rdi;
+            uint64_t len = registers->rsi;
+            int prot = registers->rdx;
+            int flags = registers->r10;
+            int fd = registers->r8;
+            uint64_t off = registers->r9;
+
+            // Anonymous map.
+            if(flags & MAP_ANONYMOUS) {
+                registers->rax = do_anonymous_map(lt, addr, len, prot, flags, off);
+                break;
+            }
+
+            if(fd < 0 || fd >= LT_FD_TABLE_SIZE || lt->fds[fd].ops == NULL || lt->fds[fd].ops->mmap == NULL) {
+                registers->rax = -1;
+                break;
+            }
+            registers->rax = lt->fds[fd].ops->mmap(lt, &lt->fds[fd], addr, len, prot, flags, off);
+            break;
+        }
+        case __NR_munmap:
+            // Just leak memory.
+            registers->rax = 0;
+            break;
         default: {
-            sprintf(buf, "dispatch_syscall: Unknown linux syscall index: %llu\n", registers->rax);
+            sprintf(buf, "dispatch_syscall: Unknown linux syscall index: %lu\n", registers->rax);
             flatmk_debug_puts(buf);
 
             registers->rax = (uint64_t) -1ll;
@@ -169,5 +282,5 @@ void dispatch_syscall(struct LinuxTask *lt, struct TaskRegisters *registers) {
     out:
 
     ASSERT_OK(BasicTask_set_all_registers(lt->managed, (uint64_t) registers, sizeof(struct TaskRegisters)));
-    BasicTask_ipc_return(lt->host);
+    TaskEndpoint_invoke(lt->syscall_ret_buffer);
 }
