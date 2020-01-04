@@ -2,10 +2,8 @@
 #include <stddriver.h>
 #include <x86intrin.h>
 #include <stdatomic.h>
+#include <string.h>
 #include "vgamode.h"
-
-#define FB_WIDTH 640
-#define FB_HEIGHT 480
 
 CPtr log_task_cap = 0x10;
 CPtr render_task_cap = 0x11;
@@ -13,47 +11,19 @@ struct TaskEndpoint CAP_FRAMEBUFFER = { 0x12 };
 struct TaskEndpoint CAP_BUFFER_INITRET = { 0x13 };
 const uint64_t rerender_interval_ms = 16; // 60 FPS
 
+uint64_t fb_width, fb_height;
+
 _Atomic uint64_t frame_count = 0;
 _Atomic uint64_t tsc_freq = 0;
 uint8_t __log_stack[4096];
 uint8_t __render_stack[65536];
-
-volatile uint8_t *vga_memory_start = (uint8_t *) 0xa0000;
-volatile uint8_t *vga_memory_end = (uint8_t *) 0xc0000;
 
 struct __attribute__((packed)) Pixel {
     uint8_t r, g, b;
 };
 
 struct Pixel *shared_fb = (struct Pixel *) 0x30000000;
-uint8_t local_fb[FB_WIDTH * FB_HEIGHT];
-uint8_t fb_changed[FB_WIDTH * FB_HEIGHT];
-
-static uint8_t PAL16[48] = {
-    0x00,0x00,0x00,0x00,0x00,0x80,0x00,0x80,0x00,0x00,0x80,0x80,0x80,0x00,0x00,
-    0x80,0x00,0x80,0x80,0x80,0x00,0xc0,0xc0,0xc0,0x80,0x80,0x80,0x00,0x00,0xff,
-    0x00,0xff,0x00,0x00,0xff,0xff,0xff,0x00,0x00,0xff,0x00,0xff,0xff,0xff,0x00,
-    0xff,0xff,0xff
-};
-
-uint8_t pixel_to_palette(const struct Pixel* pix) {
-    int best = -1;
-    int min_dist = -1;
-
-    for(int i = 0; i < 16; i++) {
-        int r = PAL16[i * 3];
-        int g = PAL16[i * 3 + 1];
-        int b = PAL16[i * 3 + 2];
-
-        int dist = (r - (int) pix->r) * (r - (int) pix->r) + (g - (int) pix->g) * (g - (int) pix->g) + (b - (int) pix->b) * (b - (int) pix->b);
-        if(min_dist == -1 || dist < min_dist) {
-            min_dist = dist;
-            best = i;
-        }
-    }
-
-    return best;
-}
+struct Pixel *hardware_fb = (struct Pixel *) 0x3c0000000000; // mapped by init
 
 uint64_t calibrate_tsc_once_tenms() {
     uint64_t interval1, interval2;
@@ -86,7 +56,7 @@ void log_entry() {
     
     while(1) {
         uint64_t count = atomic_exchange(&frame_count, 0);
-        sprintf(buf, "vga: FPS = %llu\n", count);
+        sprintf(buf, "vga: FPS = %lu\n", count);
         flatmk_debug_puts(buf);
         sched_nanosleep(1000000000ull);
     }
@@ -99,7 +69,7 @@ void map_shared_fb(struct BasicTask this_task) {
     payload.data[0] = 0;
 
     // Size
-    payload.data[1] = FB_WIDTH * FB_HEIGHT * sizeof(struct Pixel);
+    payload.data[1] = fb_width * fb_height * sizeof(struct Pixel);
 
     while(1) {
         fastipc_write(&payload);
@@ -128,7 +98,7 @@ void map_shared_fb(struct BasicTask this_task) {
     // Create local mapping.
     payload.data[0] = 0;
     payload.data[1] = (uint64_t) shared_fb;
-    payload.data[2] = FB_WIDTH * FB_HEIGHT * sizeof(struct Pixel);
+    payload.data[2] = fb_width * fb_height * sizeof(struct Pixel);
 
     // Put local page table.
     if(CapabilitySet_clone_cap(CAP_CAPSET, CAP_RPT.cap, CAP_BUFFER) < 0) flatmk_throw();
@@ -164,47 +134,7 @@ uint64_t tsc_to_ms(uint64_t tsc) {
 }
 
 void rerender() {
-    int plane, x, y;
-
-    for(int i = 0; i < FB_WIDTH * FB_HEIGHT; i++) {
-        uint8_t color = pixel_to_palette(&shared_fb[i]);
-        if(color != local_fb[i]) {
-            local_fb[i] = color;
-            fb_changed[i] = 1;
-        } else {
-            fb_changed[i] = 0;
-        }
-    }
-
-    for(plane = 0; plane < 4; plane++) {
-        VGAWriteReg(VGA_SEQ, VGA__SEQ__MAP, 1<<plane);
-        VGAWriteReg(VGA_GCT, VGA__GCT__RDM, plane);
-        for(y = 0; y < FB_HEIGHT; y++) {
-            int any_changed = 0;
-            uint8_t pixelbuf = 0;
-
-            for(x = 0; x < FB_WIDTH; x++) {
-                int index = y * FB_WIDTH + x;
-                if(fb_changed[index]) {
-                    uint8_t mask = 1 << (7 - (x & 7));
-                    uint8_t color = local_fb[index];
-                    if(color & (1 << plane)) {
-                        pixelbuf |= mask;
-                    }
-                    any_changed = 1;
-                }
-
-                if((x + 1) % 8 == 0) {
-                    if(any_changed) {
-                        volatile uint8_t *pixel = vga_memory_start + (index >> 3);
-                        *pixel = pixelbuf;
-                        pixelbuf = 0;
-                        any_changed = 0;
-                    }
-                }
-            }
-        }
-    }
+    memcpy(hardware_fb, shared_fb, fb_width * fb_height * sizeof(struct Pixel));
 }
 
 void render_loop() {
@@ -234,49 +164,59 @@ void render_loop() {
         rerender();
         uint64_t render_end = __builtin_ia32_rdtsc();
         uint64_t render_ms = tsc_to_ms(render_end - render_start);
-        if(render_ms > rerender_interval_ms) {
-            sprintf(buf, "vga: Rendering took too long (%llu milliseconds).\n", render_ms);
+        if(render_ms > 30) {
+            sprintf(buf, "vga: Rendering took too long (%lu milliseconds).\n", render_ms);
             flatmk_debug_puts(buf);
         }
         atomic_fetch_add(&frame_count, 1);
     }
 }
 
+void init_read_parameters() {
+    struct FastIpcPayload payload;
+    fastipc_read(&payload);
+    fb_width = payload.data[0];
+    fb_height = payload.data[1];
+}
+
 void main() {
+    char buf[256];
+
     // Save the return endpoint before IPC calls.
     if(
         BasicTask_fetch_ipc_cap(CAP_ME, CAP_BUFFER_INITRET.cap, 0) < 0
     ) flatmk_throw();
 
-    char buf[256];
+    // Read width/height. Must be done before any IPC calls.
+    init_read_parameters();
+    sprintf(buf, "vga: Framebuffer size: %lux%lu\n", fb_width, fb_height);
+    flatmk_debug_puts(buf);
+
+    // Calibrate timer.
     tsc_freq = calibrate_tsc();
 
     map_shared_fb(CAP_ME);
     flatmk_debug_puts("vga: Shared framebuffer initialized.\n");
 
-    // Set VGA mode to 640x480x4bit.
-    VGAMode(2, 640, 480, 0);
-    VGASetPal(PAL16, 0, 16);
-
     sprintf(buf, "vga: Flushing framebuffer.\n");
     flatmk_debug_puts(buf);
 
     uint64_t flush_start = __builtin_ia32_rdtsc();
-    for(int i = 0; i < FB_HEIGHT * FB_WIDTH; i++) {
+    for(int i = 0; i < fb_width * fb_height; i++) {
         shared_fb[i].r = 0xff;
         shared_fb[i].g = 0xff;
         shared_fb[i].b = 0xff;
     }
     uint64_t flush_end = __builtin_ia32_rdtsc();
 
-    sprintf(buf, "vga: Flushed local framebuffer. Took %llu milliseconds.\n", tsc_to_ms(flush_end - flush_start));
+    sprintf(buf, "vga: Flushed local framebuffer. Took %lu milliseconds.\n", tsc_to_ms(flush_end - flush_start));
     flatmk_debug_puts(buf);
 
     // Start worker threads.
     start_thread(BasicTask_new(log_task_cap), (uint64_t) log_entry, (uint64_t) __log_stack + sizeof(__log_stack) - 8, FLATRT_DRIVER_GLOBAL_TLS, NULL);
     start_thread(BasicTask_new(render_task_cap), (uint64_t) render_loop, (uint64_t) __render_stack + sizeof(__render_stack) - 8, FLATRT_DRIVER_GLOBAL_TLS, NULL);
 
-    sprintf(buf, "vga: Started. Initial TSC frequency: %llu\n", tsc_freq);
+    sprintf(buf, "vga: Started. Initial TSC frequency: %lu\n", tsc_freq);
     flatmk_debug_puts(buf);
 
     // Return.
