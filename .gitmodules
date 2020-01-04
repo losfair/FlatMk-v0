@@ -1,6 +1,3 @@
-[submodule "bootloader"]
-	path = bootloader
-	url = git@github.com:losfair/bootloader.git
 [submodule "user/drivers/sequencer-wasm3/wasm3"]
 	path = user/drivers/sequencer-wasm3/wasm3
 	url = git@github.com:losfair/wasm3.git
