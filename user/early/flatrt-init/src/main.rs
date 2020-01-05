@@ -61,6 +61,8 @@ unsafe extern "C" fn init_start() -> ! {
     start_shmem();
 
     debug!("init: Finished setting up initial environment. Now starting drivers.");
+    debug!("- benchmark");
+    start_driver_benchmark();
     debug!("- vga");
     start_driver_vga();
     //debug!("- gclock");
@@ -389,6 +391,24 @@ fn start_driver_sequencer_linux() {
 
         // Call the initialize function.
         spec::to_result(caps::driver_sequencer_linux::ENDPOINT.invoke()).expect("start_driver_sequencer_linux: Cannot invoke task.");
+    }
+}
+
+/// Starts the `benchmark` driver.
+fn start_driver_benchmark() {
+    unsafe {
+        debug!("Loading benchmark driver...");
+
+        initialize_driver_std(
+            image::DRIVER_BENCHMARK,
+            &caps::driver_benchmark::TASK,
+            &caps::driver_benchmark::RPT,
+            &caps::driver_benchmark::CAPSET,
+            &caps::driver_benchmark::ENDPOINT,
+        );
+
+        // Call the initialize function.
+        spec::to_result(caps::driver_benchmark::ENDPOINT.invoke()).expect("start_driver_benchmark: Cannot invoke task.");
     }
 }
 

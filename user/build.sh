@@ -22,6 +22,10 @@ echo "Building driver: gclock"
 cd ../gclock || exit 1
 make || exit 1
 
+echo "Building driver: benchmark"
+cd ../benchmark || exit 1
+make || exit 1
+
 echo "Building linux init for sequencer-linux"
 cd ../sequencer-linux/linux || exit 1
 gcc -static -O2 -o ./generated/init.elf ./init.c || exit 1

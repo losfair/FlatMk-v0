@@ -4,3 +4,4 @@ pub static SHMEM: &'static [u8] = include_bytes!("../../flatrt-shmem/target/x86_
 pub static DRIVER_VGA: &'static [u8] = include_bytes!("../../../drivers/bin/vga.driver");
 pub static DRIVER_GCLOCK: &'static [u8] = include_bytes!("../../../drivers/bin/gclock.driver");
 pub static DRIVER_SEQUENCER_LINUX: &'static [u8] = include_bytes!("../../../drivers/bin/sequencer-linux.driver");
+pub static DRIVER_BENCHMARK: &'static [u8] = include_bytes!("../../../drivers/bin/benchmark.driver");
