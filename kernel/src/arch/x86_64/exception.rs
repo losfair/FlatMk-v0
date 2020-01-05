@@ -4,7 +4,6 @@ use crate::serial::with_serial_port;
 use crate::task::{invoke_interrupt, Task};
 use crate::spec::TaskFaultReason;
 use core::fmt::Write;
-use pic8259_simple::ChainedPics;
 use spin::Mutex;
 use x86_64::{
     registers::control::Cr2,
@@ -17,11 +16,6 @@ use x86_64::{
     },
     PrivilegeLevel,
 };
-
-const PIC_1_OFFSET: u8 = 32;
-const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
-static PICS: Mutex<ChainedPics> =
-    Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
 
 static mut GDT: Option<GlobalDescriptorTable> = None;
 static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
@@ -111,10 +105,6 @@ pub unsafe fn init_idt() {
         .set_handler_fn(core::mem::transmute(intr_stack_segment_fault as usize));
     include!("../../../generated/interrupts_idt.rs");
     IDT.load();
-}
-
-pub unsafe fn init_interrupts() {
-    PICS.lock().initialize();
 }
 
 fn is_user_fault(frame: &mut InterruptStackFrame) -> bool {

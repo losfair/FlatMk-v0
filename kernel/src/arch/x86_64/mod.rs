@@ -6,6 +6,7 @@ mod page_table;
 pub mod task;
 pub mod tlb;
 mod asm_import;
+mod apic;
 
 pub use addr::*;
 pub use init::*;

@@ -424,17 +424,5 @@ pub fn wait_for_interrupt() -> ! {
 
 /// Low-level routine that notifies the hardware interrupt controller an interrupt unblock event.
 pub unsafe fn arch_unblock_interrupt(index: u8) {
-    use x86::io;
-    const PIC_EOI: u8 = 0x20;
-
-    // Notify both PICs.
-    if index >= 40 {
-        io::outb(0xa0, PIC_EOI); // PIC 2
-    }
-
-    if index >= 32 {
-        io::outb(0x20, PIC_EOI); // PIC 1
-    } else {
-        panic!("arch_unblock_interrupt: Unexpected interrupt index.");
-    }
+    super::apic::check_and_send_eoi(index);
 }

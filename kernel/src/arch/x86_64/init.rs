@@ -43,8 +43,9 @@ pub unsafe fn arch_early_init() {
 
     super::exception::init_gdt();
     super::exception::init_idt();
-    super::exception::init_interrupts();
 }
 
 /// Late architecture-specific initialization.
-pub unsafe fn arch_late_init() {}
+pub unsafe fn arch_late_init() {
+    super::apic::init_apic();
+}
