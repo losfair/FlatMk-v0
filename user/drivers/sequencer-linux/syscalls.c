@@ -86,8 +86,6 @@ void dispatch_syscall(struct LinuxTask *lt, struct TaskRegisters *registers) {
     //sprintf(buf, "SYSCALL: %d\n", (int) registers->rax);
     //flatmk_debug_puts(buf);
 
-    ASSERT_OK(BasicTask_fetch_ipc_cap(lt->host, lt->syscall_ret_buffer.cap, 0));
-
     switch(registers->rax) {
         case __NR_getuid:
         case __NR_geteuid:
@@ -155,13 +153,17 @@ void dispatch_syscall(struct LinuxTask *lt, struct TaskRegisters *registers) {
                 if(!namebuf[i]) break;
             }
             namebuf[sizeof(namebuf) - 1] = '\0';
+
+            ASSERT_OK(BasicTask_fetch_ipc_cap(lt->host, lt->syscall_ret_buffer.cap, 0));
+
             if(dirfd == 0xffffff9c) {
                 // current directory
                 registers->rax = do_openat(lt, namebuf);
             } else {
                 registers->rax = -1;
             }
-            break;
+
+            goto out_ret_from_buffer;
         }
         case __NR_readv:
         case __NR_writev: {
@@ -183,6 +185,8 @@ void dispatch_syscall(struct LinuxTask *lt, struct TaskRegisters *registers) {
                 break;
             }
 
+            ASSERT_OK(BasicTask_fetch_ipc_cap(lt->host, lt->syscall_ret_buffer.cap, 0));
+
             if(registers->rax == __NR_readv) {
                 if(!lt->fds[fd].ops->readv) registers->rax = -1;
                 else registers->rax = lt->fds[fd].ops->readv(lt, &lt->fds[fd], iovs, iovcnt);
@@ -190,7 +194,8 @@ void dispatch_syscall(struct LinuxTask *lt, struct TaskRegisters *registers) {
                 if(!lt->fds[fd].ops->writev) registers->rax = -1;
                 else registers->rax = lt->fds[fd].ops->writev(lt, &lt->fds[fd], iovs, iovcnt);
             }
-            break;
+
+            goto out_ret_from_buffer;
         }
         case __NR_read:
         case __NR_write: {
@@ -206,6 +211,9 @@ void dispatch_syscall(struct LinuxTask *lt, struct TaskRegisters *registers) {
                 .iov_base = (void *) registers->rsi,
                 .iov_len = registers->rdx
             };
+
+            ASSERT_OK(BasicTask_fetch_ipc_cap(lt->host, lt->syscall_ret_buffer.cap, 0));
+
             if(registers->rax == __NR_read) {
                 if(!lt->fds[fd].ops->readv) registers->rax = -1;
                 else registers->rax = lt->fds[fd].ops->readv(lt, &lt->fds[fd], &iov, 1);
@@ -213,7 +221,8 @@ void dispatch_syscall(struct LinuxTask *lt, struct TaskRegisters *registers) {
                 if(!lt->fds[fd].ops->writev) registers->rax = -1;
                 else registers->rax = lt->fds[fd].ops->writev(lt, &lt->fds[fd], &iov, 1);
             }
-            break;
+
+            goto out_ret_from_buffer;
         }
         case __NR_fstat: {
             int fd = registers->rdi;
@@ -233,11 +242,15 @@ void dispatch_syscall(struct LinuxTask *lt, struct TaskRegisters *registers) {
                 registers->rax = -EFAULT;
                 break;
             }
+
+            ASSERT_OK(BasicTask_fetch_ipc_cap(lt->host, lt->syscall_ret_buffer.cap, 0));
+
             uint64_t ns = (uint64_t) req->tv_sec * 1000000000ull + req->tv_nsec;
             sched_nanosleep(ns);
             if(rem) memset(rem, 0, sizeof(struct timespec));
             registers->rax = 0;
-            break;
+
+            goto out_ret_from_buffer;
         }
         case __NR_exit_group:
             sprintf(buf, "Program exited with code %d.\n", (int) registers->rdi);
@@ -262,8 +275,12 @@ void dispatch_syscall(struct LinuxTask *lt, struct TaskRegisters *registers) {
                 registers->rax = -1;
                 break;
             }
+
+            ASSERT_OK(BasicTask_fetch_ipc_cap(lt->host, lt->syscall_ret_buffer.cap, 0));
+
             registers->rax = lt->fds[fd].ops->mmap(lt, &lt->fds[fd], addr, len, prot, flags, off);
-            break;
+
+            goto out_ret_from_buffer;
         }
         case __NR_munmap:
             // Just leak memory.
@@ -280,7 +297,12 @@ void dispatch_syscall(struct LinuxTask *lt, struct TaskRegisters *registers) {
     }
 
     out:
-
     ASSERT_OK(BasicTask_set_all_registers(lt->managed, (uint64_t) registers, sizeof(struct TaskRegisters)));
-    TaskEndpoint_invoke(lt->syscall_ret_buffer);
+    ASSERT_OK(BasicTask_ipc_return(lt->managed));
+    flatmk_throw();
+
+    out_ret_from_buffer:
+    ASSERT_OK(BasicTask_set_all_registers(lt->managed, (uint64_t) registers, sizeof(struct TaskRegisters)));
+    ASSERT_OK(TaskEndpoint_invoke(lt->syscall_ret_buffer));
+    flatmk_throw();
 }
