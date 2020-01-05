@@ -38,14 +38,6 @@ const HEAP_START: usize = 0x7fff00000000;
 /// Start address for dynamic capability allocation.
 const DYN_CAP_START: u64 = 0x100000;
 
-/// 903 = 902 + 1.
-/// 
-/// Divides the PIT clock (1193181.6666 Hz) by 1317.
-/// So we get 1193181.6666 / 1317 = 905.9845608200457 interrupts per second,
-/// and every cycle is 1103771.5687945685 nanoseconds.
-const PIT_DIV: u16 = 1318;
-const PIC_NANOSECS_PER_CYCLE: u64 = 1103771;
-
 /// The maximum time in nanoseconds that a task is allowed to execute before being preempted out.
 const MAX_TIME_SLICE_NS: u64 = 5_000_000; // 5 milliseconds
 
@@ -170,8 +162,6 @@ pub extern "C" fn _start() -> ! {
 
         do_xsave(&mut *DEFAULT_XSAVE.as_mut_ptr());
 
-        init_pit();
-
         setup_interrupt_handler();
         setup_sched_api();
     }
@@ -188,12 +178,6 @@ pub extern "C" fn _start() -> ! {
 fn on_panic(info: &core::panic::PanicInfo) -> ! {
     debug!("scheduler panic: {:#?}", info);
     loop {}
-}
-
-unsafe fn init_pit() {
-    spec::to_result(caps::PIT_MODE_COMMAND.outb(0b00110100)).unwrap(); // channel 0, lobyte/hibyte, rate generator
-    spec::to_result(caps::PIT_CHANNEL_0.outb(PIT_DIV as u64)).unwrap(); // low byte
-    spec::to_result(caps::PIT_CHANNEL_0.outb((PIT_DIV >> 8) as u64)).unwrap(); // high byte
 }
 
 unsafe fn setup_interrupt_handler() {
@@ -357,7 +341,7 @@ fn on_sched_yield(env: ThreadEndpointEnv) {
 /// Timer interrupt handler.
 fn on_timer(env: ThreadEndpointEnv) {
     // Update timestamp before trying to take guard to keep the time accurate.
-    let nanosecs = NANOSEC.fetch_add(PIC_NANOSECS_PER_CYCLE, Ordering::SeqCst);
+    let nanosecs = NANOSEC.fetch_add(1000000, Ordering::SeqCst);
 
     let guard = try_take_guard_or_return(env.task);
 

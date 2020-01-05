@@ -65,10 +65,10 @@ unsafe extern "C" fn init_start() -> ! {
     start_driver_benchmark();
     debug!("- vga");
     start_driver_vga();
-    //debug!("- gclock");
-    //start_driver_gclock();
-    debug!("- sequencer-linux");
-    start_driver_sequencer_linux();
+    debug!("- gclock");
+    start_driver_gclock();
+    //debug!("- sequencer-linux");
+    //start_driver_sequencer_linux();
     debug!("init: All drivers started.");
 
     loop {
@@ -163,20 +163,6 @@ fn start_scheduler() {
         spec::to_result(caps::scheduler::CAPSET.put_cap(
             &caps::BUFFER,
             &spec::CPtr::new(2),
-        )).unwrap();
-
-        // PIT port 1.
-        spec::to_result(caps::ROOT_TASK.new_x86_io_port(&caps::BUFFER, 0x40)).unwrap();
-        spec::to_result(caps::scheduler::CAPSET.put_cap(
-            &caps::BUFFER,
-            &spec::CPtr::new(3),
-        )).unwrap();
-
-        // PIT port 2.
-        spec::to_result(caps::ROOT_TASK.new_x86_io_port(&caps::BUFFER, 0x43)).unwrap();
-        spec::to_result(caps::scheduler::CAPSET.put_cap(
-            &caps::BUFFER,
-            &spec::CPtr::new(4),
         )).unwrap();
 
         // Debug putchar.

@@ -11,10 +11,6 @@ pub static IDLE_REPLY: spec::TaskEndpoint = unsafe { spec::TaskEndpoint::new(spe
 
 pub static TIMER_INTERRUPT: spec::Interrupt = unsafe { spec::Interrupt::new(spec::CPtr::new(0x02)) };
 
-pub static PIT_CHANNEL_0: spec::X86IoPort = unsafe { spec::X86IoPort::new(spec::CPtr::new(0x03)) };
-
-pub static PIT_MODE_COMMAND: spec::X86IoPort = unsafe { spec::X86IoPort::new(spec::CPtr::new(0x04)) };
-
 pub static PUTCHAR: spec::DebugPutchar = unsafe { spec::DebugPutchar::new(spec::CPtr::new(0x05)) };
 
 // These capabilities are created by ourselves.
