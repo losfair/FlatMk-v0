@@ -43,19 +43,19 @@ mod spec;
 use crate::arch::{arch_early_init, arch_late_init};
 use crate::kobj::*;
 use crate::pagealloc::*;
-use crate::paging::{PageTableMto, PageTableObject};
+use crate::paging::{PAGE_TABLE_ID, PageTableMto, PageTableObject};
 use crate::task::StateRestoreMode;
 use bootloader::BootInfo;
-use capability::{CapabilityEndpointObject, CapabilityEndpointSet, CapabilitySet, CapabilityTable};
+use capability::{CAPABILITY_TABLE_ID, CapabilityEndpointObject, CapabilityEndpointSet, CapabilitySet, CapabilityTable};
 use task::Task;
 
 lazy_static! {
     // These values can only be used after paging is initialized.
     static ref ROOT_CAPSET: KernelObjectRef<CapabilitySet> = KernelObjectRef::new(CapabilitySet(
-        CapabilityTable::new().unwrap()
+        CapabilityTable::new(&CAPABILITY_TABLE_ID).unwrap()
     )).unwrap();
     static ref ROOT_PT_OBJECT: KernelObjectRef<PageTableObject> = KernelObjectRef::new(
-        PageTableObject(PageTableMto::new().unwrap())
+        PageTableObject(PageTableMto::new(&PAGE_TABLE_ID).unwrap())
     ).unwrap();
     static ref ROOT_TASK: KernelObjectRef<Task> = KernelObjectRef::new(Task::new_initial(
         ROOT_PT_OBJECT.clone(),

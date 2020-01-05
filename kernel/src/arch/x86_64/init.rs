@@ -11,7 +11,16 @@ unsafe fn enable_sse() {
 unsafe fn enable_global_flag() {
     asm!(r#"
         mov %cr4, %rax
-        or $$0x80, %rax // 1 << 7
+        or $$0x80, %rax // CR4.PGE
+        mov %rax, %cr4
+    "# ::: "rax" : "volatile");
+}
+
+/// Enables PCID.
+unsafe fn enable_pcid() {
+    asm!(r#"
+        mov %cr4, %rax
+        or $$0x20000, %rax // CR4.PCIDE
         mov %rax, %cr4
     "# ::: "rax" : "volatile");
 }
@@ -29,6 +38,7 @@ unsafe fn _enable_fsgsbase() {
 pub unsafe fn arch_early_init() {
     enable_sse();
     enable_global_flag();
+    enable_pcid();
     //enable_fsgsbase();
 
     super::exception::init_gdt();

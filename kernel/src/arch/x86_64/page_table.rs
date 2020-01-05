@@ -1,6 +1,7 @@
 use crate::addr::*;
 use crate::error::*;
 use crate::multilevel::*;
+use super::task::Pcid2pto;
 use core::fmt;
 use core::ptr::NonNull;
 use crate::spec::UserPteFlags;
@@ -15,6 +16,8 @@ pub const PAGE_TABLE_LEVEL_BITS: u8 = 9;
 pub const PAGE_TABLE_LEVELS: u8 = 4;
 pub const PAGE_TABLE_INDEX_START: u8 = 47;
 pub const PAGE_TABLE_SIZE: usize = 512;
+pub const MIN_PCID: u64 = 1;
+pub const MAX_PCID: u64 = 4095;
 
 bitflags! {
     /// Taken from https://docs.rs/x86_64/0.8.2/src/x86_64/structures/paging/page_table.rs.html .
@@ -243,22 +246,34 @@ impl AsLevel<Page, 512> for PageTableEntry {
     }
 }
 
-pub unsafe fn arch_set_current_page_table(phys: PhysAddr) {
-    use x86_64::{
-        registers::control::{Cr3, Cr3Flags},
-        structures::paging::frame::PhysFrame,
-    };
-    Cr3::write(
-        PhysFrame::from_start_address(::x86_64::PhysAddr::new(phys.0)).unwrap(),
-        Cr3Flags::empty(),
+pub unsafe fn arch_set_current_page_table_with_pcid(addr: PhysAddr, pcid: u64) {
+    let addr = addr.0 & !0xfffu64;
+    let pcid = pcid & 0xfffu64;
+    let value = addr | pcid;
+    asm!("mov $0, %cr3" :: "r" (value) : "memory");
+}
+
+pub fn arch_get_current_page_table_with_pcid() -> (PhysAddr, u64) {
+    let value: u64;
+    unsafe {
+        asm!("mov %cr3, $0" : "=r" (value));
+    }
+    (
+        PhysAddr(value & !0xfffu64),
+        value & 0xfffu64
     )
 }
 
-pub unsafe fn arch_get_current_page_table() -> PhysAddr {
-    use x86_64::registers::control::Cr3;
-    let (level_4_table_frame, _) = Cr3::read();
+pub unsafe fn arch_with_pcid_array<F: FnOnce(&mut Pcid2pto) -> R, R>(f: F) -> R {
+    f(&mut (*super::task::get_indirect_tls()).pcid2pto)
+}
 
-    PhysAddr(level_4_table_frame.start_address().as_u64())
+pub unsafe fn arch_flush_pcid(pcid: u64) {
+    let ty: u64 = 1; // single-context invalidation
+    let memarg: [u64; 2] = [pcid, 0];
+    asm!(
+        "invpcid ($1), $0" :: "r"(ty), "r"(&memarg) : "memory"
+    );
 }
 
 #[inline]

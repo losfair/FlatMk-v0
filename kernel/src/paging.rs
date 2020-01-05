@@ -5,7 +5,7 @@ use crate::error::*;
 use crate::addr::*;
 use crate::arch::tlb;
 use crate::arch::{
-    arch_get_current_page_table, Page, PageTableEntry, PAGE_SIZE, PAGE_TABLE_INDEX_START,
+    arch_get_current_page_table_with_pcid, Page, PageTableEntry, PAGE_SIZE, PAGE_TABLE_INDEX_START,
     PAGE_TABLE_LEVELS, PAGE_TABLE_LEVEL_BITS, PAGE_TABLE_SIZE,
 };
 use crate::multilevel::*;
@@ -16,6 +16,7 @@ use core::mem::MaybeUninit;
 use crate::spec::UserPteFlags;
 
 pub(crate) static mut PHYSICAL_OFFSET: u64 = 0;
+pub static PAGE_TABLE_ID: MtoId = MtoId::new();
 
 /// An `EntryFilter` that only allows access to the user range.
 pub struct PageTableUserEntryFilter;
@@ -251,5 +252,5 @@ impl PageTableObject {
 /// Using the return value from this function is very unsafe because
 /// it is almost always mutably aliased.
 pub(crate) fn _active_level_4_table() -> *mut PageTableLevel {
-    unsafe { VirtAddr(PHYSICAL_OFFSET + arch_get_current_page_table().0 as u64).as_mut_ptr() }
+    unsafe { VirtAddr(PHYSICAL_OFFSET + (arch_get_current_page_table_with_pcid().0).0 as u64).as_mut_ptr() }
 }

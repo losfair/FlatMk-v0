@@ -4,7 +4,7 @@ use crate::error::*;
 use crate::kobj::*;
 use crate::multilevel::*;
 use crate::pagealloc::*;
-use crate::paging::{PageTableMto, PageTableObject};
+use crate::paging::{PAGE_TABLE_ID, PageTableMto, PageTableObject};
 use crate::spec::{UserPteFlags, TaskEndpointFlags};
 use crate::task::{IpcEntry, EntryType, StateRestoreMode, Task, TaskEndpoint, EntryDirection, IpcReason, enter_user_mode};
 use core::convert::TryFrom;
@@ -17,6 +17,8 @@ use crate::boot::BootParameter_FramebufferInfo;
 
 pub const N_ENDPOINT_SLOTS: usize = 32;
 pub const INVALID_CAP: u64 = core::u64::MAX;
+
+pub static CAPABILITY_TABLE_ID: MtoId = MtoId::new();
 
 pub trait TryClone: Sized {
     fn try_clone(&self) -> KernelResult<Self>;
@@ -381,7 +383,7 @@ fn invoke_cap_basic_task(
         }
         BasicTaskRequest::MakeCapSet => {
             let cptr = CapPtr(invocation.arg(1)? as u64);
-            let capset = KernelObjectRef::new(CapabilitySet(CapabilityTable::new()?))?;
+            let capset = KernelObjectRef::new(CapabilitySet(CapabilityTable::new(&CAPABILITY_TABLE_ID)?))?;
             task.capabilities.get().entry_endpoint(cptr, |endpoint| {
                 endpoint.object = CapabilityEndpointObject::CapabilitySet(capset);
             })?;
@@ -389,7 +391,7 @@ fn invoke_cap_basic_task(
         }
         BasicTaskRequest::MakeRootPageTable => {
             let cptr = CapPtr(invocation.arg(1)? as u64);
-            let pto = KernelObjectRef::new(PageTableObject(PageTableMto::new()?))?;
+            let pto = KernelObjectRef::new(PageTableObject(PageTableMto::new(&PAGE_TABLE_ID)?))?;
             pto.copy_kernel_range_from(&*current.page_table_root.get());
             task.capabilities.get().entry_endpoint(cptr, |endpoint| {
                 endpoint.object = CapabilityEndpointObject::RootPageTable(pto);

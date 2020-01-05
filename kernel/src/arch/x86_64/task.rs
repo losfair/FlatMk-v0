@@ -145,51 +145,66 @@ impl TaskRegisters {
     }
 }
 
+pub type Pcid2pto = [u64; 4096];
+
 #[repr(C)]
 pub struct TlsIndirect {
+    pub me: *mut TlsIndirect,
     pub kernel_stack: u64,
     pub user_stack: u64,
     pub context: u64,
     pub(super) hlt: u64,
+    pub(super) pcid2pto: Pcid2pto,
 }
 
 impl TlsIndirect {
     pub const fn new(kernel_stack: u64) -> TlsIndirect {
         TlsIndirect {
+            me: core::ptr::null_mut(),
             kernel_stack,
             user_stack: 0,
             context: 0,
             hlt: 0,
+            pcid2pto: [0; 4096],
         }
     }
 }
 
 pub unsafe fn arch_init_kernel_tls_for_cpu(tls_indirect: *mut TlsIndirect) {
+    (*tls_indirect).me = tls_indirect;
     GsBase::write(::x86_64::VirtAddr::new_unchecked(tls_indirect as u64));
+}
+
+pub(super) fn get_indirect_tls() -> *mut TlsIndirect {
+    let result: *mut TlsIndirect;
+    unsafe {
+        asm!("mov %gs:0, $0" : "=r"(result) ::);
+    }
+    result
 }
 
 /// Returns the kernel thread local storage (TLS) pointer for the current CPU.
 pub fn arch_get_kernel_tls() -> u64 {
     let result: u64;
     unsafe {
-        asm!("mov %gs:16, $0" : "=r"(result) ::);
+        asm!("mov %gs:24, $0" : "=r"(result) ::);
     }
     result
 }
 
 /// Sets the kernel thread local storage (TLS) pointer for the current CPU.
 pub unsafe fn arch_set_kernel_tls(value: u64) {
-    asm!("mov $0, %gs:16" :: "r"(value) :: "volatile");
+    asm!("mov $0, %gs:24" :: "r"(value) :: "volatile");
 }
 
 pub(super) unsafe fn set_hlt(value: u64) {
-    asm!("mov $0, %gs:24" :: "r"(value) :: "volatile");
+    asm!("mov $0, %gs:32" :: "r"(value) :: "volatile");
 }
 
 pub(super) fn get_hlt() -> u64 {
     let result: u64;
     unsafe {
-        asm!("mov %gs:24, $0" : "=r"(result) ::);
+        asm!("mov %gs:32, $0" : "=r"(result) ::);
     }
     result
 }
@@ -339,15 +354,15 @@ pub unsafe fn arch_enter_user_mode(registers: *const TaskRegisters) -> ! {
 unsafe extern "C" fn arch_lowlevel_syscall_entry() {
     asm!(r#"
         swapgs
-        mov %rsp, %gs:8
-        mov %gs:0, %rsp
+        mov %rsp, %gs:16
+        mov %gs:8, %rsp
 
         pushq $$0 // fs
         pushq $$0 // gs
         push %r11 // rflags
         push %rcx // rip
         push %rbp // rbp
-        push %gs:8 // rsp
+        push %gs:16 // rsp
         push %rdi
         push %rsi
         push %rdx
@@ -395,7 +410,7 @@ pub fn wait_for_interrupt() -> ! {
         set_hlt(1);
         asm!(
             r#"
-                mov %gs:0, %rsp // In case we recursively enter wait_for_interrupt without going through ring 3.
+                mov %gs:8, %rsp // In case we recursively enter wait_for_interrupt without going through ring 3.
                 swapgs
                 sti
                 hlt

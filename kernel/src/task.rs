@@ -1,6 +1,10 @@
 use crate::addr::*;
 use crate::arch::{
-    arch_get_current_page_table, arch_set_current_page_table,
+    arch_get_current_page_table_with_pcid,
+    arch_set_current_page_table_with_pcid,
+    arch_with_pcid_array,
+    arch_flush_pcid,
+    MAX_PCID, MIN_PCID,
     task::{
         arch_enter_user_mode, arch_enter_user_mode_syscall, arch_get_kernel_tls,
         arch_init_kernel_tls_for_cpu, arch_set_kernel_tls, arch_unblock_interrupt, TaskRegisters,
@@ -495,6 +499,10 @@ impl Task {
     }
 }
 
+fn hash_ptid_to_pcid(ptid: u64) -> u64 {
+    ptid % (MAX_PCID - MIN_PCID + 1) + MIN_PCID
+}
+
 pub fn switch_to(
     task: KernelObjectRef<Task>,
     old_registers: Option<&TaskRegisters>,
@@ -526,8 +534,21 @@ pub fn switch_to(
     // Don't reload if the new task shares a same page table with ourselves.
     unsafe {
         let addr = PhysAddr::from_phys_mapped_virt(root_level).unwrap();
-        if addr != arch_get_current_page_table() {
-            arch_set_current_page_table(addr);
+        let (current_pt, _) = arch_get_current_page_table_with_pcid();
+
+        if addr != current_pt {
+            let ptid = root.0.id();
+            let target_pcid = hash_ptid_to_pcid(ptid);
+            arch_set_current_page_table_with_pcid(addr, target_pcid);
+
+            // Update PCID cache in case of PTID/PCID hash collision.
+            arch_with_pcid_array(|pcids| {
+                if pcids[target_pcid as usize] != ptid {
+                    pcids[target_pcid as usize] = ptid;
+                    arch_flush_pcid(target_pcid);
+                    println!("flush pcid: {}", target_pcid);
+                }
+            })
         }
     }
 

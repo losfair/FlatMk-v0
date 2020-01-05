@@ -8,6 +8,7 @@ use core::marker::PhantomData;
 use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ptr::NonNull;
 use spin::Mutex;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 pub enum OpaqueCacheElement {}
 
@@ -78,6 +79,17 @@ impl EntryFilter for NullEntryFilter {
     }
 }
 
+pub struct MtoId(AtomicU64);
+impl MtoId {
+    pub const fn new() -> MtoId {
+        MtoId(AtomicU64::new(1)) // 0 is reserved
+    }
+
+    fn next(&self) -> u64 {
+        self.0.fetch_add(1, Ordering::SeqCst)
+    }
+}
+
 /// A multilevel table object (MTO) is an abstraction for pagetable-like structures and is used
 /// for page tables and capability tables.
 pub struct MultilevelTableObject<
@@ -92,6 +104,7 @@ pub struct MultilevelTableObject<
 > {
     root: Mutex<KernelPageRef<Level<T, P, TABLE_SIZE>>>,
     cache: Mutex<C>,
+    id: u64,
     _phantom: PhantomData<L>,
 }
 
@@ -437,14 +450,19 @@ impl<
     }
 
     /// Creates an MTO.
-    pub fn new() -> KernelResult<Self> {
+    pub fn new(mto_id: &MtoId) -> KernelResult<Self> {
         Self::check();
         let root = Self::default_level_table()?;
         Ok(MultilevelTableObject {
             root: Mutex::new(root),
             cache: Mutex::new(C::new()),
+            id: mto_id.next(),
             _phantom: PhantomData,
         })
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// Builds the leaf entry, without the leaf itself.
