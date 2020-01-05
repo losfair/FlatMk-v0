@@ -285,7 +285,7 @@ impl<
     }
 
     /// Recursive foreach implementation. (post-order)
-    unsafe fn inner_foreach_postorder<F: FnMut(u8, u64, &mut P) -> KernelResult<()>>(
+    unsafe fn inner_foreach_postorder<L2: EntryFilter, F: FnMut(u8, u64, &mut P) -> KernelResult<()>>(
         mut current: NonNull<Level<T, P, TABLE_SIZE>>,
         cb: &mut F,
         depth: u8,
@@ -293,13 +293,13 @@ impl<
     ) -> KernelResult<()> {
         assert!(depth < LEVELS);
         for (i, entry) in current.as_mut().table.iter_mut().enumerate() {
-            if !L::is_valid(depth, i) {
+            if !L2::is_valid(depth, i) {
                 continue;
             }
             let new_ptr = Self::index_to_ptr(partial_ptr, depth, i);
             if depth != LEVELS - 1 {
                 if let Some(inner) = entry.as_level() {
-                    Self::inner_foreach_postorder(inner, cb, depth + 1, new_ptr)?;
+                    Self::inner_foreach_postorder::<L2, F>(inner, cb, depth + 1, new_ptr)?;
                 }
             }
             cb(depth, new_ptr, entry)?;
@@ -308,12 +308,20 @@ impl<
     }
 
     /// Iterates over all entries in the current MTO except the root table itself. (in post-order)
-    pub fn foreach_entry<F: FnMut(u8, u64, &mut P) -> KernelResult<()>>(
+    pub fn foreach_entry_with_filter<L2: EntryFilter, F: FnMut(u8, u64, &mut P) -> KernelResult<()>>(
         &self,
         mut cb: F,
     ) -> KernelResult<()> {
         let mut root = self.root.lock();
-        unsafe { Self::inner_foreach_postorder(root.as_nonnull(), &mut cb, 0, 0) }
+        unsafe { Self::inner_foreach_postorder::<L2, _>(root.as_nonnull(), &mut cb, 0, 0) }
+    }
+
+    /// Iterates over all entries in the current MTO except the root table itself. (in post-order)
+    pub fn foreach_entry<F: FnMut(u8, u64, &mut P) -> KernelResult<()>>(
+        &self,
+        cb: F,
+    ) -> KernelResult<()> {
+        self.foreach_entry_with_filter::<L, F>(cb)
     }
 
     /// Looks up an entry by a pointer in this MTO.

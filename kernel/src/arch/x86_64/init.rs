@@ -7,6 +7,15 @@ unsafe fn enable_sse() {
     "# ::: "rax" : "volatile");
 }
 
+/// Enables global flag in PT entries.
+unsafe fn enable_global_flag() {
+    asm!(r#"
+        mov %cr4, %rax
+        or $$0x80, %rax // 1 << 7
+        mov %rax, %cr4
+    "# ::: "rax" : "volatile");
+}
+
 /// Enables fsgsbase instructions.
 unsafe fn _enable_fsgsbase() {
     asm!(r#"
@@ -19,6 +28,7 @@ unsafe fn _enable_fsgsbase() {
 /// Early architecture-specific initialization.
 pub unsafe fn arch_early_init() {
     enable_sse();
+    enable_global_flag();
     //enable_fsgsbase();
 
     super::exception::init_gdt();

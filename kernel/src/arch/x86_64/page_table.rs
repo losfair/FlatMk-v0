@@ -184,6 +184,10 @@ impl PageTableEntry {
         self.toggle_flag(PTE_UNOWNED, unowned);
     }
 
+    pub fn set_global(&mut self, global: bool) {
+        self.toggle_flag(PageTableFlags::GLOBAL, global);
+    }
+
     pub fn is_unowned(&mut self) -> bool {
         self.test_flag(PTE_UNOWNED)
     }
@@ -206,8 +210,9 @@ impl Default for PageTableEntry {
 
 impl AsLevel<Page, 512> for PageTableEntry {
     fn as_level(&mut self) -> Option<NonNull<Level<Page, PageTableEntry, 512>>> {
+        // We don't yet support dereferencing huge pages.
         if self.is_huge_page() {
-            panic!("Huge page is not supported.");
+            return None;
         }
 
         // Prevent dereferencing or dropping the underlying physical page if this pte is unowned.

@@ -77,7 +77,7 @@ pub extern "C" fn kstart(boot_info: &'static BootInfo) -> ! {
         syscall::init();
         arch_late_init();
 
-        ROOT_PT_OBJECT.copy_kernel_range_from_level(&mut *crate::paging::_active_level_4_table());
+        ROOT_PT_OBJECT.init_for_root_task();
         setup_initial_caps();
     }
 

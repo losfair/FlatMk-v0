@@ -17,11 +17,27 @@ use crate::spec::UserPteFlags;
 
 pub(crate) static mut PHYSICAL_OFFSET: u64 = 0;
 
-pub struct PageTableEntryFilter;
-impl EntryFilter for PageTableEntryFilter {
+/// An `EntryFilter` that only allows access to the user range.
+pub struct PageTableUserEntryFilter;
+
+impl EntryFilter for PageTableUserEntryFilter {
     #[inline]
     fn is_valid(depth: u8, index: usize) -> bool {
         if depth == 0 && index >= 256 {
+            false
+        } else {
+            true
+        }
+    }
+}
+
+/// An `EntryFilter` that only allows access to the kernel range.
+pub struct PageTableKernelEntryFilter;
+
+impl EntryFilter for PageTableKernelEntryFilter {
+    #[inline]
+    fn is_valid(depth: u8, index: usize) -> bool {
+        if depth == 0 && index < 256 {
             false
         } else {
             true
@@ -34,7 +50,7 @@ pub type PageTableMto = MultilevelTableObject<
     Page,
     PageTableEntry,
     GenericLeafCache,
-    PageTableEntryFilter,
+    PageTableUserEntryFilter,
     PAGE_TABLE_LEVEL_BITS,
     PAGE_TABLE_LEVELS,
     PAGE_TABLE_INDEX_START,
@@ -165,7 +181,7 @@ impl PageTableObject {
         tlb::flush(target);
     }
 
-    pub unsafe fn copy_kernel_range_from_level(&self, src: &PageTableLevel) {
+    unsafe fn copy_kernel_range_from_level(&self, src: &PageTableLevel) {
         self.0.with_root(|this| {
             for (i, entry) in src
                 .table
@@ -181,6 +197,14 @@ impl PageTableObject {
     pub fn copy_kernel_range_from(&self, src: &PageTableObject) {
         src.0
             .with_root(|root| unsafe { self.copy_kernel_range_from_level(root) })
+    }
+
+    pub unsafe fn init_for_root_task(&self) {
+        self.copy_kernel_range_from_level(&*crate::paging::_active_level_4_table());
+        self.0.foreach_entry_with_filter::<PageTableKernelEntryFilter, _>(|_, _, entry| {
+            entry.set_global(true);
+            Ok(())
+        }).expect("PageTableObject::init_for_root_task: Cannot update kernel entries.");
     }
 
     pub fn make_leaf_entry(&self, target: UserAddr) -> KernelResult<()> {
