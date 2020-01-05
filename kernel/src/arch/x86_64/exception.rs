@@ -233,31 +233,22 @@ interrupt_with_code!(
 );
 
 interrupt!(intr_divide_error, __intr_divide_error, frame, registers, {
-    with_serial_port(|p| {
-        writeln!(p, "Divide error: {:#?}", frame).unwrap();
-    });
     if !is_user_fault(frame) {
-        panic!("Kernel divide error");
+        panic!("Kernel divide error: {:#?}", frame);
     }
     Task::raise_fault(Task::current(), TaskFaultReason::InvalidOperation, 0, registers);
 });
 
 interrupt!(intr_device_not_available, __intr_device_not_available, frame, registers, {
-    with_serial_port(|p| {
-        writeln!(p, "Device not available: {:#?}", frame).unwrap();
-    });
     if !is_user_fault(frame) {
-        panic!("Kernel device not available");
+        panic!("Kernel device not available: {:#?}", frame);
     }
     Task::raise_fault(Task::current(), TaskFaultReason::InvalidOperation, 0, registers);
 });
 
 interrupt!(intr_simd_floating_point, __intr_simd_floating_point, frame, registers, {
-    with_serial_port(|p| {
-        writeln!(p, "SIMD floating point error: {:#?}", frame).unwrap();
-    });
     if !is_user_fault(frame) {
-        panic!("Kernel SIMD floating point error");
+        panic!("Kernel SIMD floating point error: {:#?}", frame);
     }
     Task::raise_fault(Task::current(), TaskFaultReason::InvalidOperation, 0, registers);
 });
@@ -268,22 +259,16 @@ interrupt!(
     frame,
     registers,
     {
-        with_serial_port(|p| {
-            writeln!(p, "Invalid opcode: {:#?}", frame).unwrap();
-        });
         if !is_user_fault(frame) {
-            panic!("Kernel invalid opcode");
+            panic!("Kernel invalid opcode: {:#?}", frame);
         }
         Task::raise_fault(Task::current(), TaskFaultReason::IllegalInstruction, 0, registers);
     }
 );
 
 interrupt_with_code!(intr_gpf, __intr_gpf, frame, registers, code, {
-    with_serial_port(|p| {
-        writeln!(p, "General protection fault: code = {} {:#?}", code, frame).unwrap();
-    });
     if !is_user_fault(frame) {
-        panic!("Kernel GPF");
+        panic!("Kernel GPF: code = {} {:#?}", code, frame);
     }
     Task::raise_fault(Task::current(), TaskFaultReason::InvalidOperation, 0, registers);
 });
@@ -318,18 +303,13 @@ interrupt_with_code!(
         }
 
         let fault_addr = Cr2::read().as_ptr::<u8>();
-        with_serial_port(|p| {
-            writeln!(
-                p,
-                "Page fault at {:p}. CODE={:?} RIP={:p}",
+        if !is_user_fault(frame) {
+            panic!(
+                "Kernel page fault at {:p}. CODE={:?} RIP={:p}",
                 fault_addr,
                 PageFaultErrorCode::from_bits(code),
                 frame.instruction_pointer.as_ptr::<u8>(),
-            )
-            .unwrap();
-        });
-        if !is_user_fault(frame) {
-            panic!("Kernel page fault");
+            );
         }
         Task::raise_fault(Task::current(), TaskFaultReason::VMAccess, fault_addr as u64, registers);
     }
@@ -352,7 +332,7 @@ interrupt_with_code!(
             .unwrap();
         });
         if !is_user_fault(frame) {
-            panic!("Kernel stack segment fault");
+            panic!("Kernel stack segment fault. code = {} {:#?}", code, frame);
         }
         Task::raise_fault(Task::current(), TaskFaultReason::VMAccess, 0, registers);
     }

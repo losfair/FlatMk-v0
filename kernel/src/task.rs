@@ -278,11 +278,11 @@ impl Task {
     pub fn raise_fault(me: KernelObjectRef<Task>, fault: TaskFaultReason, code: u64, old_registers: &TaskRegisters) -> ! {
         let endpoint = match *me.fault_handler.lock() {
             Some(ref x) => x.clone(),
-            None => panic!("Task::raise_fault: Got fault `{:?}` but no handler was registered.", fault),
+            None => panic!("Task::raise_fault: Got fault `{:?}` with code: {:016x} but no handler was registered.\nRegisters: {:#?}", fault, code, old_registers),
         };
         drop(me);
         Task::invoke_ipc(endpoint, IpcReason::Fault(fault, code), old_registers);
-        panic!("Task::raise_fault: Cannot invoke fault handler for fault: {:?}.", fault);
+        panic!("Task::raise_fault: Cannot invoke fault handler for fault: {:?} with code: {:016x}.\nRegisters: {:#?}", fault, code, old_registers);
     }
 
     /// Invokes IPC on this task.
@@ -365,9 +365,12 @@ impl Task {
                 // 
                 // Determine the entry type from the provided IPC reason.
                 // Just use the same flags as the target endpoint for now.
-                let (entry_type, flags) = match reason {
-                    IpcReason::Interrupt(_) | IpcReason::Fault(_, _) => (EntryType::PreemptiveReply(prev.clone()), target.flags),
-                    IpcReason::CapInvoke => (EntryType::CooperativeReply(prev.clone()), target.flags),
+                let flags = target.flags;
+                let entry_type = match reason {
+                    // Override to cooperative reply for invalid capability (invalid syscall) faults.
+                    IpcReason::Fault(TaskFaultReason::InvalidCapability, _) => EntryType::CooperativeReply(prev.clone()),
+                    IpcReason::Interrupt(_) | IpcReason::Fault(_, _) => EntryType::PreemptiveReply(prev.clone()),
+                    IpcReason::CapInvoke => EntryType::CooperativeReply(prev.clone()),
                 };
 
                 let reply_endpoint = TaskEndpoint {
