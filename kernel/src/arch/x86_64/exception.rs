@@ -296,10 +296,14 @@ interrupt_with_code!(
     code,
     {
         // Handle copy from/to user faults.
+        //
+        // Before jumping to the copy error handler, we need to do a `swapgs` because it was assumed that this was a user fault
+        // and `gs` was swapped twice to the user gs.
         if !is_user_fault(frame) && registers.rip == super::asm_import::__copy_user_checked_argreversed__copyinst as u64 {
             unsafe {
                 asm!(
                     r#"
+                        swapgs
                         jmp *%rax
                     "# :
                     : "{rax}"(super::asm_import::__copy_user_checked_argreversed__copyend as u64),
