@@ -130,7 +130,26 @@ pub struct TaskEndpoint {
     pub flags: TaskEndpointFlags,
 }
 
+#[derive(Clone)]
+enum TrivialEntryType {
+    Call(IpcEntry),
+    CooperativeReply,
+    PreemptiveReply,
+}
+
+impl EntryType {
+    #[inline]
+    fn into_trivial(self) -> KernelResult<(TrivialEntryType, KernelObjectRef<Task>)> {
+        Ok(match self {
+            EntryType::Call(x, entry) => (TrivialEntryType::Call(entry), KernelObjectRef::try_from(x)?),
+            EntryType::CooperativeReply(x) => (TrivialEntryType::CooperativeReply, x),
+            EntryType::PreemptiveReply(x) => (TrivialEntryType::PreemptiveReply, x),
+        })
+    }
+}
+
 impl TaskEndpoint {
+    #[inline]
     pub fn get_task(&self) -> KernelResult<KernelObjectRef<Task>> {
         Ok(match self.entry {
             EntryType::Call(ref t, _) => KernelObjectRef::try_from(t.clone())?,
@@ -162,10 +181,11 @@ pub enum EntryDirection {
     Pop,
 }
 
-fn set_current_task(t: KernelObjectRef<Task>) {
+/// Sets the current task, and returns the previous task if any.
+fn set_current_task(t: KernelObjectRef<Task>) -> Option<KernelObjectRef<Task>> {
     // Drop the old reference.
     let old = arch_get_kernel_tls() as *mut KernelObject<Task>;
-    if !old.is_null() {
+    let old_obj = if !old.is_null() {
         let old_obj = unsafe { KernelObjectRef::from_raw(old) };
         old_obj
             .running
@@ -173,13 +193,18 @@ fn set_current_task(t: KernelObjectRef<Task>) {
             .expect(
                 "set_current_task: Expecting the previous current task to be in 'running' state.",
             );
-    }
+        Some(old_obj)
+    } else {
+        None
+    };
 
     // Write the new reference.
     let raw = KernelObjectRef::into_raw(t);
     unsafe {
         arch_set_kernel_tls(raw as u64);
     }
+
+    old_obj
 }
 
 pub unsafe fn init() {
@@ -249,9 +274,21 @@ impl Task {
         ret
     }
 
+    /// Borrows current task into a static reference.
+    /// 
+    /// This is extremely unsafe, as a task switch would invalidate the returned reference.
+    #[inline]
+    pub unsafe fn borrow_current() -> &'static Task {
+        let ptr = arch_get_kernel_tls() as *mut KernelObject<Task>;
+        (*ptr).value()
+    }
+
     #[inline]
     pub fn is_current(&self) -> bool {
         let ptr = arch_get_kernel_tls() as *mut KernelObject<Task>;
+        if ptr.is_null() {
+            return false;
+        }
         let inner = unsafe { (*ptr).value() as *const Task };
         self as *const Task == inner
     }
@@ -296,126 +333,137 @@ impl Task {
         reason: IpcReason,
         old_registers: &TaskRegisters,
     ) -> KernelError {
-        // Try to get a strong reference to the task.
-        let task = match target.get_task() {
-            Ok(x) => x,
-            Err(e) => return e,
-        };
-
-        // Block interrupt on this task.
-        if let IpcReason::Interrupt(index) = reason {
-            match task.block_interrupt(index) {
-                Ok(()) => {},
-                Err(e) => {
-                    return e;
-                }
-            }
-        }
-
-        let prev = Task::current();
-
-        // Attempts to block IPC for the target task, before switching to it.
-        if target.entry.direction() == EntryDirection::Push {
-            // Check invariant (stack-like structure).
-            assert_eq!(prev.ipc_blocked.load(Ordering::Relaxed), true);
-
-            if task.block_ipc().is_err() {
-                // We are trying to re-enter a task whose IPC is already blocked. This is not allowed.
-
-                // First, unblock interrupt if needed.
-                if let IpcReason::Interrupt(_) = reason {
-                    task.unblock_interrupt().expect(
-                        "invoke_ipc: block_ipc failed on an interrupt endpoint but cannot unblock interrupt."
-                    );
-                }
-
-                // Then, we are ready to return.
-                return KernelError::InvalidState;
-            }
-        }
-
-        // Here switch_to should always succeed, since we have checked ipc_blocked before.
-        switch_to(task.clone(), Some(old_registers)).expect("invoke_ipc: switch_to failed.");
-
-        // If CAP_TRANSFER is set, transfer capabilities before pop to avoid race conditions.
-        if target.flags.contains(TaskEndpointFlags::CAP_TRANSFER) {
-            let caps = core::mem::replace(&mut *prev.ipc_caps.lock(), Default::default());
-            *task.ipc_caps.lock() = caps;
-        }
-
-        // A task always has `ipc_blocked == true` if it is successfully switched to. Since we are on the CPU that
-        // switches out the task, we have the unique "ownership" for unblocking its IPC.
-        if target.entry.direction() == EntryDirection::Pop {
-            prev.unblock_ipc().expect("invoke_ipc: Unable to unblock IPC for the previous task.");
-
-            // Check invariant (stack-like structure).
-            assert_eq!(task.ipc_blocked.load(Ordering::Relaxed), true);
-
-            // Unblock interrupt on the previous task, if it was running an interrupt handler.
-            // We can safely ignore the return value, since it's okay if the task wasn't running an interrupt handler.
-            drop(prev.unblock_interrupt());
-        }
-
         let state_restore_mode: StateRestoreMode;
 
-        // For the `Call` entry type, initialize program counter and the reply endpoint.
-        match target.entry {
-            EntryType::Call(_, entrypoint) => {
-                // Set up the entry and flags for the reply endpoint.
-                // 
-                // Determine the entry type from the provided IPC reason.
-                // Just use the same flags as the target endpoint for now.
-                let flags = target.flags;
-                let entry_type = match reason {
-                    // Override to cooperative reply for invalid capability (invalid syscall) faults.
-                    IpcReason::Fault(TaskFaultReason::InvalidCapability, _) => EntryType::CooperativeReply(prev.clone()),
-                    IpcReason::Interrupt(_) | IpcReason::Fault(_, _) => EntryType::PreemptiveReply(prev.clone()),
-                    IpcReason::CapInvoke => EntryType::CooperativeReply(prev.clone()),
-                };
+        // Wrap everything inside a block to ensure the RAII destructors will run.
+        {
+            // Try to get a strong reference to the task.
+            let direction = target.entry.direction();
+            let (entry, task) = match target.entry.into_trivial() {
+                Ok(x) => x,
+                Err(e) => return e,
+            };
 
-                let reply_endpoint = TaskEndpoint {
-                    entry: entry_type,
-                    flags,
-                };
-
-                task.ipc_caps.lock()[0] = CapabilityEndpoint {
-                    object: CapabilityEndpointObject::TaskEndpoint(reply_endpoint),
-                };
-
-                // Set registers.
-                let mut regs = task.registers.lock();
-                *regs.pc_mut() = entrypoint.pc;
-                *regs.usermode_arg_mut(0).unwrap() = entrypoint.user_context;
-                *regs.usermode_arg_mut(1).unwrap() = prev.get_tag(task.id).unwrap_or(0);
-
-                if let IpcReason::Fault(fault, code) = reason {
-                    *regs.usermode_arg_mut(2).unwrap() = fault as i64 as u64;
-                    *regs.usermode_arg_mut(3).unwrap() = code;
+            // Block interrupt on this task.
+            if let IpcReason::Interrupt(index) = reason {
+                match task.block_interrupt(index) {
+                    Ok(()) => {},
+                    Err(e) => {
+                        return e;
+                    }
                 }
-
-                // Use syscall mode, since the target task is aware of the switch.
-                state_restore_mode = StateRestoreMode::Syscall;
             }
-            EntryType::PreemptiveReply(_) => {
-                // Check invariant.
-                assert_eq!(reason, IpcReason::CapInvoke);
 
-                // Preemptive switch requires full state restore.
-                state_restore_mode = StateRestoreMode::Full;
+            // Here we use `borrow_current` to avoid an reference-counted clone.
+            // But this is very unsafe and `prev` should not be used after `switch_to`.
+            let prev = unsafe {
+                Task::borrow_current()
+            };
+
+            // Attempts to block IPC for the target task, before switching to it.
+            if direction == EntryDirection::Push {
+                // Check invariant (stack-like structure).
+                assert_eq!(prev.ipc_blocked.load(Ordering::Relaxed), true);
+
+                if task.block_ipc().is_err() {
+                    // We are trying to re-enter a task whose IPC is already blocked. This is not allowed.
+
+                    // First, unblock interrupt if needed.
+                    if let IpcReason::Interrupt(_) = reason {
+                        task.unblock_interrupt().expect(
+                            "invoke_ipc: block_ipc failed on an interrupt endpoint but cannot unblock interrupt."
+                        );
+                    }
+
+                    // Then, we are ready to return.
+                    return KernelError::InvalidState;
+                }
             }
-            EntryType::CooperativeReply(_) => {
-                // Check invariant.
-                assert_eq!(reason, IpcReason::CapInvoke);
 
-                // Use syscall mode.
-                state_restore_mode = StateRestoreMode::Syscall;
+            // Here switch_to should always succeed, since we have checked ipc_blocked before.
+            let prev = switch_to(task, Some(old_registers))
+                .expect("invoke_ipc: switch_to failed.")
+                .expect("invoke_ipc: switch_to didn't return a previous task.");
+
+            // Again using `borrow_current` to unsafely get a reference. This is actually safe as we are no longer switching tasks
+            // within this function.
+            let task = unsafe {
+                Task::borrow_current()
+            };
+
+            // If CAP_TRANSFER is set, transfer capabilities before pop to avoid race conditions.
+            if target.flags.contains(TaskEndpointFlags::CAP_TRANSFER) {
+                let caps = core::mem::replace(&mut *prev.ipc_caps.lock(), Default::default());
+                *task.ipc_caps.lock() = caps;
+            }
+
+            // A task always has `ipc_blocked == true` if it is successfully switched to. Since we are on the CPU that
+            // switches out the task, we have the unique "ownership" for unblocking its IPC.
+            if direction == EntryDirection::Pop {
+                prev.unblock_ipc().expect("invoke_ipc: Unable to unblock IPC for the previous task.");
+
+                // Check invariant (stack-like structure).
+                assert_eq!(task.ipc_blocked.load(Ordering::Relaxed), true);
+
+                // Unblock interrupt on the previous task, if it was running an interrupt handler.
+                // We can safely ignore the return value, since it's okay if the task wasn't running an interrupt handler.
+                drop(prev.unblock_interrupt());
+            }
+
+            // For the `Call` entry type, initialize program counter and the reply endpoint.
+            match entry {
+                TrivialEntryType::Call(entrypoint) => {
+                    // Set registers.
+                    let mut regs = task.registers.lock();
+                    *regs.pc_mut() = entrypoint.pc;
+                    *regs.usermode_arg_mut(0).unwrap() = entrypoint.user_context;
+                    *regs.usermode_arg_mut(1).unwrap() = prev.get_tag(task.id).unwrap_or(0);
+
+                    if let IpcReason::Fault(fault, code) = reason {
+                        *regs.usermode_arg_mut(2).unwrap() = fault as i64 as u64;
+                        *regs.usermode_arg_mut(3).unwrap() = code;
+                    }
+                    
+                    // Set up the entry and flags for the reply endpoint.
+                    // 
+                    // Determine the entry type from the provided IPC reason.
+                    // Just use the same flags as the target endpoint for now.
+                    let flags = target.flags;
+                    let entry_type = match reason {
+                        // Override to cooperative reply for invalid capability (invalid syscall) faults.
+                        IpcReason::Fault(TaskFaultReason::InvalidCapability, _) => EntryType::CooperativeReply(prev),
+                        IpcReason::Interrupt(_) | IpcReason::Fault(_, _) => EntryType::PreemptiveReply(prev),
+                        IpcReason::CapInvoke => EntryType::CooperativeReply(prev),
+                    };
+
+                    let reply_endpoint = TaskEndpoint {
+                        entry: entry_type,
+                        flags,
+                    };
+
+                    task.ipc_caps.lock()[0] = CapabilityEndpoint {
+                        object: CapabilityEndpointObject::TaskEndpoint(reply_endpoint),
+                    };
+
+                    // Use syscall mode, since the target task is aware of the switch.
+                    state_restore_mode = StateRestoreMode::Syscall;
+                }
+                TrivialEntryType::PreemptiveReply => {
+                    // Check invariant.
+                    assert_eq!(reason, IpcReason::CapInvoke);
+
+                    // Preemptive switch requires full state restore.
+                    state_restore_mode = StateRestoreMode::Full;
+                }
+                TrivialEntryType::CooperativeReply => {
+                    // Check invariant.
+                    assert_eq!(reason, IpcReason::CapInvoke);
+
+                    // Use syscall mode.
+                    state_restore_mode = StateRestoreMode::Syscall;
+                }
             }
         }
-
-        // Drop reference-counted values.
-        drop(target);
-        drop(prev);
-        drop(task);
 
         // Enter user mode.
         enter_user_mode(state_restore_mode);
@@ -509,9 +557,11 @@ fn hash_ptid_to_pcid(ptid: u64) -> u64 {
 pub fn switch_to(
     task: KernelObjectRef<Task>,
     old_registers: Option<&TaskRegisters>,
-) -> KernelResult<()> {
+) -> KernelResult<Option<KernelObjectRef<Task>>> {
     if let Some(old_regs) = old_registers {
-        let current = Task::current();
+        let current = unsafe {
+            Task::borrow_current()
+        };
         let mut regs = current.registers.lock();
         *regs = old_regs.clone();
         regs.lazy_read();
@@ -519,7 +569,7 @@ pub fn switch_to(
 
     // We are already on the target task.
     if task.is_current() {
-        return Ok(());
+        return Ok(Some(task));
     }
 
     let root = task.page_table_root.get();
@@ -532,7 +582,7 @@ pub fn switch_to(
         .map_err(|_| KernelError::InvalidState)?;
 
     task.registers.lock().lazy_write();
-    set_current_task(task);
+    let prev = set_current_task(task);
 
     // Don't reload if the new task shares a same page table with ourselves.
     unsafe {
@@ -555,7 +605,7 @@ pub fn switch_to(
         }
     }
 
-    Ok(())
+    Ok(prev)
 }
 
 /// The mode for restoring user context.
