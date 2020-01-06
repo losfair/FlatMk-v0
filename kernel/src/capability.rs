@@ -256,7 +256,9 @@ fn invoke_cap_basic_task(
     invocation: &mut CapabilityInvocation,
     task: KernelObjectRef<Task>,
 ) -> KernelResult<i64> {
-    let current = Task::current();
+    let current = unsafe {
+        Task::borrow_current()
+    };
 
     let req = BasicTaskRequest::try_from(invocation.arg(0)? as i64)?;
     match req {
@@ -419,7 +421,6 @@ fn invoke_cap_basic_task(
         BasicTaskRequest::IpcReturn => {
             let cap = core::mem::replace(&mut current.ipc_caps.lock()[0], Default::default());
             if let CapabilityEndpointObject::TaskEndpoint(endpoint) = cap.object {
-                drop(current);
                 let e = Task::invoke_ipc(
                     endpoint,
                     IpcReason::CapInvoke,
@@ -493,7 +494,9 @@ fn invoke_cap_basic_task(
 }
 
 fn invoke_cap_root_task(invocation: &CapabilityInvocation) -> KernelResult<i64> {
-    let current = Task::current();
+    let current = unsafe {
+        Task::borrow_current()
+    };
 
     let requested_cap = RootTaskCapRequest::try_from(invocation.arg(0)? as i64)?;
     match requested_cap {
@@ -614,7 +617,9 @@ fn invoke_cap_root_page_table(
     pt: KernelObjectRef<PageTableObject>,
 ) -> KernelResult<i64> {
     let req = RootPageTableRequest::try_from(invocation.arg(0)? as i64)?;
-    let current = Task::current();
+    let current = unsafe {
+        Task::borrow_current()
+    };
 
     match req {
         RootPageTableRequest::MakeLeaf => {
@@ -702,7 +707,7 @@ fn invoke_cap_task_endpoint(
                 // the capability slot which the input `endpoint` was originally taken from, between the entry
                 // to this function and the IPC is actually invoked.
                 drop(endpoint);
-                match Task::current()
+                match unsafe { Task::borrow_current() }
                     .capabilities
                     .get()
                     .lookup_cptr_take(invocation.cptr())?.object {
@@ -752,7 +757,9 @@ fn invoke_cap_task_endpoint(
                 .contains(TaskEndpointFlags::TAGGABLE) {
                     return Err(KernelError::InvalidState);
                 }
-            let current = Task::current();
+            let current = unsafe {
+                Task::borrow_current()
+            };
             let tag = invocation.arg(1)? as u64;
 
             let task = endpoint.get_task()?;
@@ -760,7 +767,9 @@ fn invoke_cap_task_endpoint(
             Ok(0)
         }
         IpcRequest::GetTag => {
-            let current = Task::current();
+            let current = unsafe {
+                Task::borrow_current()
+            };
             let task = endpoint.get_task()?;
             let tag = task.get_tag(current.id)?;
             Ok(tag as _)
@@ -774,7 +783,9 @@ fn invoke_cap_capability_set(
     set: KernelObjectRef<CapabilitySet>,
 ) -> KernelResult<i64> {
     let req = CapSetRequest::try_from(invocation.arg(0)? as i64)?;
-    let current = Task::current();
+    let current = unsafe {
+        Task::borrow_current()
+    };
 
     match req {
         CapSetRequest::MakeLeafSet => {
@@ -868,7 +879,9 @@ fn invoke_cap_interrupt(invocation: &mut CapabilityInvocation, index: u8) -> Ker
 
     match req {
         InterruptRequest::Bind => {
-            let task = Task::current().capabilities.get().entry_endpoint(
+            let task = unsafe {
+                Task::borrow_current()
+            }.capabilities.get().entry_endpoint(
                 CapPtr(invocation.arg(1)? as u64),
                 |endpoint| match endpoint.object {
                     CapabilityEndpointObject::BasicTask(ref t) => Ok(t.clone()),

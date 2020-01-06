@@ -333,12 +333,11 @@ impl Task {
     /// Raises a fault on a task.
     /// 
     /// Panicks if no fault handler is registered. Never returns.
-    pub fn raise_fault(me: KernelObjectRef<Task>, fault: TaskFaultReason, code: u64, old_registers: &TaskRegisters) -> ! {
-        let endpoint = match *me.fault_handler.lock() {
+    pub fn raise_fault(fault: TaskFaultReason, code: u64, old_registers: &TaskRegisters) -> ! {
+        let endpoint = match *unsafe { Task::borrow_current() }.fault_handler.lock() {
             Some(ref x) => x.clone(),
             None => panic!("Task::raise_fault: Got fault `{:?}` with code: {:016x} but no handler was registered.\nRegisters: {:#?}", fault, code, old_registers),
         };
-        drop(me);
         Task::invoke_ipc(endpoint, IpcReason::Fault(fault, code), old_registers);
         panic!("Task::raise_fault: Cannot invoke fault handler for fault: {:?} with code: {:016x}.\nRegisters: {:#?}", fault, code, old_registers);
     }

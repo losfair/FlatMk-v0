@@ -284,7 +284,7 @@ pub fn copy_to_user_typed<T>(data: &[T], uaddr: UserAddr) -> KernelResult<()> {
 /// Invalidates registers as defined by the calling convention, but is usually faster.
 pub unsafe fn arch_enter_user_mode_syscall(registers: *const TaskRegisters) -> ! {
     if !super::addr::address_is_canonical((*registers).rip) {
-        Task::raise_fault(Task::current(), TaskFaultReason::VMAccess, (*registers).rip, &*registers);
+        Task::raise_fault(TaskFaultReason::VMAccess, (*registers).rip, &*registers);
     }
 
     asm!(

@@ -226,21 +226,21 @@ interrupt!(intr_divide_error, __intr_divide_error, frame, registers, {
     if !is_user_fault(frame) {
         panic!("Kernel divide error: {:#?}", frame);
     }
-    Task::raise_fault(Task::current(), TaskFaultReason::InvalidOperation, 0, registers);
+    Task::raise_fault(TaskFaultReason::InvalidOperation, 0, registers);
 });
 
 interrupt!(intr_device_not_available, __intr_device_not_available, frame, registers, {
     if !is_user_fault(frame) {
         panic!("Kernel device not available: {:#?}", frame);
     }
-    Task::raise_fault(Task::current(), TaskFaultReason::InvalidOperation, 0, registers);
+    Task::raise_fault(TaskFaultReason::InvalidOperation, 0, registers);
 });
 
 interrupt!(intr_simd_floating_point, __intr_simd_floating_point, frame, registers, {
     if !is_user_fault(frame) {
         panic!("Kernel SIMD floating point error: {:#?}", frame);
     }
-    Task::raise_fault(Task::current(), TaskFaultReason::InvalidOperation, 0, registers);
+    Task::raise_fault(TaskFaultReason::InvalidOperation, 0, registers);
 });
 
 interrupt!(
@@ -252,7 +252,7 @@ interrupt!(
         if !is_user_fault(frame) {
             panic!("Kernel invalid opcode: {:#?}", frame);
         }
-        Task::raise_fault(Task::current(), TaskFaultReason::IllegalInstruction, 0, registers);
+        Task::raise_fault(TaskFaultReason::IllegalInstruction, 0, registers);
     }
 );
 
@@ -260,7 +260,7 @@ interrupt_with_code!(intr_gpf, __intr_gpf, frame, registers, code, {
     if !is_user_fault(frame) {
         panic!("Kernel GPF: code = {} {:#?}", code, frame);
     }
-    Task::raise_fault(Task::current(), TaskFaultReason::InvalidOperation, 0, registers);
+    Task::raise_fault(TaskFaultReason::InvalidOperation, 0, registers);
 });
 
 interrupt_with_code!(
@@ -301,7 +301,7 @@ interrupt_with_code!(
                 frame.instruction_pointer.as_ptr::<u8>(),
             );
         }
-        Task::raise_fault(Task::current(), TaskFaultReason::VMAccess, fault_addr as u64, registers);
+        Task::raise_fault(TaskFaultReason::VMAccess, fault_addr as u64, registers);
     }
 );
 
@@ -324,7 +324,7 @@ interrupt_with_code!(
         if !is_user_fault(frame) {
             panic!("Kernel stack segment fault. code = {} {:#?}", code, frame);
         }
-        Task::raise_fault(Task::current(), TaskFaultReason::VMAccess, 0, registers);
+        Task::raise_fault(TaskFaultReason::VMAccess, 0, registers);
     }
 );
 
@@ -347,7 +347,7 @@ fn handle_external_interrupt(
     unsafe {
         invoke_interrupt(index, registers);
         // If fails, ignore this interrupt.
-        if Task::current().is_idle() {
+        if Task::borrow_current().is_idle() {
             super::task::wait_for_interrupt();
         } else {
             super::task::arch_enter_user_mode(registers);

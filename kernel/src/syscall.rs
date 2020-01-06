@@ -10,15 +10,17 @@ pub unsafe fn init() {
 fn dispatch_syscall(invocation: &mut CapabilityInvocation) -> i64 {
     let cptr = invocation.cptr();
     if cptr.0 == INVALID_CAP {
-        Task::raise_fault(Task::current(), TaskFaultReason::InvalidCapability, 0, &invocation.registers);
+        Task::raise_fault(TaskFaultReason::InvalidCapability, 0, &invocation.registers);
     } else {
         let cap = {
-            let task = Task::current();
+            let task = unsafe {
+                Task::borrow_current()
+            };
             let maybe_cap = task.capabilities.get().lookup_cptr_no_check_clone(cptr);
             match maybe_cap {
                 Ok(x) => x,
                 Err(_) => {
-                    Task::raise_fault(task, TaskFaultReason::InvalidCapability, 0, &invocation.registers);
+                    Task::raise_fault(TaskFaultReason::InvalidCapability, 0, &invocation.registers);
                 }
             }
         };
