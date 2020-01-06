@@ -22,6 +22,7 @@ pub enum BasicTaskRequest {
 	PutFaultHandler = 15,
 	GetAllRegisters = 16,
 	SetAllRegisters = 17,
+	SetSyscallDelegated = 18,
 }
 
 /// A key to a boot parameter.
@@ -122,6 +123,15 @@ pub enum TaskFaultReason {
 	IllegalInstruction = 1,
 	InvalidCapability = 2,
 	InvalidOperation = 3,
+}
+
+/// A trivial syscall that is not invoked on a capability.
+#[repr(i64)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
+pub enum TrivialSyscall {
+	SchedYield = 0,
+	SchedNanosleep = 1,
+	SchedSubmit = 2,
 }
 
 /// A request to an X86 I/O port.

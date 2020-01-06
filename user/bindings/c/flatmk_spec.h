@@ -20,6 +20,7 @@ enum BasicTaskRequest {
 	BasicTaskRequest_PutFaultHandler = 15,
 	BasicTaskRequest_GetAllRegisters = 16,
 	BasicTaskRequest_SetAllRegisters = 17,
+	BasicTaskRequest_SetSyscallDelegated = 18,
 };
 
 // A key to a boot parameter.
@@ -102,6 +103,13 @@ enum TaskFaultReason {
 	TaskFaultReason_IllegalInstruction = 1,
 	TaskFaultReason_InvalidCapability = 2,
 	TaskFaultReason_InvalidOperation = 3,
+};
+
+// A trivial syscall that is not invoked on a capability.
+enum TrivialSyscall {
+	TrivialSyscall_SchedYield = 0,
+	TrivialSyscall_SchedNanosleep = 1,
+	TrivialSyscall_SchedSubmit = 2,
 };
 
 // A request to an X86 I/O port.
@@ -188,6 +196,15 @@ struct TaskEndpoint {
 
 static inline struct TaskEndpoint TaskEndpoint_new(CPtr cap) {
     struct TaskEndpoint result = { .cap = cap };
+    return result;
+}
+// Entry to trivial syscalls. Only valid on capability pointer `u64::MAX`.
+struct TrivialSyscallEntry {
+    CPtr cap;
+};
+
+static inline struct TrivialSyscallEntry TrivialSyscallEntry_new(CPtr cap) {
+    struct TrivialSyscallEntry result = { .cap = cap };
     return result;
 }
 // Capability to an X86 I/O port.
@@ -382,6 +399,15 @@ static inline int64_t BasicTask_set_register(
 	uint64_t value
 ) {
 	return cptr_invoke(me.cap, BasicTaskRequest_SetRegister, index, value, 0ll);
+}
+
+// Sets the syscall delegation status of this task.
+static inline int64_t BasicTask_set_syscall_delegated(
+	struct BasicTask me,
+	// A boolean value indicating whether to enable syscall delegation.
+	uint64_t status
+) {
+	return cptr_invoke(me.cap, BasicTaskRequest_SetSyscallDelegated, status, 0ll, 0ll);
 }
 
 // Clones a capability.
@@ -666,6 +692,28 @@ static inline int64_t TaskEndpoint_set_tag(
 	uint64_t tag
 ) {
 	return cptr_invoke(me.cap, IpcRequest_SetTag, tag, 0ll, 0ll);
+}
+
+static inline int64_t TrivialSyscallEntry_sched_nanosleep(
+	struct TrivialSyscallEntry me,
+	// Duration in nanoseconds.
+	uint64_t duration
+) {
+	return cptr_invoke(me.cap, TrivialSyscall_SchedNanosleep, duration, 0ll, 0ll);
+}
+
+static inline int64_t TrivialSyscallEntry_sched_submit(
+	struct TrivialSyscallEntry me,
+	// Reply endpoint to submit.
+	struct TaskEndpoint target
+) {
+	return cptr_invoke(me.cap, TrivialSyscall_SchedSubmit, target.cap, 0ll, 0ll);
+}
+
+static inline int64_t TrivialSyscallEntry_sched_yield(
+	struct TrivialSyscallEntry me
+) {
+	return cptr_invoke(me.cap, TrivialSyscall_SchedYield, 0ll, 0ll, 0ll);
 }
 
 // Calls the x86 `inb` instruction on this port.

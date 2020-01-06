@@ -45,3 +45,5 @@ pub fn to_result(code: i64) -> Result<u64, KernelError> {
 }
 
 include!("../generated/flatmk_spec.rs");
+
+pub static CAP_TRIVIAL_SYSCALL: TrivialSyscallEntry = unsafe { TrivialSyscallEntry::new(CPtr::new(core::u64::MAX)) };

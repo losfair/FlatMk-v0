@@ -22,6 +22,7 @@ pub enum BasicTaskRequest {
 	PutFaultHandler = 15,
 	GetAllRegisters = 16,
 	SetAllRegisters = 17,
+	SetSyscallDelegated = 18,
 }
 
 /// A key to a boot parameter.
@@ -122,6 +123,15 @@ pub enum TaskFaultReason {
 	IllegalInstruction = 1,
 	InvalidCapability = 2,
 	InvalidOperation = 3,
+}
+
+/// A trivial syscall that is not invoked on a capability.
+#[repr(i64)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
+pub enum TrivialSyscall {
+	SchedYield = 0,
+	SchedNanosleep = 1,
+	SchedSubmit = 2,
 }
 
 /// A request to an X86 I/O port.
@@ -332,6 +342,14 @@ impl BasicTask {
 		value: u64,
 	) -> i64 {
 		self.cap.call(BasicTaskRequest::SetRegister as i64, index as i64, value as i64, 0i64, )
+	}
+
+	/// Sets the syscall delegation status of this task.
+	pub unsafe fn set_syscall_delegated(
+		&self,
+		status: u64,
+	) -> i64 {
+		self.cap.call(BasicTaskRequest::SetSyscallDelegated as i64, status as i64, 0i64, 0i64, )
 	}
 
 }
@@ -760,6 +778,51 @@ impl TaskEndpoint {
 		tag: u64,
 	) -> i64 {
 		self.cap.call(IpcRequest::SetTag as i64, tag as i64, 0i64, 0i64, )
+	}
+
+}
+
+/// Entry to trivial syscalls. Only valid on capability pointer `u64::MAX`.
+#[derive(Copy, Clone, Debug)]
+pub struct TrivialSyscallEntry {
+    cap: CPtr
+}
+
+impl Into<CPtr> for TrivialSyscallEntry {
+    fn into(self) -> CPtr {
+        self.cap
+    }
+}
+
+impl TrivialSyscallEntry {
+    pub const unsafe fn new(cap: CPtr) -> Self {
+        Self {
+            cap,
+        }
+    }
+
+    pub const fn cptr(&self) -> &CPtr {
+        &self.cap
+    }
+
+	pub unsafe fn sched_nanosleep(
+		&self,
+		duration: u64,
+	) -> i64 {
+		self.cap.call(TrivialSyscall::SchedNanosleep as i64, duration as i64, 0i64, 0i64, )
+	}
+
+	pub unsafe fn sched_submit(
+		&self,
+		target: &TaskEndpoint,
+	) -> i64 {
+		self.cap.call(TrivialSyscall::SchedSubmit as i64, target.cptr().index() as i64, 0i64, 0i64, )
+	}
+
+	pub unsafe fn sched_yield(
+		&self,
+	) -> i64 {
+		self.cap.call(TrivialSyscall::SchedYield as i64, 0i64, 0i64, 0i64, )
 	}
 
 }

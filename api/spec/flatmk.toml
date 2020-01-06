@@ -45,6 +45,7 @@ IpcReturn = 14
 PutFaultHandler = 15
 GetAllRegisters = 16
 SetAllRegisters = 17
+SetSyscallDelegated = 18
 
 [enums.RootTaskCapRequest]
 description = "A request to the root capability."
@@ -131,6 +132,14 @@ IllegalInstruction = 1
 InvalidCapability = 2
 InvalidOperation = 3 # division by zero, etc.
 
+[enums.TrivialSyscall]
+description = "A trivial syscall that is not invoked on a capability."
+
+[enums.TrivialSyscall.variants]
+SchedYield = 0
+SchedNanosleep = 1
+SchedSubmit = 2
+
 [bitflags.UserPteFlags]
 description = "Flags for a user page table entry."
 
@@ -144,6 +153,33 @@ description = "Flags for a task endpoint."
 [bitflags.TaskEndpointFlags.bits]
 CAP_TRANSFER = 0
 TAGGABLE = 1
+
+[types.TrivialSyscallEntry]
+description = "Entry to trivial syscalls. Only valid on capability pointer `u64::MAX`."
+
+[types.TrivialSyscallEntry.methods.sched_yield]
+in_args = []
+out_args = [
+    { EnumVariant = { enum_name = "TrivialSyscall", variant = "SchedYield" } },
+]
+
+[types.TrivialSyscallEntry.methods.sched_nanosleep]
+in_args = [
+    { name = "duration", kind = "U64", description = "Duration in nanoseconds." }
+]
+out_args = [
+    { EnumVariant = { enum_name = "TrivialSyscall", variant = "SchedNanosleep" } },
+    { Input = "duration" },
+]
+
+[types.TrivialSyscallEntry.methods.sched_submit]
+in_args = [
+    { name = "target", kind = { TypeRef = "TaskEndpoint" }, description = "Reply endpoint to submit." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "TrivialSyscall", variant = "SchedSubmit" } },
+    { Input = "target" },
+]
 
 [types.RootPageTable]
 description = "Capability to a root page table."
@@ -439,6 +475,16 @@ out_args = [
     { EnumVariant = { enum_name = "BasicTaskRequest", variant = "SetAllRegisters" } },
     { Input = "ptr" },
     { Input = "len" },
+]
+
+[types.BasicTask.methods.set_syscall_delegated]
+description = "Sets the syscall delegation status of this task."
+in_args = [
+    { name = "status", kind = "U64", description = "A boolean value indicating whether to enable syscall delegation." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "BasicTaskRequest", variant = "SetSyscallDelegated" } },
+    { Input = "status" },
 ]
 
 [types.Interrupt]
