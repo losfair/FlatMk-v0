@@ -23,6 +23,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use spin::Mutex;
 use core::convert::TryFrom;
 use crate::spec::{TaskEndpointFlags, TaskFaultReason};
+use core::cell::UnsafeCell;
 
 pub const ROOT_TASK_FULL_MAP_BASE: u64 = 0x20000000u64;
 
@@ -76,14 +77,34 @@ pub struct Task {
     /// Indicates whether this task is handling an interrupt.
     pub interrupt_blocked: AtomicU8,
 
-    /// Saved registers when scheduled out.
-    pub registers: Mutex<TaskRegisters>,
+    /// Local state.
+    pub local_state: TaskLocalStateWrapper,
 
     /// Fault handler table.
     pub fault_handler: Mutex<Option<TaskEndpoint>>,
 
     /// Tags.
     pub tags: Mutex<[TaskTag; 8]>,
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub struct TaskLocalState {
+    pub registers: TaskRegisters,
+}
+
+#[derive(Default)]
+pub struct TaskLocalStateWrapper {
+    inner: UnsafeCell<TaskLocalState>,
+}
+
+unsafe impl Send for TaskLocalStateWrapper {}
+unsafe impl Sync for TaskLocalStateWrapper {}
+
+impl TaskLocalStateWrapper {
+    pub fn unsafe_deref(&self) -> *mut TaskLocalState {
+        self.inner.get()
+    }
 }
 
 #[repr(C)]
@@ -224,13 +245,13 @@ impl Task {
             page_table_root: AtomicKernelObjectRef::new(page_table_root),
             capabilities: AtomicKernelObjectRef::new(cap_root),
             ipc_caps: Mutex::new(Default::default()),
-            registers: Mutex::new(TaskRegisters::new()),
             fault_handler: Mutex::new(None),
             running: AtomicBool::new(false),
             interrupt_blocked: AtomicU8::new(0),
             ipc_blocked: AtomicBool::new(true),
             idle: AtomicBool::new(false),
             tags: Mutex::new(Default::default()),
+            local_state: Default::default(),
         }
     }
 
@@ -299,13 +320,13 @@ impl Task {
             page_table_root: AtomicKernelObjectRef::new(self.page_table_root.get()),
             capabilities: AtomicKernelObjectRef::new(self.capabilities.get()),
             ipc_caps: Mutex::new(Default::default()),
-            registers: Mutex::new(TaskRegisters::new()),
             fault_handler: Mutex::new(self.fault_handler.lock().clone()),
             running: AtomicBool::new(false),
             interrupt_blocked: AtomicU8::new(0),
             ipc_blocked: AtomicBool::new(false),
             idle: AtomicBool::new(false),
             tags: Mutex::new(Default::default()),
+            local_state: Default::default(),
         })
     }
 
@@ -320,6 +341,15 @@ impl Task {
         drop(me);
         Task::invoke_ipc(endpoint, IpcReason::Fault(fault, code), old_registers);
         panic!("Task::raise_fault: Cannot invoke fault handler for fault: {:?} with code: {:016x}.\nRegisters: {:#?}", fault, code, old_registers);
+    }
+
+    /// Sets the PC register for the current task.
+    pub fn set_pc_for_current(value: u64) {
+        unsafe {
+            let current = Task::borrow_current();
+            let registers = &mut (*current.local_state.unsafe_deref()).registers;
+            *registers.pc_mut() = value;
+        }
     }
 
     /// Invokes IPC on this task.
@@ -414,16 +444,21 @@ impl Task {
             match entry {
                 TrivialEntryType::Call(entrypoint) => {
                     // Set registers.
-                    let mut regs = task.registers.lock();
-                    *regs.pc_mut() = entrypoint.pc;
-                    *regs.usermode_arg_mut(0).unwrap() = entrypoint.user_context;
-                    *regs.usermode_arg_mut(1).unwrap() = prev.get_tag(task.id).unwrap_or(0);
+                    // Here we can dereference into local state because `task` is the current task.
+                    {
+                        let regs = unsafe {
+                            &mut (*task.local_state.unsafe_deref()).registers
+                        };
+                        *regs.pc_mut() = entrypoint.pc;
+                        *regs.usermode_arg_mut(0).unwrap() = entrypoint.user_context;
+                        *regs.usermode_arg_mut(1).unwrap() = prev.get_tag(task.id).unwrap_or(0);
 
-                    if let IpcReason::Fault(fault, code) = reason {
-                        *regs.usermode_arg_mut(2).unwrap() = fault as i64 as u64;
-                        *regs.usermode_arg_mut(3).unwrap() = code;
+                        if let IpcReason::Fault(fault, code) = reason {
+                            *regs.usermode_arg_mut(2).unwrap() = fault as i64 as u64;
+                            *regs.usermode_arg_mut(3).unwrap() = code;
+                        }
                     }
-                    
+
                     // Set up the entry and flags for the reply endpoint.
                     // 
                     // Determine the entry type from the provided IPC reason.
@@ -559,12 +594,11 @@ pub fn switch_to(
     old_registers: Option<&TaskRegisters>,
 ) -> KernelResult<Option<KernelObjectRef<Task>>> {
     if let Some(old_regs) = old_registers {
-        let current = unsafe {
-            Task::borrow_current()
+        let current_regs = unsafe {
+            &mut (*Task::borrow_current().local_state.unsafe_deref()).registers
         };
-        let mut regs = current.registers.lock();
-        *regs = old_regs.clone();
-        regs.lazy_read();
+        *current_regs = old_regs.clone();
+        current_regs.lazy_read();
     }
 
     // We are already on the target task.
@@ -581,7 +615,13 @@ pub fn switch_to(
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .map_err(|_| KernelError::InvalidState)?;
 
-    task.registers.lock().lazy_write();
+    // Here it's safe to dereference local state because the current thread has taken "ownership"
+    // of the task by setting `running` to true.
+
+    unsafe {
+        (*task.local_state.unsafe_deref()).registers.lazy_write();
+    }
+
     let prev = set_current_task(task);
 
     // Don't reload if the new task shares a same page table with ourselves.
@@ -622,17 +662,15 @@ pub enum StateRestoreMode {
 
 /// Switches out of kernel mode and enters user mode.
 pub fn enter_user_mode(mode: StateRestoreMode) -> ! {
-    let task = Task::current();
+    let task = unsafe {
+        Task::borrow_current()
+    };
     if task.is_idle() {
         wait_for_interrupt();
     } else {
-        let registers: *const TaskRegisters = {
-            let registers = task.registers.lock();
-            &*registers as *const _
+        let registers: *const TaskRegisters = unsafe {
+            &(*task.local_state.unsafe_deref()).registers as *const _
         };
-        // Here we won't get a dangling `registers` pointer after drop because we know that
-        // the TLS won't be dropped now.
-        drop(task);
     
         unsafe {
             match mode {

@@ -83,7 +83,7 @@ pub extern "C" fn kstart(boot_info: &'static BootInfo) -> ! {
 
     task::switch_to(ROOT_TASK.clone(), None).unwrap();
     let initial_ip = ROOT_TASK.load_root_image();
-    ROOT_TASK.registers.lock().rip = initial_ip;
+    Task::set_pc_for_current(initial_ip);
     println!("Dropping to user mode at {:p}.", initial_ip as *mut u8);
     task::enter_user_mode(StateRestoreMode::Full);
 }

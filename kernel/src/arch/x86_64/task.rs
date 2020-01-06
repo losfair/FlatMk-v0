@@ -32,6 +32,12 @@ pub struct TaskRegisters {
     pub fs_base: u64,
 }
 
+impl Default for TaskRegisters {
+    fn default() -> TaskRegisters {
+        Self::new()
+    }
+}
+
 impl TaskRegisters {
     pub fn new() -> TaskRegisters {
         TaskRegisters {

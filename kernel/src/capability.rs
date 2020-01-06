@@ -300,10 +300,15 @@ fn invoke_cap_basic_task(
         BasicTaskRequest::SetRegister => {
             let field_index = invocation.arg(1)? as usize;
             let new_value = invocation.arg(2)? as u64;
-            *task.registers.lock().field_mut(field_index)? = new_value;
             if task.is_current() {
                 *invocation.registers.field_mut(field_index)? = new_value;
                 invocation.registers.lazy_write();
+            } else {
+                // Setting register for a remote task.
+                // Data race here, but this is what you want anyway :)
+                unsafe {
+                    *(*task.local_state.unsafe_deref()).registers.field_mut(field_index)? = new_value;
+                }
             }
             Ok(0)
         }
@@ -454,13 +459,20 @@ fn invoke_cap_basic_task(
             *task.fault_handler.lock() = Some(handler);
             Ok(0)
         }
+
+        // There is data race for `GetAllRegisters` and `SetAllRegisters`, but that is
+        // what requested by the user and should not cause memory unsafety to the kernel.
+        //
+        // TODO: Is this always true?
         BasicTaskRequest::GetAllRegisters => {
             let ptr = UserAddr::new(invocation.arg(1)? as u64)?;
             let len = invocation.arg(2)? as u64;
             if len != core::mem::size_of::<TaskRegisters>() as u64 {
                 return Err(KernelError::InvalidArgument);
             }
-            copy_to_user_typed(core::slice::from_ref(&*task.registers.lock()), ptr)?;
+            copy_to_user_typed(core::slice::from_ref(unsafe {
+                &(*task.local_state.unsafe_deref()).registers
+            }), ptr)?;
             Ok(0)
         }
         BasicTaskRequest::SetAllRegisters => {
@@ -469,11 +481,11 @@ fn invoke_cap_basic_task(
             if len != core::mem::size_of::<TaskRegisters>() as u64 {
                 return Err(KernelError::InvalidArgument);
             }
-            task.registers.lock().preserve_critical_registers(|registers| {
-                unsafe {
+            unsafe {
+                (*task.local_state.unsafe_deref()).registers.preserve_critical_registers(|registers| {
                     copy_from_user_typed(ptr, core::slice::from_mut(registers))
-                }
-            })?;
+                })?;
+            }
             
             Ok(0)
         }
