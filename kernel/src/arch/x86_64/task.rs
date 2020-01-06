@@ -6,6 +6,8 @@ use x86_64::registers::{
     rflags::RFlags,
 };
 use crate::addr::*;
+use crate::scheduler::Scheduler;
+use core::cell::UnsafeCell;
 
 #[repr(C)]
 #[derive(Clone, Debug)]
@@ -161,10 +163,11 @@ pub struct TlsIndirect {
     pub context: u64,
     pub(super) hlt: u64,
     pub(super) pcid2pto: Pcid2pto,
+    scheduler: UnsafeCell<Scheduler>,
 }
 
 impl TlsIndirect {
-    pub const fn new(kernel_stack: u64) -> TlsIndirect {
+    pub fn new(kernel_stack: u64) -> TlsIndirect {
         TlsIndirect {
             me: core::ptr::null_mut(),
             kernel_stack,
@@ -172,7 +175,48 @@ impl TlsIndirect {
             context: 0,
             hlt: 0,
             pcid2pto: [0; 4096],
+            scheduler: UnsafeCell::new(Scheduler::new()),
         }
+    }
+}
+
+#[derive(Default)]
+pub struct ArchTaskLocalState {
+    xsave: Xsave,
+}
+
+#[repr(C, align(64))]
+struct Xsave {
+    fxsave: [u8; 512],
+    xsave_header: [u8; 64],
+    ymmh: [u128; 16],
+}
+
+impl Default for Xsave {
+    fn default() -> Self {
+        unsafe {
+            core::mem::zeroed()
+        }
+    }
+}
+
+impl ArchTaskLocalState {
+    pub unsafe fn will_switch_out(&mut self) {
+        asm!(
+            "fxsave ($0)" :: "r"(&mut self.xsave) : "rax", "rdx" : "volatile"
+        );
+    }
+
+    pub unsafe fn did_switch_in(&mut self) {
+        asm!(
+            "fxrstor ($0)" :: "r"(&self.xsave) : "rax", "rdx" : "volatile"
+        );
+    }
+}
+
+pub fn arch_get_cpu_scheduler() -> *mut Scheduler {
+    unsafe {
+        (*get_indirect_tls()).scheduler.get()
     }
 }
 
@@ -411,6 +455,8 @@ pub unsafe fn arch_init_syscall() {
 }
 
 /// Waits for an interrupt. Never returns because the interrupt handler will return to usermode.
+/// 
+/// Usermode task registers must be saved before calling this.
 pub fn wait_for_interrupt() -> ! {
     unsafe {
         set_hlt(1);

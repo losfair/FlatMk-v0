@@ -339,18 +339,33 @@ fn handle_external_interrupt(
     if !is_user_fault(frame) && hlt == 0 {
         panic!("External interrupt in kernel mode");
     }
-    if hlt != 0 {
+
+    let maybe_owned_registers: TaskRegisters;
+    let registers: &TaskRegisters = if hlt != 0 {
         unsafe {
             set_hlt(0);
+            maybe_owned_registers = (*Task::borrow_current().local_state.unsafe_deref()).registers.clone();
+            &maybe_owned_registers
         }
-    }
+    } else {
+        registers
+    };
     unsafe {
-        invoke_interrupt(index, registers);
-        // If fails, ignore this interrupt.
-        if Task::borrow_current().is_idle() {
-            super::task::wait_for_interrupt();
-        } else {
-            super::task::arch_enter_user_mode(registers);
+        match index {
+            32 => {
+                // Timer interrupt
+                super::task::arch_unblock_interrupt(index);
+                (*super::task::arch_get_cpu_scheduler()).tick(1000000, registers, hlt != 0); // 1 millisecond per tick
+            }
+            _ => {
+                invoke_interrupt(index, registers);
+                // If fails, ignore this interrupt.
+                if Task::borrow_current().is_idle() {
+                    super::task::wait_for_interrupt();
+                } else {
+                    super::task::arch_enter_user_mode(registers);
+                }
+            }
         }
     }
 }

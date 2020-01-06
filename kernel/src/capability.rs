@@ -460,6 +460,19 @@ fn invoke_cap_basic_task(
             *task.fault_handler.lock() = Some(handler);
             Ok(0)
         }
+        BasicTaskRequest::SetSyscallDelegated => {
+            match invocation.arg(1)? {
+                0 => {
+                    task.set_syscall_delegated(false);
+                    Ok(0)
+                }
+                1 => {
+                    task.set_syscall_delegated(true);
+                    Ok(0)
+                }
+                _ => Err(KernelError::InvalidArgument)
+            }
+        }
 
         // There is data race for `GetAllRegisters` and `SetAllRegisters`, but that is
         // what requested by the user and should not cause memory unsafety to the kernel.

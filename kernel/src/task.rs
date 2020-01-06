@@ -9,6 +9,7 @@ use crate::arch::{
         arch_enter_user_mode, arch_enter_user_mode_syscall, arch_get_kernel_tls,
         arch_init_kernel_tls_for_cpu, arch_set_kernel_tls, arch_unblock_interrupt, TaskRegisters,
         TlsIndirect, wait_for_interrupt,
+        ArchTaskLocalState,
     },
     Page, PAGE_SIZE,
 };
@@ -49,7 +50,6 @@ fn alloc_task_id() -> u64 {
     id
 }
 
-#[repr(C)]
 pub struct Task {
     /// Kernel-internal task identifier.
     pub id: u64,
@@ -77,8 +77,14 @@ pub struct Task {
     /// Indicates whether this task is handling an interrupt.
     pub interrupt_blocked: AtomicU8,
 
+    /// Indicates whether syscall is delegated to another task instead of the kernel.
+    pub syscall_delegated: AtomicBool,
+
     /// Local state.
     pub local_state: TaskLocalStateWrapper,
+
+    /// Scheduler nanosleep deadline.
+    pub nanosleep_deadline: AtomicU64,
 
     /// Fault handler table.
     pub fault_handler: Mutex<Option<TaskEndpoint>>,
@@ -87,10 +93,13 @@ pub struct Task {
     pub tags: Mutex<[TaskTag; 8]>,
 }
 
-#[repr(C)]
 #[derive(Default)]
 pub struct TaskLocalState {
+    /// Task registers.
     pub registers: TaskRegisters,
+
+    /// Architecture-specific task state.
+    pub arch_state: ArchTaskLocalState,
 }
 
 #[derive(Default)]
@@ -227,8 +236,10 @@ unsafe fn set_current_task(t: KernelObjectRef<Task>) -> Option<KernelObjectRef<T
 }
 
 pub unsafe fn init() {
-    static mut INIT_TLS: TlsIndirect = TlsIndirect::new(crate::arch::config::KERNEL_STACK_END);
-    arch_init_kernel_tls_for_cpu(&mut INIT_TLS);
+    static mut INIT_TLS: MaybeUninit<TlsIndirect> = MaybeUninit::uninit();
+    
+    INIT_TLS.write(TlsIndirect::new(crate::arch::config::KERNEL_STACK_END));
+    arch_init_kernel_tls_for_cpu(&mut *INIT_TLS.as_mut_ptr());
 }
 
 impl Task {
@@ -247,9 +258,11 @@ impl Task {
             running: AtomicBool::new(false),
             interrupt_blocked: AtomicU8::new(0),
             ipc_blocked: AtomicBool::new(true),
+            syscall_delegated: AtomicBool::new(false),
             idle: AtomicBool::new(false),
             tags: Mutex::new(Default::default()),
             local_state: Default::default(),
+            nanosleep_deadline: AtomicU64::new(0),
         }
     }
 
@@ -323,9 +336,11 @@ impl Task {
             running: AtomicBool::new(false),
             interrupt_blocked: AtomicU8::new(0),
             ipc_blocked: AtomicBool::new(false),
+            syscall_delegated: AtomicBool::new(self.syscall_delegated.load(Ordering::SeqCst)),
             idle: AtomicBool::new(false),
             tags: Mutex::new(Default::default()),
             local_state: Default::default(),
+            nanosleep_deadline: AtomicU64::new(0),
         })
     }
 
@@ -348,6 +363,22 @@ impl Task {
             let registers = &mut (*current.local_state.unsafe_deref()).registers;
             *registers.pc_mut() = value;
         }
+    }
+
+    pub fn get_syscall_delegated(&self) -> bool {
+        self.syscall_delegated.load(Ordering::Relaxed)
+    }
+
+    pub fn set_syscall_delegated(&self, enable: bool) {
+        self.syscall_delegated.store(enable, Ordering::Relaxed);
+    }
+
+    pub fn get_nanosleep_deadline(&self) -> u64 {
+        self.nanosleep_deadline.load(Ordering::Relaxed)
+    }
+
+    pub fn set_nanosleep_deadline(&self, value: u64) {
+        self.nanosleep_deadline.store(value, Ordering::Relaxed);
     }
 
     /// Invokes IPC on this task.
@@ -599,7 +630,12 @@ pub unsafe fn init_switch_to(task: KernelObjectRef<Task>) {
     switch_to(task, None).unwrap();
 }
 
-unsafe fn switch_to(
+/// Switches to another task.
+/// 
+/// Either succeeds, or fails without modifying any state.
+/// 
+/// This function is unsafe because it invalidates any references from `Task::borrow_current()`.
+pub unsafe fn switch_to(
     task: KernelObjectRef<Task>,
     old_registers: Option<&TaskRegisters>,
 ) -> KernelResult<Option<KernelObjectRef<Task>>> {
