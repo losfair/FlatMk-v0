@@ -13,4 +13,5 @@ crate-type = ["staticlib"]
 flatmk-sys = { path = "../../bindings/rust" }
 flatrt-elfloader = { path = "../../early/flatrt-elfloader" }
 flatrt-allocator = { path = "../../early/flatrt-allocator" }
+flatrt-capalloc = { path = "../../early/flatrt-capalloc" }
 byteorder = { version = "1.3", default-features = false }

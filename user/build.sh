@@ -18,6 +18,10 @@ echo "Building driver: vga"
 cd ../vga || exit 1
 make || exit 1
 
+echo "Building driver: input"
+cd ../input || exit 1
+make || exit 1
+
 echo "Building driver: gclock"
 cd ../gclock || exit 1
 make || exit 1

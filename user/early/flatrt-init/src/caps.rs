@@ -36,16 +36,6 @@ pub static PUTCHAR: spec::DebugPutchar = unsafe { spec::DebugPutchar::new(spec::
 /// Temporary capability buffer.
 pub static BUFFER: spec::CPtr = unsafe { spec::CPtr::new(0x05) };
 
-/// The idle task.
-pub static IDLE: spec::BasicTask = unsafe { spec::BasicTask::new(spec::CPtr::new(0x06)) };
-
-/// Reply endpoint of the idle task.
-pub static IDLE_REPLY: spec::TaskEndpoint = unsafe { spec::TaskEndpoint::new(spec::CPtr::new(0x07)) };
-
-define_task!(scheduler, 0x100);
-pub static SCHED_CREATE: spec::TaskEndpoint = unsafe { spec::TaskEndpoint::new(spec::CPtr::new(0x110)) };
-pub static SCHED_YIELD: spec::TaskEndpoint = unsafe { spec::TaskEndpoint::new(spec::CPtr::new(0x111)) };
-
 define_task!(shmem, 0x200);
 pub static SHMEM_CREATE: spec::TaskEndpoint = unsafe { spec::TaskEndpoint::new(spec::CPtr::new(0x210)) };
 
@@ -57,6 +47,8 @@ define_task!(driver_gclock, 0x400);
 define_task!(driver_sequencer_linux, 0x500);
 
 define_task!(driver_benchmark, 0x600);
+
+define_task!(driver_input, 0x700);
 
 /// Initializes all the static capabilities defined above.
 /// 
@@ -72,10 +64,6 @@ pub unsafe fn initialize_static_caps() {
 
     if ME.fetch_capset(CAPSET.cptr()) < 0 {
         panic!("initialize_static_caps: Cannot fetch capability set.");
-    }
-
-    if CAPSET.make_leaf(scheduler::TASK.cptr()) < 0 {
-        panic!("initialize_static_caps: Cannot allocate leaf for scheduler.");
     }
 
     if CAPSET.make_leaf(shmem::TASK.cptr()) < 0 {
@@ -96,5 +84,9 @@ pub unsafe fn initialize_static_caps() {
 
     if CAPSET.make_leaf(driver_benchmark::TASK.cptr()) < 0 {
         panic!("initialize_static_caps: Cannot allocate leaf for driver_benchmark.");
+    }
+
+    if CAPSET.make_leaf(driver_input::TASK.cptr()) < 0 {
+        panic!("initialize_static_caps: Cannot allocate leaf for driver_input.");
     }
 }

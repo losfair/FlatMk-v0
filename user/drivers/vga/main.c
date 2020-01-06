@@ -3,7 +3,6 @@
 #include <x86intrin.h>
 #include <stdatomic.h>
 #include <string.h>
-#include "vgamode.h"
 
 CPtr log_task_cap = 0x10;
 CPtr render_task_cap = 0x11;
@@ -61,73 +60,6 @@ void log_entry() {
         sched_nanosleep(1000000000ull);
     }
 }
-
-void map_shared_fb(struct BasicTask this_task) {
-    struct FastIpcPayload payload = {0};
-
-    // Create
-    payload.data[0] = 0;
-
-    // Size
-    payload.data[1] = fb_width * fb_height * sizeof(struct Pixel);
-
-    while(1) {
-        fastipc_write(&payload);
-
-        // Wait until shmem_create becomes available.
-        if(TaskEndpoint_invoke(CAP_SHMEM_CREATE) < 0) {
-            // sched_yield invalidates fastipc registers.
-            sched_yield();
-            continue;
-        }
-
-        fastipc_read(&payload);
-
-        if((int64_t) payload.data[0] < 0) {
-            flatmk_debug_puts("Cannot create framebuffer.\n");
-            flatmk_throw();
-        }
-
-        if(BasicTask_fetch_ipc_cap(this_task, CAP_FRAMEBUFFER.cap, 1) < 0) {
-            flatmk_throw();
-        }
-
-        break;
-    }
-
-    // Create local mapping.
-    payload.data[0] = 0;
-    payload.data[1] = (uint64_t) shared_fb;
-    payload.data[2] = fb_width * fb_height * sizeof(struct Pixel);
-
-    // Put local page table.
-    if(CapabilitySet_clone_cap(CAP_CAPSET, CAP_RPT.cap, CAP_BUFFER) < 0) flatmk_throw();
-    if(BasicTask_put_ipc_cap(this_task, CAP_BUFFER, 1) < 0) flatmk_throw();
-    
-    while(1) {
-        fastipc_write(&payload);
-
-        // Wait until endpoint becomes available.
-        if(TaskEndpoint_invoke(CAP_FRAMEBUFFER) < 0) {
-            // sched_yield invalidates fastipc registers.
-            sched_yield();
-            continue;
-        }
-
-        fastipc_read(&payload);
-
-        if((int64_t) payload.data[0] < 0) {
-            flatmk_debug_puts("Cannot map framebuffer.\n");
-            flatmk_throw();
-        }
-
-        // Check that mapping actually succeeded.
-        if(shared_fb[0].r != 0) flatmk_throw();
-
-        break;
-    }
-}
-
 
 uint64_t tsc_to_ms(uint64_t tsc) {
     return tsc * 1000 / tsc_freq;
@@ -195,7 +127,15 @@ void main() {
     // Calibrate timer.
     tsc_freq = calibrate_tsc();
 
-    map_shared_fb(CAP_ME);
+    if(flatrt_shmem_create(CAP_ME, fb_width * fb_height * sizeof(struct Pixel), CAP_FRAMEBUFFER) < 0) {
+        flatmk_debug_puts("vga: Cannot create shared framebuffer.\n");
+        flatmk_throw();
+    }
+    if(flatrt_shmem_map(CAP_ME, CAP_FRAMEBUFFER, shared_fb, fb_width * fb_height * sizeof(struct Pixel)) < 0) {
+        flatmk_debug_puts("vga: Cannot map shared framebuffer.\n");
+        flatmk_throw();
+    }
+
     flatmk_debug_puts("vga: Shared framebuffer initialized.\n");
 
     sprintf(buf, "vga: Flushing framebuffer.\n");
@@ -213,8 +153,8 @@ void main() {
     flatmk_debug_puts(buf);
 
     // Start worker threads.
-    start_thread(BasicTask_new(log_task_cap), (uint64_t) log_entry, (uint64_t) __log_stack + sizeof(__log_stack) - 8, FLATRT_DRIVER_GLOBAL_TLS, NULL);
-    start_thread(BasicTask_new(render_task_cap), (uint64_t) render_loop, (uint64_t) __render_stack + sizeof(__render_stack) - 8, FLATRT_DRIVER_GLOBAL_TLS, NULL);
+    flatrt_start_thread(CAP_ME, BasicTask_new(log_task_cap), (uint64_t) log_entry, (uint64_t) __log_stack + sizeof(__log_stack) - 8, FLATRT_DRIVER_GLOBAL_TLS, NULL);
+    flatrt_start_thread(CAP_ME, BasicTask_new(render_task_cap), (uint64_t) render_loop, (uint64_t) __render_stack + sizeof(__render_stack) - 8, FLATRT_DRIVER_GLOBAL_TLS, NULL);
 
     sprintf(buf, "vga: Started. Initial TSC frequency: %lu\n", tsc_freq);
     flatmk_debug_puts(buf);

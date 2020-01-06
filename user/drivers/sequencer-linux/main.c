@@ -21,10 +21,6 @@ _Atomic uint64_t next_task_page_va = 0x20000000;
 _Atomic uint64_t next_shadow_map_va = 0x600000000000;
 
 const uint64_t elfload_temp_base = 0x1fff0000;
-const uint64_t malloc_base = 0x90000000;
-
-
-void libmalloc_init(uint64_t heap_start, CPtr rpt);
 
 CPtr canonicalize_cap_index(uint64_t x) {
     return ((x >> 5) << 8) | (x & 0b11111);
@@ -252,6 +248,9 @@ void linux_task_start(const uint8_t *image, uint64_t image_len) {
     // Set up MM.
     lt->mm = linux_mm_new(lt->managed.cap, lt->shadow_map_base, lt->shadow_map_base + LT_SHADOW_MAP_SIZE);
 
+    // Set syscall delegation.
+    ASSERT_OK(BasicTask_set_syscall_delegated(lt->managed, 1));
+
     // Load image.
     uint64_t entry_address;
     ASSERT_OK(libelfloader_load_and_apply(lt->mm, image, image_len, elfload_temp_base, CAP_RPT.cap, lt->managed.cap, &entry_address));
@@ -295,8 +294,6 @@ void main() {
     if(
         BasicTask_fetch_ipc_cap(CAP_ME, CAP_BUFFER_INITRET.cap, 0) < 0
     ) flatmk_throw();
-
-    libmalloc_init(malloc_base, CAP_RPT.cap);
 
     ASSERT_OK(RootPageTable_make_leaf(CAP_RPT, elfload_temp_base));
     

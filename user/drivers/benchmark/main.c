@@ -57,16 +57,14 @@ void main() {
         flatmk_debug_puts(buf);
     }
 
-    sprintf(buf, "Benchmark: IPC w/ PT switch to scheduler (no CAP_TRANSFER)\n");
+    sprintf(buf, "Benchmark: Scheduler yield\n");
     flatmk_debug_puts(buf);
 
     {
         struct FastIpcPayload payload = {0};
         uint64_t start = __builtin_ia32_rdtsc();
         for(int i = 0; i < 1000000; i++) {
-            payload.data[0] = 0xffff;
-            fastipc_write(&payload);
-            ASSERT_OK(TaskEndpoint_invoke(CAP_SCHED_YIELD));
+            sched_yield();
         }
         uint64_t end = __builtin_ia32_rdtsc();
         sprintf(buf, "benchmark: %lu cycles per op\n", (end - start) / 1000000);

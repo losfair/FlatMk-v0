@@ -55,9 +55,6 @@ unsafe extern "C" fn init_start() -> ! {
 
     flatrt_allocator::init(HEAP_START, caps::RPT);
 
-    initialize_idle_task();
-
-    start_scheduler();
     start_shmem();
 
     debug!("init: Finished setting up initial environment. Now starting drivers.");
@@ -65,6 +62,8 @@ unsafe extern "C" fn init_start() -> ! {
     start_driver_benchmark();
     debug!("- vga");
     start_driver_vga();
+    debug!("- input");
+    start_driver_input();
     debug!("- gclock");
     start_driver_gclock();
     //debug!("- sequencer-linux");
@@ -72,11 +71,7 @@ unsafe extern "C" fn init_start() -> ! {
     debug!("init: All drivers started.");
 
     loop {
-        let mut payload = FastIpcPayload::default();
-        payload.data[0] = 1;
-        payload.data[1] = 10_000_000_000; // 10 seconds
-        payload.write();
-        spec::to_result(caps::SCHED_YIELD.invoke()).unwrap();
+        spec::to_result(spec::CAP_TRIVIAL_SYSCALL.sched_nanosleep(10_000_000_000)).unwrap();
     }
 }
 
@@ -84,19 +79,6 @@ unsafe extern "C" fn init_start() -> ! {
 fn on_panic(info: &core::panic::PanicInfo) -> ! {
     debug!("panic(): {:#?}", info);
     loop {}
-}
-
-/// Creates a thread and makes it an idle task.
-unsafe fn initialize_idle_task() {
-    let mut th = Thread::new(ThreadCapSet {
-        owner_task: caps::ME,
-        owner_capset: caps::CAPSET,
-        new_task: caps::IDLE,
-    });
-    th.make_ipc_endpoint(spec::TaskEndpointFlags::TAGGABLE, true, caps::IDLE_REPLY.cptr(), |env| {
-        caps::ROOT_TASK.make_idle();
-        unreachable!()
-    });
 }
 
 /// Loads an ELF image for a task.
@@ -128,61 +110,6 @@ fn load_elf_task(
         ))?
     };
     Ok(())
-}
-
-/// Starts the `scheduler` task.
-fn start_scheduler() {
-    load_elf_task(
-        image::SCHEDULER,
-        &caps::scheduler::TASK,
-        &caps::scheduler::RPT,
-        &caps::scheduler::CAPSET,
-        &caps::scheduler::ENDPOINT,
-    ).expect("start_scheduler: Cannot load ELF for task.");
-
-    unsafe {
-        // The first leaf set.
-        spec::to_result(caps::scheduler::CAPSET.make_leaf(&spec::CPtr::new(0))).unwrap();
-
-        // The task itself.
-        spec::to_result(caps::scheduler::TASK.fetch_weak(&caps::BUFFER)).unwrap();
-        spec::to_result(caps::scheduler::CAPSET.put_cap(
-            &caps::BUFFER,
-            &spec::CPtr::new(0),
-        )).unwrap();
-
-        // The idle task.
-        // This has to be moved instead of copied.
-        spec::to_result(caps::scheduler::CAPSET.put_cap_move(
-            &caps::IDLE_REPLY.cptr(),
-            &spec::CPtr::new(1),
-        )).unwrap();
-
-        // Timer interrupt.
-        spec::to_result(caps::ROOT_TASK.new_interrupt(&caps::BUFFER, 32)).unwrap();
-        spec::to_result(caps::scheduler::CAPSET.put_cap(
-            &caps::BUFFER,
-            &spec::CPtr::new(2),
-        )).unwrap();
-
-        // Debug putchar.
-        spec::to_result(caps::scheduler::CAPSET.put_cap(
-            caps::PUTCHAR.cptr(),
-            &spec::CPtr::new(5),
-        )).unwrap();
-
-        // Cleanup.
-        spec::to_result(caps::CAPSET.drop_cap(&caps::BUFFER)).unwrap();
-
-        // Call the initialize function.
-        spec::to_result(caps::scheduler::ENDPOINT.invoke()).expect("start_scheduler: Cannot invoke task.");
-
-        // SCHED_CREATE endpoint.
-        fetch_and_check_remote_task_endpoint(0x11, &caps::SCHED_CREATE, &caps::scheduler::CAPSET);
-
-        // SCHED_YIELD endpoint.
-        fetch_and_check_remote_task_endpoint(0x13, &caps::SCHED_YIELD, &caps::scheduler::CAPSET);
-    }
 }
 
 /// Starts the `shmem` task.
@@ -249,18 +176,6 @@ unsafe fn initialize_driver_std(
     spec::to_result(capset.put_cap(
         caps::PUTCHAR.cptr(),
         &spec::CPtr::new(1),
-    )).unwrap();
-
-    // SCHED_CREATE
-    spec::to_result(capset.put_cap(
-        caps::SCHED_CREATE.cptr(),
-        &spec::CPtr::new(2),
-    )).unwrap();
-
-    // SCHED_YIELD
-    spec::to_result(capset.put_cap(
-        caps::SCHED_YIELD.cptr(),
-        &spec::CPtr::new(3),
     )).unwrap();
 
     // SHMEM_CREATE
@@ -356,6 +271,31 @@ fn start_driver_gclock() {
 
         // Call the initialize function.
         spec::to_result(caps::driver_gclock::ENDPOINT.invoke()).expect("start_driver_gclock: Cannot invoke task.");
+    }
+}
+
+/// Starts the `input` driver.
+fn start_driver_input() {
+    unsafe {
+        debug!("Loading input driver...");
+
+        initialize_driver_std(
+            image::DRIVER_INPUT,
+            &caps::driver_input::TASK,
+            &caps::driver_input::RPT,
+            &caps::driver_input::CAPSET,
+            &caps::driver_input::ENDPOINT,
+        );
+
+        // Keyboard interrupt.
+        spec::to_result(caps::ROOT_TASK.new_interrupt(&caps::BUFFER, 33)).unwrap();
+        spec::to_result(caps::driver_input::CAPSET.put_cap(
+            &caps::BUFFER,
+            &spec::CPtr::new(0x10),
+        )).unwrap();
+
+        // Call the initialize function.
+        spec::to_result(caps::driver_input::ENDPOINT.invoke()).expect("start_driver_input: Cannot invoke task.");
     }
 }
 
