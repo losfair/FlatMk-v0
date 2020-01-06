@@ -203,11 +203,11 @@ pub enum EntryDirection {
 }
 
 /// Sets the current task, and returns the previous task if any.
-fn set_current_task(t: KernelObjectRef<Task>) -> Option<KernelObjectRef<Task>> {
+unsafe fn set_current_task(t: KernelObjectRef<Task>) -> Option<KernelObjectRef<Task>> {
     // Drop the old reference.
     let old = arch_get_kernel_tls() as *mut KernelObject<Task>;
     let old_obj = if !old.is_null() {
-        let old_obj = unsafe { KernelObjectRef::from_raw(old) };
+        let old_obj = KernelObjectRef::from_raw(old);
         old_obj
             .running
             .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
@@ -221,9 +221,7 @@ fn set_current_task(t: KernelObjectRef<Task>) -> Option<KernelObjectRef<Task>> {
 
     // Write the new reference.
     let raw = KernelObjectRef::into_raw(t);
-    unsafe {
-        arch_set_kernel_tls(raw as u64);
-    }
+    arch_set_kernel_tls(raw as u64);
 
     old_obj
 }
@@ -297,7 +295,8 @@ impl Task {
 
     /// Borrows current task into a static reference.
     /// 
-    /// This is extremely unsafe, as a task switch would invalidate the returned reference.
+    /// Although switching tasks without entering usermode requires `unsafe`,
+    /// this function returns a static reference so it is still unsafe itself.
     #[inline]
     pub unsafe fn borrow_current() -> &'static Task {
         let ptr = arch_get_kernel_tls() as *mut KernelObject<Task>;
@@ -410,9 +409,14 @@ impl Task {
             }
 
             // Here switch_to should always succeed, since we have checked ipc_blocked before.
-            let prev = switch_to(task, Some(old_registers))
-                .expect("invoke_ipc: switch_to failed.")
-                .expect("invoke_ipc: switch_to didn't return a previous task.");
+            //
+            // We should never return after `switch_to`, since all references from `borrow_current` will
+            // be invalidated.
+            let prev = unsafe {
+                switch_to(task, Some(old_registers))
+                    .expect("invoke_ipc: switch_to failed.")
+                    .expect("invoke_ipc: switch_to didn't return a previous task.")
+            };
 
             // Again using `borrow_current` to unsafely get a reference. This is actually safe as we are no longer switching tasks
             // within this function.
@@ -588,14 +592,19 @@ fn hash_ptid_to_pcid(ptid: u64) -> u64 {
     ptid % (MAX_PCID - MIN_PCID + 1) + MIN_PCID
 }
 
-pub fn switch_to(
+pub unsafe fn init_switch_to(task: KernelObjectRef<Task>) {
+    if arch_get_kernel_tls() != 0 {
+        panic!("init_switch_to: Called with non-empty current task.");
+    }
+    switch_to(task, None).unwrap();
+}
+
+unsafe fn switch_to(
     task: KernelObjectRef<Task>,
     old_registers: Option<&TaskRegisters>,
 ) -> KernelResult<Option<KernelObjectRef<Task>>> {
     if let Some(old_regs) = old_registers {
-        let current_regs = unsafe {
-            &mut (*Task::borrow_current().local_state.unsafe_deref()).registers
-        };
+        let current_regs = &mut (*Task::borrow_current().local_state.unsafe_deref()).registers;
         *current_regs = old_regs.clone();
         current_regs.lazy_read();
     }
@@ -616,32 +625,27 @@ pub fn switch_to(
 
     // Here it's safe to dereference local state because the current thread has taken "ownership"
     // of the task by setting `running` to true.
-
-    unsafe {
-        (*task.local_state.unsafe_deref()).registers.lazy_write();
-    }
+    (*task.local_state.unsafe_deref()).registers.lazy_write();
 
     let prev = set_current_task(task);
 
     // Don't reload if the new task shares a same page table with ourselves.
-    unsafe {
-        let addr = PhysAddr::from_phys_mapped_virt(root_level).unwrap();
-        let (current_pt, _) = arch_get_current_page_table_with_pcid();
+    let addr = PhysAddr::from_phys_mapped_virt(root_level).unwrap();
+    let (current_pt, _) = arch_get_current_page_table_with_pcid();
 
-        if addr != current_pt {
-            let ptid = root.0.id();
-            let target_pcid = hash_ptid_to_pcid(ptid);
-            arch_set_current_page_table_with_pcid(addr, target_pcid);
+    if addr != current_pt {
+        let ptid = root.0.id();
+        let target_pcid = hash_ptid_to_pcid(ptid);
+        arch_set_current_page_table_with_pcid(addr, target_pcid);
 
-            // Update PCID cache in case of PTID/PCID hash collision.
-            arch_with_pcid_array(|pcids| {
-                if pcids[target_pcid as usize] != ptid {
-                    pcids[target_pcid as usize] = ptid;
-                    arch_flush_pcid(target_pcid);
-                    println!("flush pcid: {}", target_pcid);
-                }
-            })
-        }
+        // Update PCID cache in case of PTID/PCID hash collision.
+        arch_with_pcid_array(|pcids| {
+            if pcids[target_pcid as usize] != ptid {
+                pcids[target_pcid as usize] = ptid;
+                arch_flush_pcid(target_pcid);
+                println!("flush pcid: {}", target_pcid);
+            }
+        })
     }
 
     Ok(prev)
