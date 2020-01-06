@@ -110,7 +110,11 @@ fn on_panic(info: &core::panic::PanicInfo) -> ! {
 
     // Print task id in another println in case the current task is null.
     println!("Task ID = {}", Task::current().id);
-    loop {}
+    loop {
+        unsafe {
+            asm!("hlt" :::: "volatile");
+        }
+    }
 }
 
 #[lang = "eh_personality"]
