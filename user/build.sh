@@ -2,12 +2,8 @@
 
 #cd `$(dirname $0)` || exit 1
 
-echo "Building flatrt-schduler"
-cd early/flatrt-scheduler || exit 1
-cargo xbuild --target ../x86_64-flatmk-early.json --release || exit 1
-
 echo "Building flatrt-shmem"
-cd ../flatrt-shmem || exit 1
+cd early/flatrt-shmem || exit 1
 cargo xbuild --target ../x86_64-flatmk-early.json --release || exit 1
 
 echo "Building driver library: libflatrt"
