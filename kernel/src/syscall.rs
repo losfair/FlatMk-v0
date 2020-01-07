@@ -2,6 +2,7 @@ use crate::arch::task::{arch_get_cpu_scheduler, arch_init_syscall};
 use crate::capability::{CapPtr, CapabilityEndpointObject, CapabilityInvocation, INVALID_CAP};
 use crate::task::{Task, EntryType};
 use crate::spec::{TaskFaultReason, TrivialSyscall};
+use crate::scheduler::PreviousTaskStateChange;
 use core::convert::TryFrom;
 use crate::error::*;
 
@@ -58,7 +59,12 @@ fn handle_trivial_syscall(invocation: &mut CapabilityInvocation) -> KernelResult
     match ty {
         TrivialSyscall::SchedYield => {
             unsafe {
-                (*arch_get_cpu_scheduler()).reschedule(&invocation.registers);
+                (*arch_get_cpu_scheduler()).reschedule(&invocation.registers, PreviousTaskStateChange::Yield);
+            }
+        }
+        TrivialSyscall::SchedDrop => {
+            unsafe {
+                (*arch_get_cpu_scheduler()).reschedule(&invocation.registers, PreviousTaskStateChange::Drop);
             }
         }
         TrivialSyscall::SchedNanosleep => {
@@ -71,7 +77,7 @@ fn handle_trivial_syscall(invocation: &mut CapabilityInvocation) -> KernelResult
                 None => return Err(KernelError::InvalidArgument)
             };
             current.set_nanosleep_deadline(deadline);
-            scheduler.reschedule(&invocation.registers);
+            scheduler.reschedule(&invocation.registers, PreviousTaskStateChange::Yield);
         }
         TrivialSyscall::SchedSubmit => {
             let target = CapPtr(invocation.arg(1)?);

@@ -570,6 +570,10 @@ impl Task {
         }
     }
 
+    pub fn is_interrupt_blocked(&self) -> bool {
+        self.interrupt_blocked.load(Ordering::SeqCst) != 0
+    }
+
     /// Atomically cmpxchg `ipc_blocked` from true to false.
     /// 
     /// Should ONLY be called on the current task.

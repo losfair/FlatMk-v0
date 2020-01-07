@@ -33,6 +33,12 @@ pub struct Scheduler {
     state: SchedState,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PreviousTaskStateChange {
+    Yield,
+    Drop,
+}
+
 #[derive(Default)]
 struct SchedState {
     /// Index of the head node. (Inclusive)
@@ -46,6 +52,10 @@ struct SchedState {
 
     /// The time that the current task started running at, in nanoseconds.
     runstart_time: u64,
+
+    /// Whether there was a request to drop the current task but had to be deferred because
+    /// the current task is the only runnabletask.
+    pending_drop: bool,
 }
 
 /// Collection of running tasks.
@@ -144,7 +154,13 @@ impl Scheduler {
     pub fn tick(&mut self, time_passed_in_ns: u64, old_registers: &TaskRegisters, was_wfi: bool) -> ! {
         self.state.current_time = self.state.current_time.checked_add(time_passed_in_ns).expect("Scheduler::tick: Time overflow.");
         if was_wfi || self.state.current_time - self.state.runstart_time >= MAX_TIME_SLICE {
-            self.reschedule(old_registers);
+            let state_change = if self.state.pending_drop {
+                self.state.pending_drop = false;
+                PreviousTaskStateChange::Drop
+            } else {
+                PreviousTaskStateChange::Yield
+            };
+            self.reschedule(old_registers, state_change);
         } else {
             unsafe {
                 arch_enter_user_mode(old_registers)
@@ -160,7 +176,14 @@ impl Scheduler {
     /// Reschedule.
     /// 
     /// Performs task switching if needed, and enters user mode.
-    pub fn reschedule(&mut self, old_registers: &TaskRegisters) -> ! {
+    pub fn reschedule(&mut self, old_registers: &TaskRegisters, previous_change: PreviousTaskStateChange) -> ! {
+        unsafe {
+            if Task::borrow_current().is_interrupt_blocked() {
+                // We cannot reschedule from within an interrupt handler task.
+                arch_enter_user_mode(old_registers);
+            }
+        }
+
         let mut first_nanosleep_id_seen: Option<u64> = None;
 
         // Place a limit on max retry count to ensure an upper bound on scheduler latency.
@@ -197,7 +220,16 @@ impl Scheduler {
                     match maybe_prev {
                         Ok(Some(prev)) => {
                             // Save the previous task, update time, and enter user mode.
-                            self.push(prev.into()).expect("Scheduler::reschedule: Popped a task but cannot push another task.");
+                            match previous_change {
+                                PreviousTaskStateChange::Yield => {
+                                    self.push(prev.into()).expect("Scheduler::reschedule: Popped a task but cannot push another task.");
+                                }
+                                PreviousTaskStateChange::Drop => {
+                                    prev.unblock_ipc().expect("Scheduler::reschedule: Cannot unblock IPC for the previous task.");
+                                    drop(prev);
+                                }
+                            }
+                            
                             self.state.runstart_time = self.state.current_time;
 
                             unsafe {
@@ -224,17 +256,27 @@ impl Scheduler {
             }
         }
 
-        // Nothing can be switched to. Return to the current task.
-        // If even the current task cannot be run (in nanosleep), then enter WFI.
-        unsafe {
-            if Task::borrow_current().get_nanosleep_deadline() > self.state.current_time {
-                // We need to save the current registers before entering WFI.
-                let registers = &mut (*Task::borrow_current().local_state.unsafe_deref()).registers;
-                *registers = old_registers.clone();
-                registers.lazy_read();
+        match previous_change {
+            PreviousTaskStateChange::Yield => {
+                // Nothing can be switched to. Return to the current task.
+                // If even the current task cannot be run (in nanosleep), then enter WFI.
+                unsafe {
+                    if Task::borrow_current().get_nanosleep_deadline() > self.state.current_time {
+                        // We need to save the current registers before entering WFI.
+                        let registers = &mut (*Task::borrow_current().local_state.unsafe_deref()).registers;
+                        *registers = old_registers.clone();
+                        registers.lazy_read();
+                        wait_for_interrupt();
+                    } else {
+                        arch_enter_user_mode(old_registers);
+                    }
+                }
+            }
+            PreviousTaskStateChange::Drop => {
+                // This task is the only runnable task, but we need to somehow "drop" it.
+                // So just do a WFI to simulate the behavior.
+                self.state.pending_drop = true;
                 wait_for_interrupt();
-            } else {
-                arch_enter_user_mode(old_registers);
             }
         }
     }
