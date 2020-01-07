@@ -64,14 +64,15 @@ unsafe extern "C" fn init_start() -> ! {
     start_driver_vga();
     debug!("- input");
     start_driver_input();
-    debug!("- gclock");
-    start_driver_gclock();
-    //debug!("- sequencer-linux");
-    //start_driver_sequencer_linux();
+    //debug!("- gclock");
+    //start_driver_gclock();
+    debug!("- sequencer-linux");
+    start_driver_sequencer_linux();
     debug!("init: All drivers started.");
 
     loop {
-        spec::to_result(spec::CAP_TRIVIAL_SYSCALL.sched_nanosleep(10_000_000_000)).unwrap();
+        // FIXME: Workaround for a broken kernel invariant when no task is available to switch to.
+        spec::to_result(spec::CAP_TRIVIAL_SYSCALL.sched_yield()).unwrap();
     }
 }
 
@@ -294,8 +295,23 @@ fn start_driver_input() {
             &spec::CPtr::new(0x10),
         )).unwrap();
 
+        // Port 0x60/0x61.
+        spec::to_result(caps::ROOT_TASK.new_x86_io_port(&caps::BUFFER, 0x60)).unwrap();
+        spec::to_result(caps::driver_input::CAPSET.put_cap(
+            &caps::BUFFER,
+            &spec::CPtr::new(0x13),
+        )).unwrap();
+        spec::to_result(caps::ROOT_TASK.new_x86_io_port(&caps::BUFFER, 0x61)).unwrap();
+        spec::to_result(caps::driver_input::CAPSET.put_cap(
+            &caps::BUFFER,
+            &spec::CPtr::new(0x14),
+        )).unwrap();
+
         // Call the initialize function.
         spec::to_result(caps::driver_input::ENDPOINT.invoke()).expect("start_driver_input: Cannot invoke task.");
+
+        // Fetch poll endpoint.
+        fetch_and_check_remote_task_endpoint(0x12, &caps::DRIVER_INPUT_POLL_INPUT, &caps::driver_input::CAPSET);
     }
 }
 
@@ -314,6 +330,9 @@ fn start_driver_sequencer_linux() {
 
         // VGA shared framebuffer memory.
         spec::to_result(caps::driver_sequencer_linux::CAPSET.put_cap(caps::DRIVER_VGA_SHMEM_MAP.cptr(), &spec::CPtr::new(0x10))).unwrap();
+
+        // Input polling.
+        spec::to_result(caps::driver_sequencer_linux::CAPSET.put_cap(caps::DRIVER_INPUT_POLL_INPUT.cptr(), &spec::CPtr::new(0x11))).unwrap();
 
         // Call the initialize function.
         spec::to_result(caps::driver_sequencer_linux::ENDPOINT.invoke()).expect("start_driver_sequencer_linux: Cannot invoke task.");

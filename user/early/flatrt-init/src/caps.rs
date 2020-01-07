@@ -49,6 +49,7 @@ define_task!(driver_sequencer_linux, 0x500);
 define_task!(driver_benchmark, 0x600);
 
 define_task!(driver_input, 0x700);
+pub static DRIVER_INPUT_POLL_INPUT: spec::TaskEndpoint = unsafe { spec::TaskEndpoint::new(spec::CPtr::new(0x710)) };
 
 /// Initializes all the static capabilities defined above.
 /// 
