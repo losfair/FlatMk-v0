@@ -10,6 +10,7 @@
 #include <shmem.h>
 #include <capalloc.h>
 #include <allocator.h>
+#include <reentrancy_guard.h>
 #include <stddef.h>
 
 #define FS_BASE_INDEX 58
