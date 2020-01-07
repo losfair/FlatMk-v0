@@ -130,8 +130,9 @@ pub enum TaskFaultReason {
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
 pub enum TrivialSyscall {
 	SchedYield = 0,
-	SchedNanosleep = 1,
-	SchedSubmit = 2,
+	SchedDrop = 1,
+	SchedNanosleep = 2,
+	SchedSubmit = 3,
 }
 
 /// A request to an X86 I/O port.

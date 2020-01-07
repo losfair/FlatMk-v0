@@ -130,8 +130,9 @@ pub enum TaskFaultReason {
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, TryFromPrimitive)]
 pub enum TrivialSyscall {
 	SchedYield = 0,
-	SchedNanosleep = 1,
-	SchedSubmit = 2,
+	SchedDrop = 1,
+	SchedNanosleep = 2,
+	SchedSubmit = 3,
 }
 
 /// A request to an X86 I/O port.
@@ -805,6 +806,14 @@ impl TrivialSyscallEntry {
         &self.cap
     }
 
+	/// Drops the current task from the scheduler.
+	pub unsafe fn sched_drop(
+		&self,
+	) -> i64 {
+		self.cap.call(TrivialSyscall::SchedDrop as i64, 0i64, 0i64, 0i64, )
+	}
+
+	/// Put the current task to sleep.
 	pub unsafe fn sched_nanosleep(
 		&self,
 		duration: u64,
@@ -812,6 +821,7 @@ impl TrivialSyscallEntry {
 		self.cap.call(TrivialSyscall::SchedNanosleep as i64, duration as i64, 0i64, 0i64, )
 	}
 
+	/// Submits a scheduling endpoint.
 	pub unsafe fn sched_submit(
 		&self,
 		target: &TaskEndpoint,
@@ -819,6 +829,7 @@ impl TrivialSyscallEntry {
 		self.cap.call(TrivialSyscall::SchedSubmit as i64, target.cptr().index() as i64, 0i64, 0i64, )
 	}
 
+	/// Yields from the current task to allow other tasks to run.
 	pub unsafe fn sched_yield(
 		&self,
 	) -> i64 {

@@ -108,8 +108,9 @@ enum TaskFaultReason {
 // A trivial syscall that is not invoked on a capability.
 enum TrivialSyscall {
 	TrivialSyscall_SchedYield = 0,
-	TrivialSyscall_SchedNanosleep = 1,
-	TrivialSyscall_SchedSubmit = 2,
+	TrivialSyscall_SchedDrop = 1,
+	TrivialSyscall_SchedNanosleep = 2,
+	TrivialSyscall_SchedSubmit = 3,
 };
 
 // A request to an X86 I/O port.
@@ -694,6 +695,14 @@ static inline int64_t TaskEndpoint_set_tag(
 	return cptr_invoke(me.cap, IpcRequest_SetTag, tag, 0ll, 0ll);
 }
 
+// Drops the current task from the scheduler.
+static inline int64_t TrivialSyscallEntry_sched_drop(
+	struct TrivialSyscallEntry me
+) {
+	return cptr_invoke(me.cap, TrivialSyscall_SchedDrop, 0ll, 0ll, 0ll);
+}
+
+// Put the current task to sleep.
 static inline int64_t TrivialSyscallEntry_sched_nanosleep(
 	struct TrivialSyscallEntry me,
 	// Duration in nanoseconds.
@@ -702,6 +711,7 @@ static inline int64_t TrivialSyscallEntry_sched_nanosleep(
 	return cptr_invoke(me.cap, TrivialSyscall_SchedNanosleep, duration, 0ll, 0ll);
 }
 
+// Submits a scheduling endpoint.
 static inline int64_t TrivialSyscallEntry_sched_submit(
 	struct TrivialSyscallEntry me,
 	// Reply endpoint to submit.
@@ -710,6 +720,7 @@ static inline int64_t TrivialSyscallEntry_sched_submit(
 	return cptr_invoke(me.cap, TrivialSyscall_SchedSubmit, target.cap, 0ll, 0ll);
 }
 
+// Yields from the current task to allow other tasks to run.
 static inline int64_t TrivialSyscallEntry_sched_yield(
 	struct TrivialSyscallEntry me
 ) {

@@ -137,8 +137,9 @@ description = "A trivial syscall that is not invoked on a capability."
 
 [enums.TrivialSyscall.variants]
 SchedYield = 0
-SchedNanosleep = 1
-SchedSubmit = 2
+SchedDrop = 1
+SchedNanosleep = 2
+SchedSubmit = 3
 
 [bitflags.UserPteFlags]
 description = "Flags for a user page table entry."
@@ -158,12 +159,21 @@ TAGGABLE = 1
 description = "Entry to trivial syscalls. Only valid on capability pointer `u64::MAX`."
 
 [types.TrivialSyscallEntry.methods.sched_yield]
+description = "Yields from the current task to allow other tasks to run."
 in_args = []
 out_args = [
     { EnumVariant = { enum_name = "TrivialSyscall", variant = "SchedYield" } },
 ]
 
+[types.TrivialSyscallEntry.methods.sched_drop]
+description = "Drops the current task from the scheduler."
+in_args = []
+out_args = [
+    { EnumVariant = { enum_name = "TrivialSyscall", variant = "SchedDrop" } },
+]
+
 [types.TrivialSyscallEntry.methods.sched_nanosleep]
+description = "Put the current task to sleep."
 in_args = [
     { name = "duration", kind = "U64", description = "Duration in nanoseconds." }
 ]
@@ -173,6 +183,7 @@ out_args = [
 ]
 
 [types.TrivialSyscallEntry.methods.sched_submit]
+description = "Submits a scheduling endpoint."
 in_args = [
     { name = "target", kind = { TypeRef = "TaskEndpoint" }, description = "Reply endpoint to submit." },
 ]
