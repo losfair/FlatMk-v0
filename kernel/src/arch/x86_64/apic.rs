@@ -108,8 +108,6 @@ pub(super) unsafe fn check_and_send_eoi(index: u8) {
     let bit_index = (index & 0b11111) as usize;
     if lapic_read(0x10 + reg_index) & (1u32 << bit_index) != 0 {
         lapic_write(0xb, 1);
-    } else {
-        panic!("EOI without ISR bit");
     }
 }
 
