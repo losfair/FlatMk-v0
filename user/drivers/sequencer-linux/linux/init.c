@@ -20,6 +20,7 @@ int main() {
     }
     uint64_t end = __builtin_ia32_rdtsc();
     printf("%lu cycles per syscall\n", (end - start) / 1000000);
+    fflush(stdout);
     while(1) sleep(10);
 
     return 0;

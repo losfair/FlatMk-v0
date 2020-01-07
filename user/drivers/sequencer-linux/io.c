@@ -33,23 +33,12 @@ static int64_t map_shared_fb(struct BasicTask this_task, struct RootPageTable ta
     if(CapabilitySet_clone_cap(CAP_CAPSET, target_rpt.cap, CAP_BUFFER) < 0) flatmk_throw();
     if(BasicTask_put_ipc_cap(this_task, CAP_BUFFER, 1) < 0) flatmk_throw();
     
-    while(1) {
-        fastipc_write(&payload);
+    fastipc_write(&payload);
+    while(TaskEndpoint_invoke(CAP_FRAMEBUFFER) < 0) sched_yield();
+    fastipc_read(&payload);
 
-        // Wait until endpoint becomes available.
-        if(TaskEndpoint_invoke(CAP_FRAMEBUFFER) < 0) {
-            // sched_yield invalidates fastipc registers.
-            sched_yield();
-            continue;
-        }
-
-        fastipc_read(&payload);
-
-        if((int64_t) payload.data[0] < 0) {
-            return (int64_t) payload.data[0];
-        }
-
-        break;
+    if((int64_t) payload.data[0] < 0) {
+        return (int64_t) payload.data[0];
     }
     return 0;
 }
