@@ -43,7 +43,7 @@ pub(super) unsafe fn init_apic() {
     lapic_write(0xf, val);
     
     let apic_id = lapic_read(0x2);
-    println!("Booting on processor with APID ID: {}.", apic_id);
+    println!("Booting on processor with APIC ID: {}.", apic_id);
 
     // Keyboard IRQ.
     set_irq(1, 0, 33);
