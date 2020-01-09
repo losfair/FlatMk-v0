@@ -133,6 +133,8 @@ pub enum TrivialSyscall {
 	SchedDrop = 1,
 	SchedNanosleep = 2,
 	SchedSubmit = 3,
+	SoftuserEnter = 4,
+	SoftuserLeave = 5,
 }
 
 /// A request to an X86 I/O port.

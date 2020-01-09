@@ -140,6 +140,8 @@ SchedYield = 0
 SchedDrop = 1
 SchedNanosleep = 2
 SchedSubmit = 3
+SoftuserEnter = 4
+SoftuserLeave = 5
 
 [bitflags.UserPteFlags]
 description = "Flags for a user page table entry."
@@ -190,6 +192,23 @@ in_args = [
 out_args = [
     { EnumVariant = { enum_name = "TrivialSyscall", variant = "SchedSubmit" } },
     { Input = "target" },
+]
+
+[types.TrivialSyscallEntry.methods.softuser_enter]
+description = "Enters softuser mode."
+in_args = [
+    { name = "pc", kind = "U64", description = "Program counter value to start execution from." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "TrivialSyscall", variant = "SoftuserEnter" } },
+    { Input = "pc" },
+]
+
+[types.TrivialSyscallEntry.methods.softuser_leave]
+description = "Leaves softuser mode."
+in_args = []
+out_args = [
+    { EnumVariant = { enum_name = "TrivialSyscall", variant = "SoftuserLeave" } },
 ]
 
 [types.RootPageTable]

@@ -111,6 +111,8 @@ enum TrivialSyscall {
 	TrivialSyscall_SchedDrop = 1,
 	TrivialSyscall_SchedNanosleep = 2,
 	TrivialSyscall_SchedSubmit = 3,
+	TrivialSyscall_SoftuserEnter = 4,
+	TrivialSyscall_SoftuserLeave = 5,
 };
 
 // A request to an X86 I/O port.
@@ -725,6 +727,22 @@ static inline int64_t TrivialSyscallEntry_sched_yield(
 	struct TrivialSyscallEntry me
 ) {
 	return cptr_invoke(me.cap, TrivialSyscall_SchedYield, 0ll, 0ll, 0ll);
+}
+
+// Enters softuser mode.
+static inline int64_t TrivialSyscallEntry_softuser_enter(
+	struct TrivialSyscallEntry me,
+	// Program counter value to start execution from.
+	uint64_t pc
+) {
+	return cptr_invoke(me.cap, TrivialSyscall_SoftuserEnter, pc, 0ll, 0ll);
+}
+
+// Leaves softuser mode.
+static inline int64_t TrivialSyscallEntry_softuser_leave(
+	struct TrivialSyscallEntry me
+) {
+	return cptr_invoke(me.cap, TrivialSyscall_SoftuserLeave, 0ll, 0ll, 0ll);
 }
 
 // Calls the x86 `inb` instruction on this port.

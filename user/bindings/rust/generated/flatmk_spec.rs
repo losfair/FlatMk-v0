@@ -133,6 +133,8 @@ pub enum TrivialSyscall {
 	SchedDrop = 1,
 	SchedNanosleep = 2,
 	SchedSubmit = 3,
+	SoftuserEnter = 4,
+	SoftuserLeave = 5,
 }
 
 /// A request to an X86 I/O port.
@@ -834,6 +836,21 @@ impl TrivialSyscallEntry {
 		&self,
 	) -> i64 {
 		self.cap.call(TrivialSyscall::SchedYield as i64, 0i64, 0i64, 0i64, )
+	}
+
+	/// Enters softuser mode.
+	pub unsafe fn softuser_enter(
+		&self,
+		pc: u64,
+	) -> i64 {
+		self.cap.call(TrivialSyscall::SoftuserEnter as i64, pc as i64, 0i64, 0i64, )
+	}
+
+	/// Leaves softuser mode.
+	pub unsafe fn softuser_leave(
+		&self,
+	) -> i64 {
+		self.cap.call(TrivialSyscall::SoftuserLeave as i64, 0i64, 0i64, 0i64, )
 	}
 
 }
