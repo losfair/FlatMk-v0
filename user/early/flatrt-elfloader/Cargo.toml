@@ -8,5 +8,5 @@ edition = "2018"
 
 [dependencies]
 flatmk-sys = { path = "../../bindings/rust" }
-goblin = { version = "0.1", default-features = false, features = ["elf64"] }
+goblin = { version = "0.1", default-features = false, features = ["elf32", "elf64"] }
 spin = "0.5"

@@ -6,6 +6,11 @@ echo "Building flatrt-shmem"
 cd early/flatrt-shmem || exit 1
 cargo xbuild --target ../x86_64-flatmk-early.json --release || exit 1
 
+echo "Building softuser binary: echo"
+cd ../../softuser/echo || exit 1
+cargo xbuild --target ../riscv32-flatmk-softuser.json --release || exit 1
+python3 ../../../tools/gen_bytes.py ./target/riscv32-flatmk-softuser/release/echo ECHO_ELF_BYTES > ../../drivers/benchmark/echo_elf.h || exit 1
+
 echo "Building driver library: libflatrt"
 cd ../../drivers/libflatrt || exit 1
 cargo xbuild --target ../../early/x86_64-flatmk-early.json --release || exit 1
@@ -28,7 +33,7 @@ make || exit 1
 
 echo "Building linux init for sequencer-linux"
 cd ../sequencer-linux/linux || exit 1
-gcc -static -O2 -o ./generated/init.elf ./init.c || exit 1
+#gcc -static -O2 -o ./generated/init.elf ./init.c || exit 1
 python3 ./gen_bytes.py ./generated/init.elf > ./generated/init.h || exit 1
 
 echo "Building driver: sequencer-linux"

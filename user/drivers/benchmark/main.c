@@ -1,11 +1,14 @@
 #include <stddriver.h>
 #include <stdio.h>
+#include "echo_elf.h"
 
 struct TaskEndpoint CAP_INIT_RET = { 0x10 };
 struct BasicTask CAP_THREAD_TEST = { 0x11 };
 struct TaskEndpoint CAP_THREAD_TEST_ENDPOINT = { 0x12 };
 
 uint8_t __test_thread_stack[4096];
+
+void *temp_map_base = (void *) 0x300000000000ull;
 
 void test_thread_entry() {
     BasicTask_ipc_return(CAP_THREAD_TEST);
@@ -68,6 +71,28 @@ void main() {
         }
         uint64_t end = __builtin_ia32_rdtsc();
         sprintf(buf, "benchmark: %lu cycles per op\n", (end - start) / 1000000);
+        flatmk_debug_puts(buf);
+    }
+
+    sprintf(buf, "Benchmark: Softuser enter/leave\n");
+    flatmk_debug_puts(buf);
+
+    {
+        uint32_t entry_addr;
+        ASSERT_OK(libelfloader_load_softuser(
+            ECHO_ELF_BYTES,
+            sizeof(ECHO_ELF_BYTES),
+            (uint64_t) temp_map_base,
+            CAP_RPT.cap,
+            &entry_addr
+        ));
+
+        uint64_t start = __builtin_ia32_rdtsc();
+        for(int i = 0; i < 10000000; i++) {
+            softuser_enter(entry_addr);
+        }
+        uint64_t end = __builtin_ia32_rdtsc();
+        sprintf(buf, "benchmark: %lu cycles per op\n", (end - start) / 10000000);
         flatmk_debug_puts(buf);
     }
 

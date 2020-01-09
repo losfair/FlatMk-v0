@@ -38,6 +38,27 @@ pub unsafe extern "C" fn libelfloader_load_and_apply(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn libelfloader_load_softuser(
+    image_base: *const u8,
+    image_len: usize,
+    temp_base: u64,
+    rpt: u64,
+    out_entry_address: &mut u32,
+) -> i64 {
+    let image = core::slice::from_raw_parts(image_base, image_len);
+    let temp_base = ElfTempMapBase::new(temp_base);
+    let rpt = spec::RootPageTable::new(spec::CPtr::new(rpt));
+    let result = flatrt_elfloader::softuser::load(image, &temp_base, &rpt, (0..(core::u32::MAX as usize) + 1));
+    match result {
+        Ok(md) => {
+            *out_entry_address = md.entry_address;
+            0
+        }
+        Err(e) => e as i64
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn libelfloader_build_and_apply_stack(start: u64, size: usize, rpt: u64, task: u64) -> i64 {
     let rpt = spec::RootPageTable::new(spec::CPtr::new(rpt));
     let task = spec::BasicTask::new(spec::CPtr::new(task));
