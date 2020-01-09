@@ -4,9 +4,9 @@
 //! 
 //! - http://ethv.net/workshops/osdev/notes/notes-3
 
-use x86::io::{inb, outb};
+use x86::io::outb;
 use crate::addr::*;
-use core::arch::x86_64::{__cpuid, __get_cpuid_max};
+use core::arch::x86_64::__cpuid;
 
 static mut LAPIC_BASE: *mut u32 = core::ptr::null_mut();
 static mut IOAPIC_BASE: *mut u32 = core::ptr::null_mut();
