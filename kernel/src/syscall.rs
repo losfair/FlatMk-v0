@@ -1,6 +1,6 @@
 use crate::arch::task::{arch_get_cpu_scheduler, arch_init_syscall};
 use crate::capability::{CapPtr, CapabilityEndpointObject, CapabilityInvocation, INVALID_CAP};
-use crate::task::{Task, EntryType};
+use crate::task::{Task, EntryType, enter_user_mode, enter_user_mode_with_registers, StateRestoreMode};
 use crate::spec::{TaskFaultReason, TrivialSyscall};
 use crate::scheduler::PreviousTaskStateChange;
 use core::convert::TryFrom;
@@ -10,7 +10,7 @@ pub unsafe fn init() {
     arch_init_syscall();
 }
 
-fn dispatch_syscall(invocation: &mut CapabilityInvocation) -> i64 {
+pub fn dispatch_syscall(invocation: &mut CapabilityInvocation) -> i64 {
     let task = unsafe {
         Task::borrow_current()
     };
@@ -48,9 +48,7 @@ extern "C" fn syscall_entry(invocation: &mut CapabilityInvocation) -> ! {
     let result = dispatch_syscall(invocation);
 
     *invocation.registers.return_value_mut() = result as _;
-    unsafe {
-        crate::arch::task::arch_enter_user_mode_syscall(&invocation.registers);
-    }
+    enter_user_mode_with_registers(StateRestoreMode::Syscall, &invocation.registers);
 }
 
 fn handle_trivial_syscall(invocation: &mut CapabilityInvocation) -> KernelResult<u64> {
@@ -98,6 +96,31 @@ fn handle_trivial_syscall(invocation: &mut CapabilityInvocation) -> KernelResult
                 (*arch_get_cpu_scheduler()).push(task.into())?;
             }
             Ok(0)
+        }
+        TrivialSyscall::SoftuserEnter => {
+            let pc = invocation.arg(1)? as u32;
+            let local_state = unsafe {
+                current.local_state()
+            };
+            if local_state.softuser_enabled {
+                Err(KernelError::InvalidState)
+            } else {
+                local_state.registers = invocation.registers.clone();
+                local_state.softuser_enabled = true;
+                *local_state.softuser_context.pc_mut() = pc;
+                enter_user_mode(StateRestoreMode::Full);
+            }
+        }
+        TrivialSyscall::SoftuserLeave => {
+            let local_state = unsafe {
+                current.local_state()
+            };
+            if !local_state.softuser_enabled {
+                Err(KernelError::InvalidState)
+            } else {
+                local_state.softuser_enabled = false;
+                enter_user_mode(StateRestoreMode::Full);
+            }
         }
     }
 }

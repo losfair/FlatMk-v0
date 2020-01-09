@@ -16,6 +16,7 @@ bitflags = "1.2"
 num_enum = { version = "0.4", default-features = false }
 lazy_static = { version = "1.4", features = ["spin_no_std"] }
 bit_field = { version = "0.10" }
+flatrv = { path = "../../FlatRv" }
 
 [package.metadata.bootloader]
 kernel-stack-address = "0xFFFFFF8000000000"

@@ -32,19 +32,41 @@ pub struct CapPtr(pub u64);
 #[derive(Debug)]
 pub struct CapabilityInvocation {
     pub registers: TaskRegisters,
+    pub has_softuser_args: u64,
+    pub softuser_args: [u64; 6],
 }
 
 impl CapabilityInvocation {
     #[inline]
     pub fn cptr(&self) -> CapPtr {
-        CapPtr(self.registers.syscall_arg(0).expect(
-            "The platform system call convention should always have at least one argument.",
-        ))
+        if self.has_softuser_args != 0 {
+            CapPtr(self.softuser_args[0])
+        } else {
+            CapPtr(self.registers.syscall_arg(0).expect(
+                "The platform system call convention should always have at least one argument.",
+            ))
+        }
     }
 
     #[inline]
     pub fn arg(&self, n: usize) -> KernelResult<u64> {
-        self.registers.syscall_arg(n + 1)
+        if self.has_softuser_args != 0 {
+            if n + 1 >= self.softuser_args.len() {
+                Err(KernelError::InvalidArgument)
+            } else {
+                Ok(self.softuser_args[n + 1])
+            }
+        } else {
+            self.registers.syscall_arg(n + 1)
+        }
+    }
+
+    pub fn registers(&self) -> Option<&TaskRegisters> {
+        if self.has_softuser_args != 0 {
+            None
+        } else {
+            Some(&self.registers)
+        }
     }
 }
 
@@ -424,7 +446,7 @@ fn invoke_cap_basic_task(
                 let e = Task::invoke_ipc(
                     endpoint,
                     IpcReason::CapInvoke,
-                    &invocation.registers,
+                    invocation.registers(),
                 );
                 Err(e)
             } else {
@@ -733,7 +755,7 @@ fn invoke_cap_task_endpoint(
             let e = Task::invoke_ipc(
                 endpoint,
                 IpcReason::CapInvoke,
-                &invocation.registers,
+                invocation.registers(),
             );
             Err(e)
         }

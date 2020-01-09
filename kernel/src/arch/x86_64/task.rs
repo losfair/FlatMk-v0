@@ -9,6 +9,10 @@ use crate::addr::*;
 use crate::scheduler::Scheduler;
 use core::cell::UnsafeCell;
 
+extern "C" {
+    fn arch_lowlevel_syscall_entry();
+}
+
 #[repr(C)]
 #[derive(Clone, Debug)]
 pub struct TaskRegisters {
@@ -41,7 +45,7 @@ impl Default for TaskRegisters {
 }
 
 impl TaskRegisters {
-    pub fn new() -> TaskRegisters {
+    pub const fn new() -> TaskRegisters {
         TaskRegisters {
             r15: 0,
             r14: 0,
@@ -361,10 +365,7 @@ pub unsafe fn arch_enter_user_mode_syscall(registers: *const TaskRegisters) -> !
     unreachable!()
 }
 
-pub unsafe fn arch_enter_user_mode(registers: *const TaskRegisters) -> ! {
-    let selectors = super::exception::get_selectors();
-    assert_eq!(core::mem::size_of::<TaskRegisters>(), 160);
-
+unsafe fn iret_with_selector(registers: *const TaskRegisters, code_sel: u64, data_sel: u64) -> ! {
     asm!(
         r#"
             pushq %rcx // ds
@@ -392,45 +393,25 @@ pub unsafe fn arch_enter_user_mode(registers: *const TaskRegisters) -> ! {
             iretq
         "# : :
             "{rsi}"(registers),
-            "{rdx}"(selectors.user_code_selector.0),
-            "{rcx}"(selectors.user_data_selector.0)
+            "{rdx}"(code_sel),
+            "{rcx}"(data_sel)
             :: "volatile"
     );
-    unreachable!()
+    loop {}
 }
 
-#[naked]
-#[inline(never)]
-unsafe extern "C" fn arch_lowlevel_syscall_entry() {
-    asm!(r#"
-        swapgs
-        mov %rsp, %gs:16
-        mov %gs:8, %rsp
+pub unsafe fn arch_enter_user_mode(registers: *const TaskRegisters) -> ! {
+    let selectors = super::exception::get_selectors();
+    assert_eq!(core::mem::size_of::<TaskRegisters>(), 160);
 
-        pushq $$0 // fs
-        pushq $$0 // gs
-        push %r11 // rflags
-        push %rcx // rip
-        push %rbp // rbp
-        push %gs:16 // rsp
-        push %rdi
-        push %rsi
-        push %rdx
-        push %rcx
-        push %rbx
-        push %rax
-        push %r8
-        push %r9
-        push %r10
-        push %r11
-        push %r12
-        push %r13
-        push %r14
-        push %r15
+    iret_with_selector(registers, selectors.user_code_selector.0 as u64, selectors.user_data_selector.0 as u64);
+}
 
-        mov %rsp, %rdi
-        jmp syscall_entry
-    "# :::: "volatile");
+pub(super) unsafe fn arch_return_to_kernel_mode(registers: *const TaskRegisters) -> ! {
+    let selectors = super::exception::get_selectors();
+    assert_eq!(core::mem::size_of::<TaskRegisters>(), 160);
+
+    iret_with_selector(registers, selectors.kernel_code_selector.0 as u64, selectors.kernel_data_selector.0 as u64);
 }
 
 pub unsafe fn arch_init_syscall() {

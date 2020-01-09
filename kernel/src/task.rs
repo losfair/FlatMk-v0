@@ -25,6 +25,7 @@ use spin::Mutex;
 use core::convert::TryFrom;
 use crate::spec::{TaskEndpointFlags, TaskFaultReason};
 use core::cell::UnsafeCell;
+use crate::softuser::SoftuserContext;
 
 pub const ROOT_TASK_FULL_MAP_BASE: u64 = 0x20000000u64;
 
@@ -100,6 +101,15 @@ pub struct TaskLocalState {
 
     /// Architecture-specific task state.
     pub arch_state: ArchTaskLocalState,
+
+    /// Softuser context.
+    pub softuser_context: SoftuserContext,
+
+    /// Whether this task has softuser enabled.
+    pub softuser_enabled: bool,
+
+    /// Whether this task is executing softuser code.
+    pub softuser_active: bool,
 }
 
 #[derive(Default)]
@@ -316,6 +326,16 @@ impl Task {
         (*ptr).value()
     }
 
+    /// Dereferences the local state.
+    /// 
+    /// Unsafe because the caller must guarantee that:
+    /// - This task is the current task on the current CPU.
+    /// - This function is not called recursively.
+    #[inline]
+    pub unsafe fn local_state(&self) -> &mut TaskLocalState {
+        &mut *self.local_state.unsafe_deref()
+    }
+
     #[inline]
     pub fn is_current(&self) -> bool {
         let ptr = arch_get_kernel_tls() as *mut KernelObject<Task>;
@@ -348,9 +368,26 @@ impl Task {
     /// 
     /// Panicks if no fault handler is registered. Never returns.
     pub fn raise_fault(fault: TaskFaultReason, code: u64, old_registers: &TaskRegisters) -> ! {
-        let endpoint = match *unsafe { Task::borrow_current() }.fault_handler.lock() {
+        let old_registers = unsafe {
+            if Task::borrow_current().local_state().softuser_enabled {
+                None
+            } else {
+                Some(old_registers)
+            }
+        };
+        Self::raise_fault_opt_registers(fault, code, old_registers)
+    }
+
+    pub fn raise_fault_opt_registers(fault: TaskFaultReason, code: u64, old_registers: Option<&TaskRegisters>) -> ! {
+        let current = unsafe { Task::borrow_current() };
+        let endpoint = match *current.fault_handler.lock() {
             Some(ref x) => x.clone(),
-            None => panic!("Task::raise_fault: Got fault `{:?}` with code: {:016x} but no handler was registered.\nRegisters: {:#?}", fault, code, old_registers),
+            None => {
+                panic!(
+                    "Task::raise_fault: Got fault `{:?}` with code: {:016x} but no handler was registered.\nRegisters: {:#?}\nSoftuser registers: {:#?}",
+                    fault, code, old_registers, unsafe { current.local_state().softuser_context.gregs_mut() },
+                )
+            },
         };
         Task::invoke_ipc(endpoint, IpcReason::Fault(fault, code), old_registers);
         panic!("Task::raise_fault: Cannot invoke fault handler for fault: {:?} with code: {:016x}.\nRegisters: {:#?}", fault, code, old_registers);
@@ -390,7 +427,7 @@ impl Task {
     pub fn invoke_ipc(
         target: TaskEndpoint,
         reason: IpcReason,
-        old_registers: &TaskRegisters,
+        old_registers: Option<&TaskRegisters>,
     ) -> KernelError {
         let state_restore_mode: StateRestoreMode;
 
@@ -444,7 +481,7 @@ impl Task {
             // We should never return after `switch_to`, since all references from `borrow_current` will
             // be invalidated.
             let prev = unsafe {
-                switch_to(task, Some(old_registers))
+                switch_to(task, old_registers)
                     .expect("invoke_ipc: switch_to failed.")
                     .expect("invoke_ipc: switch_to didn't return a previous task.")
             };
@@ -705,16 +742,22 @@ pub enum StateRestoreMode {
 
 /// Switches out of kernel mode and enters user mode.
 pub fn enter_user_mode(mode: StateRestoreMode) -> ! {
+    unsafe {
+        enter_user_mode_with_registers(mode, &Task::borrow_current().local_state().registers)
+    }
+}
+
+pub fn enter_user_mode_with_registers(mode: StateRestoreMode, registers: &TaskRegisters) -> ! {
     let task = unsafe {
         Task::borrow_current()
     };
     if task.is_idle() {
         wait_for_interrupt();
+    } else if unsafe { task.local_state().softuser_enabled } {
+        unsafe {
+            task.local_state().softuser_context.enter();
+        }
     } else {
-        let registers: *const TaskRegisters = unsafe {
-            &(*task.local_state.unsafe_deref()).registers as *const _
-        };
-    
         unsafe {
             match mode {
                 StateRestoreMode::Full => arch_enter_user_mode(registers),
@@ -749,6 +792,14 @@ pub fn invoke_interrupt(
     index: u8,
     old_registers: &TaskRegisters,
 ) -> KernelError {
+    let old_registers = unsafe {
+        if Task::borrow_current().local_state().softuser_enabled {
+            None
+        } else {
+            Some(old_registers)
+        }
+    };
+
     let endpoint = INTERRUPT_BINDINGS.lock()[index as usize].clone();
     if let Some(endpoint) = endpoint {
         let e = Task::invoke_ipc(endpoint, IpcReason::Interrupt(index), old_registers);

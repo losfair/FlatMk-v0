@@ -1,10 +1,9 @@
 use super::config::*;
 use super::task::{get_hlt, set_hlt, TaskRegisters};
 use crate::serial::with_serial_port;
-use crate::task::{invoke_interrupt, Task};
+use crate::task::{invoke_interrupt, Task, enter_user_mode_with_registers, StateRestoreMode};
 use crate::spec::TaskFaultReason;
 use core::fmt::Write;
-use spin::Mutex;
 use x86_64::{
     registers::control::Cr2,
     structures::{
@@ -224,7 +223,12 @@ interrupt_with_code!(
 
 interrupt!(intr_divide_error, __intr_divide_error, frame, registers, {
     if !is_user_fault(frame) {
-        panic!("Kernel divide error: {:#?}", frame);
+        if fault_try_take_softuser_if_active() {
+            // Divide error in softuser mode.
+        }
+        else {
+            panic!("Kernel divide error: {:#?}", frame);
+        }
     }
     Task::raise_fault(TaskFaultReason::InvalidOperation, 0, registers);
 });
@@ -294,12 +298,29 @@ interrupt_with_code!(
 
         let fault_addr = Cr2::read().as_ptr::<u8>();
         if !is_user_fault(frame) {
-            panic!(
-                "Kernel page fault at {:p}. CODE={:?} RIP={:p}",
-                fault_addr,
-                PageFaultErrorCode::from_bits(code),
-                frame.instruction_pointer.as_ptr::<u8>(),
-            );
+            if fault_try_take_softuser_if_active() {
+                // A softuser page fault can either happen from within the first 32-bit range, or
+                // at `-1 as u64` (which indicates an invalid opcode).
+                if (fault_addr as u64) <= (core::u32::MAX as u64) {
+                    Task::raise_fault(TaskFaultReason::VMAccess, fault_addr as u64, registers);
+                } else if (fault_addr as u64) == core::u64::MAX {
+                    Task::raise_fault(TaskFaultReason::IllegalInstruction, 0, registers);
+                } else {
+                    panic!(
+                        "Kernel page fault in softuser mode, but fault address is not in softuser range.\nADDR={:p} CODE={:?} RIP={:p}",
+                        fault_addr,
+                        PageFaultErrorCode::from_bits(code),
+                        frame.instruction_pointer.as_ptr::<u8>(),
+                    );
+                }
+            } else {
+                panic!(
+                    "Kernel page fault at {:p}. CODE={:?} RIP={:p}",
+                    fault_addr,
+                    PageFaultErrorCode::from_bits(code),
+                    frame.instruction_pointer.as_ptr::<u8>(),
+                );
+            }
         }
         Task::raise_fault(TaskFaultReason::VMAccess, fault_addr as u64, registers);
     }
@@ -337,6 +358,18 @@ fn handle_external_interrupt(
 ) -> ! {
     let hlt = get_hlt();
     if !is_user_fault(frame) && hlt == 0 {
+        // Interrupts are enabled in softuser mode, but we cannot preempt out execution until an opcode boundary.
+        // So, we just set a flag and let the interpreter check it per cycle.
+        //
+        // The overhead of this method seems to be very low.
+        unsafe {
+            let state = Task::borrow_current().local_state();
+            if state.softuser_active {
+                state.softuser_context.set_pending_interrupt(index);
+                super::task::arch_return_to_kernel_mode(registers);
+            }
+        }
+        
         panic!("External interrupt in kernel mode");
     }
 
@@ -351,21 +384,52 @@ fn handle_external_interrupt(
         registers
     };
     unsafe {
-        match index {
-            32 => {
-                // Timer interrupt
-                super::task::arch_unblock_interrupt(index);
-                (*super::task::arch_get_cpu_scheduler()).tick(1000000, registers, hlt != 0); // 1 millisecond per tick
+        arch_handle_interrupt(registers, index)
+    }
+}
+
+/// Handles a (possibly deferred) interrupt.
+pub unsafe fn arch_handle_interrupt(
+    registers: &TaskRegisters,
+    index: u8
+) -> ! {
+    match index {
+        32 => {
+            // Timer interrupt
+            super::task::arch_unblock_interrupt(index);
+            (*super::task::arch_get_cpu_scheduler()).tick(1000000, registers, false); // 1 millisecond per tick
+        }
+        _ => {
+            invoke_interrupt(index, registers);
+            // If fails, ignore this interrupt.
+            if Task::borrow_current().is_idle() {
+                super::task::wait_for_interrupt();
+            } else {
+                enter_user_mode_with_registers(StateRestoreMode::Full, registers);
             }
-            _ => {
-                invoke_interrupt(index, registers);
-                // If fails, ignore this interrupt.
-                if Task::borrow_current().is_idle() {
-                    super::task::wait_for_interrupt();
-                } else {
-                    super::task::arch_enter_user_mode(registers);
-                }
-            }
+        }
+    }
+}
+
+/// In a fault case, try reading `softuser_active` field of the current task and reset it to false. If there is a
+/// pending interrupt on this task, this function will call the interrupt handler and never returns.
+/// 
+/// This function exists to solve a race condition where an interrupt arrives between `cycle_will_run` checking the
+/// pending interrupt flag and the opcode implementation throwing a fault. If in fault handlers we don't do another check
+/// on the pending interrupt flag, we're likely to miss interrupts.
+/// 
+/// The fault will be triggered again next time the current task begins execution, if here we choose to handle a pending
+/// interrupt instead.
+fn fault_try_take_softuser_if_active() -> bool {
+    unsafe {
+        let state = Task::borrow_current().local_state();
+        let active = state.softuser_active;
+        if active {
+            state.softuser_active = false;
+            state.softuser_context.check_and_handle_pending_interrupt();
+            true
+        } else {
+            false
         }
     }
 }

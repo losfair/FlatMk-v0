@@ -40,6 +40,7 @@ mod task;
 mod user;
 mod spec;
 mod scheduler;
+mod softuser;
 
 use crate::arch::{arch_early_init, arch_late_init};
 use crate::kobj::*;

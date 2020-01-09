@@ -4,11 +4,11 @@ use crate::arch::PAGE_SIZE;
 use core::mem::size_of;
 use crate::pagealloc::KernelPageRef;
 use crate::kobj::*;
-use crate::task::{Task, StateRestoreMode};
+use crate::task::{Task, enter_user_mode_with_registers, StateRestoreMode};
 use crate::error::*;
 use core::mem::MaybeUninit;
 use core::ops::{Index, IndexMut};
-use crate::arch::task::{TaskRegisters, arch_enter_user_mode, wait_for_interrupt};
+use crate::arch::task::{TaskRegisters, wait_for_interrupt};
 use core::convert::TryFrom;
 
 /// Number of task pages.
@@ -162,9 +162,7 @@ impl Scheduler {
             };
             self.reschedule(old_registers, state_change);
         } else {
-            unsafe {
-                arch_enter_user_mode(old_registers)
-            }
+            enter_user_mode_with_registers(StateRestoreMode::Full, old_registers)
         }
     }
 
@@ -180,7 +178,7 @@ impl Scheduler {
         unsafe {
             if Task::borrow_current().is_interrupt_blocked() {
                 // We cannot reschedule from within an interrupt handler task.
-                arch_enter_user_mode(old_registers);
+                enter_user_mode_with_registers(StateRestoreMode::Full, old_registers);
             }
         }
 
@@ -268,7 +266,7 @@ impl Scheduler {
                         registers.lazy_read();
                         wait_for_interrupt();
                     } else {
-                        arch_enter_user_mode(old_registers);
+                        enter_user_mode_with_registers(StateRestoreMode::Full, old_registers);
                     }
                 }
             }
