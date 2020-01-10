@@ -1,6 +1,7 @@
 #include <stddriver.h>
 #include <stdio.h>
 #include "echo_elf.h"
+#include "ipc_return_elf.h"
 
 struct TaskEndpoint CAP_INIT_RET = { 0x10 };
 struct BasicTask CAP_THREAD_TEST = { 0x11 };
@@ -78,22 +79,80 @@ void main() {
     flatmk_debug_puts(buf);
 
     {
-        uint32_t entry_addr;
+        uint32_t softuser_entry_addr = 0;
         ASSERT_OK(libelfloader_load_softuser(
             ECHO_ELF_BYTES,
             sizeof(ECHO_ELF_BYTES),
             (uint64_t) temp_map_base,
             CAP_RPT.cap,
-            &entry_addr
+            &softuser_entry_addr
         ));
 
         uint64_t start = __builtin_ia32_rdtsc();
         for(int i = 0; i < 10000000; i++) {
-            softuser_enter(entry_addr);
+            softuser_enter(softuser_entry_addr);
         }
         uint64_t end = __builtin_ia32_rdtsc();
         sprintf(buf, "benchmark: %lu cycles per op\n", (end - start) / 10000000);
         flatmk_debug_puts(buf);
+    }
+
+    flatmk_debug_puts("Benchmark: IPC w/o PT switch to softuser\n");
+
+    {
+        uint32_t softuser_entry_addr = 0;
+        ASSERT_OK(libelfloader_load_softuser(
+            IPC_RETURN_ELF_BYTES,
+            sizeof(IPC_RETURN_ELF_BYTES),
+            (uint64_t) temp_map_base,
+            CAP_RPT.cap,
+            &softuser_entry_addr
+        ));
+
+        ASSERT_OK(BasicTask_fetch_shallow_clone(CAP_ME, CAP_THREAD_TEST.cap));
+        softuser_remote_enter(CAP_THREAD_TEST);
+
+        ASSERT_OK(BasicTask_fetch_task_endpoint(CAP_THREAD_TEST, CAP_THREAD_TEST_ENDPOINT.cap, (uint64_t) softuser_entry_addr, CAP_THREAD_TEST.cap));
+
+        uint64_t start = __builtin_ia32_rdtsc();
+        for(int i = 0; i < 2000000; i++) {
+            ASSERT_OK(TaskEndpoint_invoke(CAP_THREAD_TEST_ENDPOINT));
+        }
+        uint64_t end = __builtin_ia32_rdtsc();
+        sprintf(buf, "benchmark: %lu cycles per op\n", (end - start) / 2000000);
+        flatmk_debug_puts(buf);
+    }
+
+    flatmk_debug_puts("Benchmark: IPC w/ PT switch to softuser\n");
+
+    {
+        uint32_t softuser_entry_addr = 0;
+        struct RootPageTable new_rpt = { libcapalloc_allocate() };
+        ASSERT_OK(BasicTask_make_root_page_table(CAP_ME, new_rpt.cap));
+
+        ASSERT_OK(libelfloader_load_softuser(
+            IPC_RETURN_ELF_BYTES,
+            sizeof(IPC_RETURN_ELF_BYTES),
+            (uint64_t) temp_map_base,
+            new_rpt.cap,
+            &softuser_entry_addr
+        ));
+
+        ASSERT_OK(BasicTask_fetch_shallow_clone(CAP_ME, CAP_THREAD_TEST.cap));
+        softuser_remote_enter(CAP_THREAD_TEST);
+
+        ASSERT_OK(BasicTask_put_root_page_table(CAP_THREAD_TEST, new_rpt));
+        ASSERT_OK(BasicTask_fetch_task_endpoint(CAP_THREAD_TEST, CAP_THREAD_TEST_ENDPOINT.cap, (uint64_t) softuser_entry_addr, CAP_THREAD_TEST.cap));
+
+        uint64_t start = __builtin_ia32_rdtsc();
+        for(int i = 0; i < 2000000; i++) {
+            ASSERT_OK(TaskEndpoint_invoke(CAP_THREAD_TEST_ENDPOINT));
+        }
+        uint64_t end = __builtin_ia32_rdtsc();
+        sprintf(buf, "benchmark: %lu cycles per op\n", (end - start) / 2000000);
+        flatmk_debug_puts(buf);
+
+        libcapalloc_release(new_rpt.cap);
     }
 
     ASSERT_OK(TaskEndpoint_invoke(CAP_INIT_RET));

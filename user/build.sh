@@ -11,6 +11,11 @@ cd ../../softuser/echo || exit 1
 cargo xbuild --target ../riscv32-flatmk-softuser.json --release || exit 1
 python3 ../../../tools/gen_bytes.py ./target/riscv32-flatmk-softuser/release/echo ECHO_ELF_BYTES > ../../drivers/benchmark/echo_elf.h || exit 1
 
+echo "Building softuser binary: ipc-return"
+cd ../ipc-return || exit 1
+cargo xbuild --target ../riscv32-flatmk-softuser.json --release || exit 1
+python3 ../../../tools/gen_bytes.py ./target/riscv32-flatmk-softuser/release/ipc-return IPC_RETURN_ELF_BYTES > ../../drivers/benchmark/ipc_return_elf.h || exit 1
+
 echo "Building driver library: libflatrt"
 cd ../../drivers/libflatrt || exit 1
 cargo xbuild --target ../../early/x86_64-flatmk-early.json --release || exit 1
