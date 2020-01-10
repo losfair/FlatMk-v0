@@ -9,7 +9,7 @@ use crate::task::Task;
 use crate::spec::TaskFaultReason;
 use crate::capability::CapabilityInvocation;
 use crate::arch::softuser::*;
-use crate::arch::arch_handle_interrupt;
+use crate::arch::{arch_handle_interrupt, arch_cpu_relax_long};
 use crate::arch::task::TaskRegisters;
 use core::sync::atomic::{AtomicU8, Ordering};
 
@@ -42,9 +42,22 @@ impl Host for KernelHost {
     #[inline(never)]
     fn raise_exception(m: &mut Machine<Self>, mut pc: u32, exc: Exception) -> ! {
         // Execute WFI in the softuser context, before switching to host context.
+        //
+        // Race condition:
+        // - Here we decided that there aren't pending interrupts yet and enter wfi.
+        // - Between the check for pending interrupts and wfi entry, an interrupt happens.
+        // - wfi never returns.
+        //
+        // Before this is fixed, just busy poll.
         if exc == Exception::Wfi {
-            unsafe {
-                arch_softuser_wait_for_interrupt_in_user_context();
+            if false {
+                unsafe {
+                    arch_softuser_wait_for_interrupt_in_user_context();
+                }
+            } else {
+                while m.host.pending_interrupt.load(Ordering::Relaxed) == 0 {
+                    arch_cpu_relax_long();
+                }
             }
             pc += 4;
         }

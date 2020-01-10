@@ -15,3 +15,28 @@ pub use page_table::*;
 pub use exception::arch_handle_interrupt;
 
 global_asm!(include_str!("asm.s"));
+
+pub fn arch_cpu_relax_long() {
+    unsafe {
+        asm!("pause" :::: "volatile");
+        asm!("pause" :::: "volatile");
+        asm!("pause" :::: "volatile");
+        asm!("pause" :::: "volatile");
+        asm!("pause" :::: "volatile");
+        asm!("pause" :::: "volatile");
+        asm!("pause" :::: "volatile");
+        asm!("pause" :::: "volatile");
+        asm!("pause" :::: "volatile");
+        asm!("pause" :::: "volatile");
+        asm!("pause" :::: "volatile");
+        asm!("pause" :::: "volatile");
+        asm!("pause" :::: "volatile");
+        asm!("pause" :::: "volatile");
+        asm!("pause" :::: "volatile");
+        asm!("pause" :::: "volatile");
+        asm!("pause" :::: "volatile");
+        asm!("pause" :::: "volatile");
+        asm!("pause" :::: "volatile");
+        asm!("pause" :::: "volatile");
+    }
+}
