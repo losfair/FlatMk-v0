@@ -93,10 +93,9 @@ enum RootPageTableRequest {
 enum RootTaskCapRequest {
 	RootTaskCapRequest_X86IoPort = 0,
 	RootTaskCapRequest_Mmio = 1,
-	RootTaskCapRequest_MakeIdle = 2,
-	RootTaskCapRequest_Interrupt = 3,
-	RootTaskCapRequest_DebugPutchar = 4,
-	RootTaskCapRequest_GetBootParameter = 5,
+	RootTaskCapRequest_Interrupt = 2,
+	RootTaskCapRequest_DebugPutchar = 3,
+	RootTaskCapRequest_GetBootParameter = 4,
 };
 
 // Reason of a fault from a user-mode task.
@@ -617,13 +616,6 @@ static inline int64_t RootTask_get_boot_parameter(
 	uint64_t out_len
 ) {
 	return cptr_invoke(me.cap, RootTaskCapRequest_GetBootParameter, key, out, out_len);
-}
-
-// Make the current task an idle task. Never returns if succeeded.
-static inline int64_t RootTask_make_idle(
-	struct RootTask me
-) {
-	return cptr_invoke(me.cap, RootTaskCapRequest_MakeIdle, 0ll, 0ll, 0ll);
 }
 
 // Creates a `DebugPutchar` endpoint.

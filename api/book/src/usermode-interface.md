@@ -125,10 +125,9 @@ A request to the root capability.
 | ------- | ----- |
 | X86IoPort | 0 |
 | Mmio | 1 |
-| MakeIdle | 2 |
-| Interrupt | 3 |
-| DebugPutchar | 4 |
-| GetBootParameter | 5 |
+| Interrupt | 2 |
+| DebugPutchar | 3 |
+| GetBootParameter | 4 |
 
 - `TaskFaultReason`
 
@@ -561,13 +560,6 @@ Reads the boot parameter of key `key`. Returns 0 on succeed, negative error code
 | key | i64 | The key to the requested parameter. Is of type `BootParameterKey`. |
 | out | u64 | Output address. |
 | out_len | u64 | Length of the memory block `out` points to. |
-
-- `make_idle`
-
-Make the current task an idle task. Never returns if succeeded.
-
-| Argument | Kind | Description
-| -------- | ---- | ----------- |
 
 - `new_debug_putchar`
 

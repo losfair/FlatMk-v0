@@ -111,10 +111,9 @@ pub enum RootPageTableRequest {
 pub enum RootTaskCapRequest {
 	X86IoPort = 0,
 	Mmio = 1,
-	MakeIdle = 2,
-	Interrupt = 3,
-	DebugPutchar = 4,
-	GetBootParameter = 5,
+	Interrupt = 2,
+	DebugPutchar = 3,
+	GetBootParameter = 4,
 }
 
 /// Reason of a fault from a user-mode task.

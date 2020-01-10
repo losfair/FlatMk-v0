@@ -55,10 +55,9 @@ description = "A request to the root capability."
 [enums.RootTaskCapRequest.variants]
 X86IoPort = 0
 Mmio = 1
-MakeIdle = 2
-Interrupt = 3
-DebugPutchar = 4
-GetBootParameter = 5
+Interrupt = 2
+DebugPutchar = 3
+GetBootParameter = 4
 
 [enums.BootParameterKey]
 description = "A key to a boot parameter."
@@ -757,13 +756,6 @@ in_args = [
 out_args = [
     { EnumVariant = { enum_name = "RootTaskCapRequest", variant = "DebugPutchar" } },
     { Input = "out" },
-]
-
-[types.RootTask.methods.make_idle]
-description = "Make the current task an idle task. Never returns if succeeded."
-in_args = []
-out_args = [
-    { EnumVariant = { enum_name = "RootTaskCapRequest", variant = "MakeIdle" } },
 ]
 
 [types.RootTask.methods.get_boot_parameter]

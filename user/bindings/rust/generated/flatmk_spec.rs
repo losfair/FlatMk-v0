@@ -111,10 +111,9 @@ pub enum RootPageTableRequest {
 pub enum RootTaskCapRequest {
 	X86IoPort = 0,
 	Mmio = 1,
-	MakeIdle = 2,
-	Interrupt = 3,
-	DebugPutchar = 4,
-	GetBootParameter = 5,
+	Interrupt = 2,
+	DebugPutchar = 3,
+	GetBootParameter = 4,
 }
 
 /// Reason of a fault from a user-mode task.
@@ -683,13 +682,6 @@ impl RootTask {
 		out_len: u64,
 	) -> i64 {
 		self.cap.call(RootTaskCapRequest::GetBootParameter as i64, key, out as i64, out_len as i64, )
-	}
-
-	/// Make the current task an idle task. Never returns if succeeded.
-	pub unsafe fn make_idle(
-		&self,
-	) -> i64 {
-		self.cap.call(RootTaskCapRequest::MakeIdle as i64, 0i64, 0i64, 0i64, )
 	}
 
 	/// Creates a `DebugPutchar` endpoint.
