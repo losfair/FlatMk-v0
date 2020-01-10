@@ -166,6 +166,7 @@ pub struct TlsIndirect {
     pub user_stack: u64,
     pub context: u64,
     pub(super) hlt: u64,
+    #[cfg(feature = "x86_pcid")]
     pub(super) pcid2pto: Pcid2pto,
     scheduler: UnsafeCell<Scheduler>,
 }
@@ -178,6 +179,7 @@ impl TlsIndirect {
             user_stack: 0,
             context: 0,
             hlt: 0,
+            #[cfg(feature = "x86_pcid")]
             pcid2pto: [0; 4096],
             scheduler: UnsafeCell::new(Scheduler::new()),
         }
