@@ -246,11 +246,18 @@ impl AsLevel<Page, 512> for PageTableEntry {
     }
 }
 
-pub unsafe fn arch_set_current_page_table_with_pcid(addr: PhysAddr, pcid: u64) {
+pub unsafe fn arch_set_current_page_table_with_pcid(addr: PhysAddr, _pcid: u64) {
     let addr = addr.0 & !0xfffu64;
-    let pcid = pcid & 0xfffu64;
-    let value = addr | pcid;
-    asm!("mov $0, %cr3" :: "r" (value) : "memory");
+    #[cfg(feature = "x86_pcid")]
+    {
+        let pcid = _pcid & 0xfffu64;
+        let value = addr | pcid;
+        asm!("mov $0, %cr3" :: "r" (value) : "memory");
+    }
+    #[cfg(not(feature = "x86_pcid"))]
+    {
+        asm!("mov $0, %cr3" :: "r" (addr) : "memory");
+    }
 }
 
 pub fn arch_get_current_page_table_with_pcid() -> (PhysAddr, u64) {
@@ -264,16 +271,27 @@ pub fn arch_get_current_page_table_with_pcid() -> (PhysAddr, u64) {
     )
 }
 
-pub unsafe fn arch_with_pcid_array<F: FnOnce(&mut Pcid2pto) -> R, R>(f: F) -> R {
-    f(&mut (*super::task::get_indirect_tls()).pcid2pto)
+#[cfg(feature = "x86_pcid")]
+pub unsafe fn arch_with_pcid_array<F: FnOnce(Option<&mut Pcid2pto>) -> R, R>(f: F) -> R {
+    f(Some(&mut (*super::task::get_indirect_tls()).pcid2pto))
 }
 
+#[cfg(not(feature = "x86_pcid"))]
+pub unsafe fn arch_with_pcid_array<F: FnOnce(Option<&mut Pcid2pto>) -> R, R>(f: F) -> R {
+    f(None)
+}
+
+#[cfg(feature = "x86_pcid")]
 pub unsafe fn arch_flush_pcid(pcid: u64) {
     let ty: u64 = 1; // single-context invalidation
     let memarg: [u64; 2] = [pcid, 0];
     asm!(
         "invpcid ($1), $0" :: "r"(ty), "r"(&memarg) : "memory"
     );
+}
+
+#[cfg(not(feature = "x86_pcid"))]
+pub unsafe fn arch_flush_pcid(_pcid: u64) {
 }
 
 #[inline]

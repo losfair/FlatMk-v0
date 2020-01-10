@@ -17,6 +17,7 @@ unsafe fn enable_global_flag() {
 }
 
 /// Enables PCID.
+#[cfg(feature = "x86_pcid")]
 unsafe fn enable_pcid() {
     asm!(r#"
         mov %cr4, %rax
@@ -38,7 +39,12 @@ unsafe fn _enable_fsgsbase() {
 pub unsafe fn arch_early_init() {
     enable_sse();
     enable_global_flag();
-    enable_pcid();
+
+    #[cfg(feature = "x86_pcid")]
+    {
+        enable_pcid();
+    }
+
     //enable_fsgsbase();
 
     super::exception::init_gdt();

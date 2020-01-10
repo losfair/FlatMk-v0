@@ -18,6 +18,9 @@ lazy_static = { version = "1.4", features = ["spin_no_std"] }
 bit_field = { version = "0.10" }
 flatrv = { path = "../../FlatRv" }
 
+[features]
+x86_pcid = []
+
 [package.metadata.bootloader]
 kernel-stack-address = "0xFFFFFF8000000000"
 kernel-stack-size = 512

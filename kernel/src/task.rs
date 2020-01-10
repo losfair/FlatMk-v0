@@ -730,10 +730,12 @@ pub unsafe fn switch_to(
 
         // Update PCID cache in case of PTID/PCID hash collision.
         arch_with_pcid_array(|pcids| {
-            if pcids[target_pcid as usize] != ptid {
-                pcids[target_pcid as usize] = ptid;
-                arch_flush_pcid(target_pcid);
-                println!("flush pcid: {}", target_pcid);
+            if let Some(pcids) = pcids {
+                if pcids[target_pcid as usize] != ptid {
+                    pcids[target_pcid as usize] = ptid;
+                    arch_flush_pcid(target_pcid);
+                    println!("flush pcid: {}", target_pcid);
+                }
             }
         })
     }
