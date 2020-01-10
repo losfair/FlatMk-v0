@@ -453,6 +453,17 @@ impl Task {
                 Err(e) => return e,
             };
 
+            // Here we use `borrow_current` to avoid a reference-counted clone.
+            // But this is very unsafe and `prev` should not be used after `switch_to`.
+            let prev = unsafe {
+                Task::borrow_current()
+            };
+
+            // Interrupt handler cannot invoke a `Call`-type IPC.
+            if direction == EntryDirection::Push && prev.interrupt_blocked.load(Ordering::Relaxed) != 0 {
+                return KernelError::InvalidState;
+            }
+
             // Block interrupt on this task.
             if let IpcReason::Interrupt(index) = reason {
                 match task.block_interrupt(index) {
@@ -462,12 +473,6 @@ impl Task {
                     }
                 }
             }
-
-            // Here we use `borrow_current` to avoid an reference-counted clone.
-            // But this is very unsafe and `prev` should not be used after `switch_to`.
-            let prev = unsafe {
-                Task::borrow_current()
-            };
 
             // Attempts to block IPC for the target task, before switching to it.
             if direction == EntryDirection::Push {
