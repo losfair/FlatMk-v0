@@ -132,22 +132,6 @@ impl TaskRegisters {
         &mut self.rip
     }
 
-    /// Loads part of the register set that are not touched by the kernel
-    /// but can be used by the userspace.
-    pub fn lazy_read(&mut self) {
-        unsafe {
-            self.fs_base = FsBase::MSR.read();
-            self.gs_base = KernelGsBase::MSR.read();
-        }
-    }
-
-    pub fn lazy_write(&self) {
-        unsafe {
-            FsBase::MSR.write(self.fs_base);
-            KernelGsBase::MSR.write(self.gs_base);
-        }
-    }
-
     /// Call `f` on `self`, but preserve critical registers that are unsafe to modify from userspace.
     pub fn preserve_critical_registers<F: FnOnce(&mut Self) -> R, R>(&mut self, f: F) -> R {
         let rflags = self.rflags;
@@ -325,6 +309,12 @@ pub unsafe fn arch_enter_user_mode_syscall(registers: *const TaskRegisters) -> !
 
     asm!(
         r#"
+            swapgs
+            mov 152(%rsi), %rax
+            wrfsbase %rax // fs
+            mov 144(%rsi), %rax
+            wrgsbase %rax // gs
+
             mov 136(%rsi), %r11 // rflags
             mov 128(%rsi), %rcx // rip
 
@@ -344,7 +334,6 @@ pub unsafe fn arch_enter_user_mode_syscall(registers: *const TaskRegisters) -> !
             mov 120(%rsi), %rbp
             mov 112(%rsi), %rsp
             mov 96(%rsi), %rsi
-            swapgs
             sysretq
         "# : :
             "{rsi}"(registers)
@@ -356,6 +345,12 @@ pub unsafe fn arch_enter_user_mode_syscall(registers: *const TaskRegisters) -> !
 unsafe fn iret_with_selector(registers: *const TaskRegisters, code_sel: u64, data_sel: u64) -> ! {
     asm!(
         r#"
+            swapgs
+            mov 152(%rsi), %rax
+            wrfsbase %rax // fs
+            mov 144(%rsi), %rax
+            wrgsbase %rax // gs
+
             pushq %rcx // ds
             pushq %rcx // ss
             pushq 112(%rsi) // rsp
@@ -377,7 +372,6 @@ unsafe fn iret_with_selector(registers: *const TaskRegisters, code_sel: u64, dat
             mov 104(%rsi), %rdi
             mov 120(%rsi), %rbp
             mov 96(%rsi), %rsi
-            swapgs
             iretq
         "# : :
             "{rsi}"(registers),

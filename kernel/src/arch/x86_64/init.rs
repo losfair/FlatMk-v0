@@ -27,10 +27,10 @@ unsafe fn enable_pcid() {
 }
 
 /// Enables fsgsbase instructions.
-unsafe fn _enable_fsgsbase() {
+unsafe fn enable_fsgsbase() {
     asm!(r#"
         mov %cr4, %rax
-        or $$0x8000, %rax // CR4.FSGSBASE
+        or $$0x10000, %rax // CR4.FSGSBASE
         mov %rax, %cr4
     "# ::: "rax" : "volatile");
 }
@@ -45,7 +45,7 @@ pub unsafe fn arch_early_init() {
         enable_pcid();
     }
 
-    //enable_fsgsbase();
+    enable_fsgsbase();
 
     super::exception::init_gdt();
     super::exception::init_idt();

@@ -326,7 +326,6 @@ fn invoke_cap_basic_task(
             let new_value = invocation.arg(2)? as u64;
             if task.is_current() {
                 *invocation.registers.field_mut(field_index)? = new_value;
-                invocation.registers.lazy_write();
             } else {
                 // Setting register for a remote task.
                 // Data race here, but this is what you want anyway :)

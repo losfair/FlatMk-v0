@@ -22,9 +22,16 @@ arch_lowlevel_syscall_entry:
     sub $8 * 6, %rsp # softuser_args
     pushq $0 # has_softuser_args = false
 
-    # `fs` and `gs` are lazily read on task switch.
-    pushq $0 # fs
-    pushq $0 # gs
+    sub $24, %rsp
+    mov %rax, (%rsp)
+    swapgs
+    rdgsbase %rax
+    swapgs
+    mov %rax, 8(%rsp) # gs
+    rdfsbase %rax
+    mov %rax, 16(%rsp) # fs
+    pop %rax
+
     push %r11 # rflags
     push %rcx # rip
     push %rbp # rbp

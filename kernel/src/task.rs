@@ -708,7 +708,6 @@ pub unsafe fn switch_to(
     if let Some(old_regs) = old_registers {
         let current_regs = &mut (*Task::borrow_current().local_state.unsafe_deref()).registers;
         *current_regs = old_regs.clone();
-        current_regs.lazy_read();
     }
 
     // We are already on the target task.
@@ -724,10 +723,6 @@ pub unsafe fn switch_to(
     task.running
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .map_err(|_| KernelError::InvalidState)?;
-
-    // Here it's safe to dereference local state because the current thread has taken "ownership"
-    // of the task by setting `running` to true.
-    (*task.local_state.unsafe_deref()).registers.lazy_write();
 
     let prev = set_current_task(task);
 

@@ -121,13 +121,16 @@ macro_rules! interrupt {
         #[naked]
         unsafe extern "C" fn $name() {
             asm!(concat!(r#"
-                swapgs
-
                 push %rbp
                 mov %rsp, %rbp
 
-                pushq $$0 // fs
-                pushq $$0 // gs
+                sub $$24, %rsp
+                mov %rax, (%rsp)
+                rdgsbase %rax
+                mov %rax, 8(%rsp) // gs
+                rdfsbase %rax
+                mov %rax, 16(%rsp) // fs
+                pop %rax
                 push 24(%rbp) // rflags
                 push 8(%rbp) // rip
                 push 0(%rbp) // rbp
@@ -149,6 +152,7 @@ macro_rules! interrupt {
 
                 leaq 8(%rbp), %rdi
                 mov %rsp, %rsi
+                swapgs
                 call "#, stringify!($internal_name), r#"
                 ud2
             "#) :::: "volatile");
@@ -166,13 +170,16 @@ macro_rules! interrupt_with_code {
         #[naked]
         unsafe extern "C" fn $name() {
             asm!(concat!(r#"
-                swapgs
-
                 push %rbp
                 mov %rsp, %rbp
 
-                pushq $$0 // fs
-                pushq $$0 // gs
+                sub $$24, %rsp
+                mov %rax, (%rsp)
+                rdgsbase %rax
+                mov %rax, 8(%rsp) // gs
+                rdfsbase %rax
+                mov %rax, 16(%rsp) // fs
+                pop %rax
                 push 32(%rbp) // rflags
                 push 16(%rbp) // rip
                 push 0(%rbp) // rbp
@@ -195,6 +202,7 @@ macro_rules! interrupt_with_code {
                 leaq 16(%rbp), %rdi
                 mov %rsp, %rsi
                 mov 8(%rbp), %rdx // error code
+                swapgs
                 call "#, stringify!($internal_name), r#"
                 ud2
             "#) :::: "volatile");
