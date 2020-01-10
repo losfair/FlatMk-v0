@@ -36,6 +36,9 @@ pub static PUTCHAR: spec::DebugPutchar = unsafe { spec::DebugPutchar::new(spec::
 /// Temporary capability buffer.
 pub static BUFFER: spec::CPtr = unsafe { spec::CPtr::new(0x05) };
 
+/// Idle task.
+pub static IDLE_TASK: spec::BasicTask = unsafe { spec::BasicTask::new(spec::CPtr::new(0x10)) };
+
 define_task!(shmem, 0x200);
 pub static SHMEM_CREATE: spec::TaskEndpoint = unsafe { spec::TaskEndpoint::new(spec::CPtr::new(0x210)) };
 

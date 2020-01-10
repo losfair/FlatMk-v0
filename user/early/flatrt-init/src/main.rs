@@ -50,10 +50,14 @@ pub unsafe extern "C" fn _start() -> ! {
 #[no_mangle]
 unsafe extern "C" fn init_start() -> ! {
     caps::initialize_static_caps();
+    debug!("init: Started.");
 
     ELF_TEMP_MAP_BASE.make_leaf(&caps::RPT).expect("Cannot make leaf entry for ELF_TEMP_MAP_BASE");
 
     flatrt_allocator::init(HEAP_START, caps::RPT);
+
+    start_idle();
+    debug!("init: Idle task started.");
 
     start_shmem();
 
@@ -70,16 +74,35 @@ unsafe extern "C" fn init_start() -> ! {
     start_driver_sequencer_linux();
     debug!("init: All drivers started.");
 
-    loop {
-        // FIXME: Workaround for a broken kernel invariant when no task is available to switch to.
-        spec::to_result(spec::CAP_TRIVIAL_SYSCALL.sched_yield()).unwrap();
-    }
+    spec::CAP_TRIVIAL_SYSCALL.sched_drop();
+    unreachable!()
 }
 
 #[panic_handler]
 fn on_panic(info: &core::panic::PanicInfo) -> ! {
     debug!("panic(): {:#?}", info);
     loop {}
+}
+
+/// Starts an idle task.
+unsafe fn start_idle() {
+    unsafe extern "C" fn __enter_idle() {
+        spec::CAP_TRIVIAL_SYSCALL.softuser_enter(&RVCODE as *const _ as u64);
+        loop {}
+    }
+    static mut STACK: [u64; 64] = [0; 64];
+    static RVCODE: [u32; 2] = [
+        0x10500073, // wfi
+        0xffdff06f, // j
+    ];
+
+    spec::to_result(caps::ME.fetch_shallow_clone(caps::IDLE_TASK.cptr())).unwrap();
+
+    spec::to_result(caps::IDLE_TASK.set_register(spec::SP_INDEX, &mut STACK as *mut _ as u64 + 512)).unwrap();
+    spec::to_result(caps::IDLE_TASK.set_register(spec::PC_INDEX, __enter_idle as u64)).unwrap();
+
+    spec::to_result(caps::IDLE_TASK.fetch_task_endpoint(caps::BUFFER.index() | (1u64 << 63), 0, 0)).unwrap();
+    spec::to_result(spec::CAP_TRIVIAL_SYSCALL.sched_submit(&spec::TaskEndpoint::new(caps::BUFFER))).unwrap();
 }
 
 /// Loads an ELF image for a task.
