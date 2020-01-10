@@ -46,6 +46,8 @@ PutFaultHandler = 15
 GetAllRegisters = 16
 SetAllRegisters = 17
 SetSyscallDelegated = 18
+GetAllSoftuserRegisters = 19
+SetAllSoftuserRegisters = 20
 
 [enums.RootTaskCapRequest]
 description = "A request to the root capability."
@@ -503,6 +505,30 @@ in_args = [
 ]
 out_args = [
     { EnumVariant = { enum_name = "BasicTaskRequest", variant = "SetAllRegisters" } },
+    { Input = "ptr" },
+    { Input = "len" },
+]
+
+[types.BasicTask.methods.get_all_softuser_registers]
+description = "Gets all softuser registers of this task."
+in_args = [
+    { name = "ptr", kind = "U64", description = "Pointer to write to." },
+    { name = "len", kind = "U64", description = "Length of the memory `ptr` points to." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "BasicTaskRequest", variant = "GetAllSoftuserRegisters" } },
+    { Input = "ptr" },
+    { Input = "len" },
+]
+
+[types.BasicTask.methods.set_all_softuser_registers]
+description = "Sets all softuser registers of this task."
+in_args = [
+    { name = "ptr", kind = "U64", description = "Pointer to read from." },
+    { name = "len", kind = "U64", description = "Length of the memory `ptr` points to." },
+]
+out_args = [
+    { EnumVariant = { enum_name = "BasicTaskRequest", variant = "SetAllSoftuserRegisters" } },
     { Input = "ptr" },
     { Input = "len" },
 ]

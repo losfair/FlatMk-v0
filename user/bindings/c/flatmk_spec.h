@@ -21,6 +21,8 @@ enum BasicTaskRequest {
 	BasicTaskRequest_GetAllRegisters = 16,
 	BasicTaskRequest_SetAllRegisters = 17,
 	BasicTaskRequest_SetSyscallDelegated = 18,
+	BasicTaskRequest_GetAllSoftuserRegisters = 19,
+	BasicTaskRequest_SetAllSoftuserRegisters = 20,
 };
 
 // A key to a boot parameter.
@@ -305,6 +307,17 @@ static inline int64_t BasicTask_get_all_registers(
 	return cptr_invoke(me.cap, BasicTaskRequest_GetAllRegisters, ptr, len, 0ll);
 }
 
+// Gets all softuser registers of this task.
+static inline int64_t BasicTask_get_all_softuser_registers(
+	struct BasicTask me,
+	// Pointer to write to.
+	uint64_t ptr,
+	// Length of the memory `ptr` points to.
+	uint64_t len
+) {
+	return cptr_invoke(me.cap, BasicTaskRequest_GetAllSoftuserRegisters, ptr, len, 0ll);
+}
+
 // Returns whether there exists weak references to this task.
 static inline int64_t BasicTask_has_weak(
 	struct BasicTask me
@@ -391,6 +404,17 @@ static inline int64_t BasicTask_set_all_registers(
 	uint64_t len
 ) {
 	return cptr_invoke(me.cap, BasicTaskRequest_SetAllRegisters, ptr, len, 0ll);
+}
+
+// Sets all softuser registers of this task.
+static inline int64_t BasicTask_set_all_softuser_registers(
+	struct BasicTask me,
+	// Pointer to read from.
+	uint64_t ptr,
+	// Length of the memory `ptr` points to.
+	uint64_t len
+) {
+	return cptr_invoke(me.cap, BasicTaskRequest_SetAllSoftuserRegisters, ptr, len, 0ll);
 }
 
 // Sets a saved register of this task. Calling this method on a running task has undefined result.

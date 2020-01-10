@@ -29,6 +29,8 @@ A request to a BasicTask/BasicTaskWeak endpoint.
 | GetAllRegisters | 16 |
 | SetAllRegisters | 17 |
 | SetSyscallDelegated | 18 |
+| GetAllSoftuserRegisters | 19 |
+| SetAllSoftuserRegisters | 20 |
 
 - `BootParameterKey`
 
@@ -262,6 +264,15 @@ Gets all registers of this task.
 | ptr | u64 | Pointer to write to. |
 | len | u64 | Length of the memory `ptr` points to. |
 
+- `get_all_softuser_registers`
+
+Gets all softuser registers of this task.
+
+| Argument | Kind | Description
+| -------- | ---- | ----------- |
+| ptr | u64 | Pointer to write to. |
+| len | u64 | Length of the memory `ptr` points to. |
+
 - `has_weak`
 
 Returns whether there exists weak references to this task.
@@ -335,6 +346,15 @@ Puts an endpoint to a root page table in the current task's capability set into 
 - `set_all_registers`
 
 Sets all registers of this task.
+
+| Argument | Kind | Description
+| -------- | ---- | ----------- |
+| ptr | u64 | Pointer to read from. |
+| len | u64 | Length of the memory `ptr` points to. |
+
+- `set_all_softuser_registers`
+
+Sets all softuser registers of this task.
 
 | Argument | Kind | Description
 | -------- | ---- | ----------- |

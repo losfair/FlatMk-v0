@@ -23,6 +23,8 @@ pub enum BasicTaskRequest {
 	GetAllRegisters = 16,
 	SetAllRegisters = 17,
 	SetSyscallDelegated = 18,
+	GetAllSoftuserRegisters = 19,
+	SetAllSoftuserRegisters = 20,
 }
 
 /// A key to a boot parameter.

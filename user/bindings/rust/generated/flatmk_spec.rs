@@ -23,6 +23,8 @@ pub enum BasicTaskRequest {
 	GetAllRegisters = 16,
 	SetAllRegisters = 17,
 	SetSyscallDelegated = 18,
+	GetAllSoftuserRegisters = 19,
+	SetAllSoftuserRegisters = 20,
 }
 
 /// A key to a boot parameter.
@@ -259,6 +261,15 @@ impl BasicTask {
 		self.cap.call(BasicTaskRequest::GetAllRegisters as i64, ptr as i64, len as i64, 0i64, )
 	}
 
+	/// Gets all softuser registers of this task.
+	pub unsafe fn get_all_softuser_registers(
+		&self,
+		ptr: u64,
+		len: u64,
+	) -> i64 {
+		self.cap.call(BasicTaskRequest::GetAllSoftuserRegisters as i64, ptr as i64, len as i64, 0i64, )
+	}
+
 	/// Returns whether there exists weak references to this task.
 	pub unsafe fn has_weak(
 		&self,
@@ -336,6 +347,15 @@ impl BasicTask {
 		len: u64,
 	) -> i64 {
 		self.cap.call(BasicTaskRequest::SetAllRegisters as i64, ptr as i64, len as i64, 0i64, )
+	}
+
+	/// Sets all softuser registers of this task.
+	pub unsafe fn set_all_softuser_registers(
+		&self,
+		ptr: u64,
+		len: u64,
+	) -> i64 {
+		self.cap.call(BasicTaskRequest::SetAllSoftuserRegisters as i64, ptr as i64, len as i64, 0i64, )
 	}
 
 	/// Sets a saved register of this task. Calling this method on a running task has undefined result.
