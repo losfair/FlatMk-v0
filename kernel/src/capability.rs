@@ -525,6 +525,29 @@ fn invoke_cap_basic_task(
             
             Ok(0)
         }
+        BasicTaskRequest::GetAllSoftuserRegisters => {
+            let ptr = UserAddr::new(invocation.arg(1)? as u64)?;
+            let len = invocation.arg(2)? as u64;
+            if len != core::mem::size_of::<[u32; 32]>() as u64 {
+                return Err(KernelError::InvalidArgument);
+            }
+            copy_to_user_typed(core::slice::from_ref(unsafe {
+                task.local_state().softuser_context.gregs_mut()
+            }), ptr)?;
+            Ok(0)
+        }
+        BasicTaskRequest::SetAllSoftuserRegisters => {
+            let ptr = UserAddr::new(invocation.arg(1)? as u64)?;
+            let len = invocation.arg(2)? as u64;
+            if len != core::mem::size_of::<[u32; 32]>() as u64 {
+                return Err(KernelError::InvalidArgument);
+            }
+            unsafe {
+                copy_from_user_typed(ptr, core::slice::from_mut(task.local_state().softuser_context.gregs_mut()))?;
+            }
+            
+            Ok(0)
+        }
     }
 }
 

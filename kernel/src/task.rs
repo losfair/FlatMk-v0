@@ -383,9 +383,11 @@ impl Task {
         let endpoint = match *current.fault_handler.lock() {
             Some(ref x) => x.clone(),
             None => {
+                let softuser_ctx = unsafe { &mut current.local_state().softuser_context };
+                let pc = *softuser_ctx.pc_mut();
                 panic!(
-                    "Task::raise_fault: Got fault `{:?}` with code: {:016x} but no handler was registered.\nRegisters: {:#?}\nSoftuser registers: {:#?}",
-                    fault, code, old_registers, unsafe { current.local_state().softuser_context.gregs_mut() },
+                    "Task::raise_fault: Got fault `{:?}` with code: {:016x} but no handler was registered.\nRegisters: {:#?}\nSoftuser registers: {:#?}\nSoftuser PC: {:08x}",
+                    fault, code, old_registers, *softuser_ctx.gregs_mut(), pc,
                 )
             },
         };
@@ -517,16 +519,27 @@ impl Task {
                     // Set registers.
                     // Here we can dereference into local state because `task` is the current task.
                     {
-                        let regs = unsafe {
-                            &mut (*task.local_state.unsafe_deref()).registers
+                        let local_state = unsafe {
+                            task.local_state()
                         };
-                        *regs.pc_mut() = entrypoint.pc;
-                        *regs.usermode_arg_mut(0).unwrap() = entrypoint.user_context;
-                        *regs.usermode_arg_mut(1).unwrap() = prev.get_tag(task.id).unwrap_or(0);
+                        if local_state.softuser_enabled {
+                            *local_state.softuser_context.pc_mut() = entrypoint.pc as u32;
+                            local_state.softuser_context.set_usermode_arg_64(0, entrypoint.user_context);
+                            local_state.softuser_context.set_usermode_arg_64(1, prev.get_tag(task.id).unwrap_or(0));
+                            if let IpcReason::Fault(fault, code) = reason {
+                                local_state.softuser_context.set_usermode_arg_64(2, fault as i64 as u64);
+                                local_state.softuser_context.set_usermode_arg_64(3, code);
+                            }
+                        } else {
+                            let regs = &mut local_state.registers;
+                            *regs.pc_mut() = entrypoint.pc;
+                            *regs.usermode_arg_mut(0).unwrap() = entrypoint.user_context;
+                            *regs.usermode_arg_mut(1).unwrap() = prev.get_tag(task.id).unwrap_or(0);
 
-                        if let IpcReason::Fault(fault, code) = reason {
-                            *regs.usermode_arg_mut(2).unwrap() = fault as i64 as u64;
-                            *regs.usermode_arg_mut(3).unwrap() = code;
+                            if let IpcReason::Fault(fault, code) = reason {
+                                *regs.usermode_arg_mut(2).unwrap() = fault as i64 as u64;
+                                *regs.usermode_arg_mut(3).unwrap() = code;
+                            }
                         }
                     }
 

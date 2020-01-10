@@ -163,6 +163,18 @@ impl SoftuserContext {
         &mut self.machine.gregs
     }
 
+    pub fn set_usermode_arg_64(&mut self, i: usize, val: u64) {
+        let (lo, hi): (usize, usize) = match i {
+            0 => (10, 11),
+            1 => (12, 13),
+            2 => (14, 15),
+            3 => (16, 17),
+            _ => panic!("SoftuserContext::set_usermode_arg_64: Index out of bounds."),
+        };
+        self.machine.gregs[lo] = val as u32;
+        self.machine.gregs[hi] = (val >> 32) as u32;
+    }
+
     pub fn set_pending_interrupt(&mut self, val: u8) {
         self.machine.host.pending_interrupt.store(val, Ordering::Relaxed);
     }
