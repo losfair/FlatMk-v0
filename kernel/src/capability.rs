@@ -15,7 +15,7 @@ use bit_field::BitField;
 use crate::spec::*;
 use crate::boot::BootParameter_FramebufferInfo;
 
-pub const N_ENDPOINT_SLOTS: usize = 32;
+pub const N_ENDPOINT_SLOTS: usize = 64;
 pub const INVALID_CAP: u64 = core::u64::MAX;
 
 pub static CAPABILITY_TABLE_ID: MtoId = MtoId::new();

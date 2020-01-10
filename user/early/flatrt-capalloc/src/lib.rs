@@ -60,12 +60,12 @@ fn leaf_to_cptr(cptr: u64) -> u64 {
 
 /// Converts a sequential integer to a valid CPtr offset.
 fn canonicalize_cptr_offset(cptr: u64) -> u64 {
-    ((cptr >> 5) << 8) | (cptr & 0b11111)
+    ((cptr >> 6) << 8) | (cptr & 0b111111)
 }
 
 /// Reverse operation of canonicalize_cptr_offset.
 fn uncanonicalize_cptr_offset(cptr: u64) -> u64 {
-    ((cptr >> 8) << 5) | (cptr & 0b11111)
+    ((cptr >> 8) << 6) | (cptr & 0b111111)
 }
 
 /// Allocates a capability pointer.

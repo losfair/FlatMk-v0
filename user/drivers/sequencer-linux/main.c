@@ -16,14 +16,14 @@
 #define PAGE_SIZE 4096ull
 
 _Atomic uint64_t next_linux_task_id = 1;
-_Atomic uint64_t next_cap_index_sequential = (0x1000 >> 8) << 5;
+_Atomic uint64_t next_cap_index_sequential = (0x1000 >> 8) << 6;
 _Atomic uint64_t next_task_page_va = 0x20000000;
 _Atomic uint64_t next_shadow_map_va = 0x600000000000;
 
 const uint64_t elfload_temp_base = 0x1fff0000;
 
 CPtr canonicalize_cap_index(uint64_t x) {
-    return ((x >> 5) << 8) | (x & 0b11111);
+    return ((x >> 6) << 8) | (x & 0b111111);
 }
 
 CPtr acquire_cap() {

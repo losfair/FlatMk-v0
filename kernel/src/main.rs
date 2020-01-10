@@ -72,6 +72,9 @@ pub extern "C" fn kstart(boot_info: &'static BootInfo) -> ! {
     // Early init.
     unsafe {
         println!("Boot info: \n{:#?}", boot_info);
+
+        print_sizes();
+
         boot::set_boot_info(boot_info);
         arch_early_init();
         paging::init();
@@ -89,6 +92,13 @@ pub extern "C" fn kstart(boot_info: &'static BootInfo) -> ! {
     Task::set_pc_for_current(initial_ip);
     println!("Dropping to user mode at {:p}.", initial_ip as *mut u8);
     task::enter_user_mode(StateRestoreMode::Full);
+}
+
+fn print_sizes() {
+    use core::mem::size_of;
+    println!("Size of types:");
+    println!("- Task: {}", size_of::<Task>());
+    println!("- CapabilityEndpointSet: {}", size_of::<CapabilityEndpointSet>());
 }
 
 unsafe fn setup_initial_caps() {
