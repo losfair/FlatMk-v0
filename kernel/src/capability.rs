@@ -594,13 +594,6 @@ fn invoke_cap_root_task(invocation: &CapabilityInvocation) -> KernelResult<i64> 
                 })?;
             Ok(0)
         }
-        RootTaskCapRequest::MakeIdle => {
-            current.idle.store(true, Ordering::SeqCst);
-            drop(current);
-
-            // Use enter_user_mode instead of the fast syscall return routine to enter idle mode.
-            enter_user_mode(StateRestoreMode::Syscall);
-        }
         RootTaskCapRequest::Interrupt => {
             let cptr = CapPtr(invocation.arg(1)? as u64);
             let interrupt_index = invocation.arg(2)? as u8;

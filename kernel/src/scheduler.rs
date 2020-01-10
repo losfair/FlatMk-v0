@@ -8,7 +8,7 @@ use crate::task::{Task, enter_user_mode_with_registers, StateRestoreMode};
 use crate::error::*;
 use core::mem::MaybeUninit;
 use core::ops::{Index, IndexMut};
-use crate::arch::task::{TaskRegisters, wait_for_interrupt};
+use crate::arch::task::{TaskRegisters};
 use core::convert::TryFrom;
 
 /// Number of task pages.
@@ -36,6 +36,7 @@ pub struct Scheduler {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PreviousTaskStateChange {
     Yield,
+    YieldWfi,
     Drop,
 }
 
@@ -52,10 +53,6 @@ struct SchedState {
 
     /// The time that the current task started running at, in nanoseconds.
     runstart_time: u64,
-
-    /// Whether there was a request to drop the current task but had to be deferred because
-    /// the current task is the only runnabletask.
-    pending_drop: bool,
 }
 
 /// Collection of running tasks.
@@ -151,16 +148,12 @@ impl Scheduler {
     /// The tick function.
     /// 
     /// Adds `time_passed_in_ns` to the time counter and if necessary, reschedule.
-    pub fn tick(&mut self, time_passed_in_ns: u64, old_registers: &TaskRegisters, was_wfi: bool) -> ! {
+    pub fn tick(&mut self, time_passed_in_ns: u64, old_registers: &TaskRegisters, wfi: bool) -> ! {
         self.state.current_time = self.state.current_time.checked_add(time_passed_in_ns).expect("Scheduler::tick: Time overflow.");
-        if was_wfi || self.state.current_time - self.state.runstart_time >= MAX_TIME_SLICE {
-            let state_change = if self.state.pending_drop {
-                self.state.pending_drop = false;
-                PreviousTaskStateChange::Drop
-            } else {
-                PreviousTaskStateChange::Yield
-            };
-            self.reschedule(old_registers, state_change);
+        if wfi {
+            self.reschedule(old_registers, PreviousTaskStateChange::YieldWfi);
+        } else if self.state.current_time - self.state.runstart_time >= MAX_TIME_SLICE {
+            self.reschedule(old_registers, PreviousTaskStateChange::Yield);
         } else {
             enter_user_mode_with_registers(StateRestoreMode::Full, old_registers)
         }
@@ -182,101 +175,76 @@ impl Scheduler {
             }
         }
 
-        let mut first_nanosleep_id_seen: Option<u64> = None;
+        let mut lazy_task_enable = false;
 
-        // Place a limit on max retry count to ensure an upper bound on scheduler latency.
-        for _ in 0..64 {
-            if let Some(front) = self.pop() {
-                // We got a task from the run queue. Try switching to it, or retry the loop.
+        let current = Task::current(); // shared, reference-counted `current`.
 
-                if let Ok(front) = KernelObjectRef::try_from(front) {
-                    if front.get_nanosleep_deadline() > self.state.current_time {
-                        let front_id = front.id;
-                        self.push(front.into()).expect("Scheduler::reschedule: Popped a task but cannot push another task.");
-
-                        // A cycle means there are only non-runnable tasks in the queue. Break.
-                        match first_nanosleep_id_seen {
-                            Some(x) => {
-                                if x == front_id {
-                                    break;
-                                }
-                            }
-                            None => {
-                                first_nanosleep_id_seen = Some(front_id);
-                            }
-                        }
-
-                        continue;
-                    }
-                    unsafe {
-                        (*Task::borrow_current().local_state.unsafe_deref()).arch_state.will_switch_out();
-                    }
-
-                    let maybe_prev = unsafe {
-                        crate::task::switch_to(front, Some(old_registers))
-                    };
-                    match maybe_prev {
-                        Ok(Some(prev)) => {
-                            // Save the previous task, update time, and enter user mode.
-                            match previous_change {
-                                PreviousTaskStateChange::Yield => {
-                                    self.push(prev.into()).expect("Scheduler::reschedule: Popped a task but cannot push another task.");
-                                }
-                                PreviousTaskStateChange::Drop => {
-                                    prev.unblock_ipc().expect("Scheduler::reschedule: Cannot unblock IPC for the previous task.");
-                                    drop(prev);
-                                }
-                            }
-                            
-                            self.state.runstart_time = self.state.current_time;
-
-                            unsafe {
-                                (*Task::borrow_current().local_state.unsafe_deref()).arch_state.did_switch_in();
-                            }
-
-                            // Using `enter_user_mode` here because we need to restore the new task's context.
-                            crate::task::enter_user_mode(StateRestoreMode::Full);
-                        }
-                        Ok(None) => {
-                            // Impossible.
-                            unreachable!();
-                        },
-                        Err(_) => {
-                            // Retry,
-                        }
-                    }
-                } else {
-                    // The backing task object is dropped. Retry.
-                }
-            } else {
-                // Nothing to switch to.
-                break;
-            }
+        if previous_change != PreviousTaskStateChange::Drop {
+            self.push(current.clone().into()).unwrap();
+        } else {
+            // FIXME: This is a workaround for `front.id == current.id` never being true
+            // if we didn't do `self.push(...)`.
+            lazy_task_enable = true;
         }
 
-        match previous_change {
-            PreviousTaskStateChange::Yield => {
-                // Nothing can be switched to. Return to the current task.
-                // If even the current task cannot be run (in nanosleep), then enter WFI.
+        for i in 0u64.. {
+            if i == 128 {
+                println!("Warning: High scheduler latency detected.");
+            }
+            let front = self.pop().expect("Scheduler::reschedule: Run queue is empty.");
+            if let Ok(front) = KernelObjectRef::try_from(front) {
+                // A cycle means there are only non-runnable tasks in the queue.
+                // Enable lazy tasks in this case.
+                if front.id == current.id {
+                    lazy_task_enable = true;
+                }
+
+                if !lazy_task_enable && front.get_sched_lazy() {
+                    self.push(front.into()).unwrap();
+                    continue;
+                }
+                if front.get_nanosleep_deadline() > self.state.current_time {
+                    self.push(front.into()).unwrap();
+                    continue;
+                }
                 unsafe {
-                    if Task::borrow_current().get_nanosleep_deadline() > self.state.current_time {
-                        // We need to save the current registers before entering WFI.
-                        let registers = &mut (*Task::borrow_current().local_state.unsafe_deref()).registers;
-                        *registers = old_registers.clone();
-                        registers.lazy_read();
-                        wait_for_interrupt();
-                    } else {
-                        enter_user_mode_with_registers(StateRestoreMode::Full, old_registers);
+                    current.local_state().arch_state.will_switch_out();
+                    crate::task::switch_to(front, Some(old_registers)).expect("Scheduler::reschedule: switch_to() failed.");
+                }
+
+                // The `current` handle now points to the previous task.
+                let prev = current;
+
+                // Lazy flag and IPC blocked flag.
+                match previous_change {
+                    PreviousTaskStateChange::Yield => {
+                        prev.set_sched_lazy(false);
+                    }
+                    PreviousTaskStateChange::YieldWfi => {
+                        prev.set_sched_lazy(true);
+                    }
+                    PreviousTaskStateChange::Drop => {
+                        prev.unblock_ipc().expect("Scheduler::reschedule: Cannot unblock IPC for the previous task.");
                     }
                 }
-            }
-            PreviousTaskStateChange::Drop => {
-                // This task is the only runnable task, but we need to somehow "drop" it.
-                // So just do a WFI to simulate the behavior.
-                self.state.pending_drop = true;
-                wait_for_interrupt();
+
+                // Release refcounted handle to the previous task.
+                drop(prev);
+                
+                self.state.runstart_time = self.state.current_time;
+
+                unsafe {
+                    Task::borrow_current().local_state().arch_state.did_switch_in();
+                }
+
+                // Using `enter_user_mode` here because we need to restore the new task's context.
+                crate::task::enter_user_mode(StateRestoreMode::Full);
+            } else {
+                // The backing task object is dropped. Retry.
             }
         }
+
+        unreachable!()
     }
 
     /// Pops a task from the run queue.

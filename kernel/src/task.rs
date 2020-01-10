@@ -8,7 +8,7 @@ use crate::arch::{
     task::{
         arch_enter_user_mode, arch_enter_user_mode_syscall, arch_get_kernel_tls,
         arch_init_kernel_tls_for_cpu, arch_set_kernel_tls, arch_unblock_interrupt, TaskRegisters,
-        TlsIndirect, wait_for_interrupt,
+        TlsIndirect,
         ArchTaskLocalState,
     },
     Page, PAGE_SIZE,
@@ -72,14 +72,14 @@ pub struct Task {
     /// It is a logic error to have more than one reply endpoints to a same task.
     pub ipc_blocked: AtomicBool,
 
-    /// Indicates that this is an idle task.
-    pub idle: AtomicBool,
-
     /// Indicates whether this task is handling an interrupt.
     pub interrupt_blocked: AtomicU8,
 
     /// Indicates whether syscall is delegated to another task instead of the kernel.
     pub syscall_delegated: AtomicBool,
+
+    /// Whether this task is marked as lazy by the scheduler.
+    pub sched_lazy: AtomicBool,
 
     /// Local state.
     pub local_state: TaskLocalStateWrapper,
@@ -110,6 +110,9 @@ pub struct TaskLocalState {
 
     /// Whether this task is executing softuser code.
     pub softuser_active: bool,
+
+    /// Whether this task is executing a softuser "wfi" instruction.
+    pub wfi: bool,
 }
 
 #[derive(Default)]
@@ -269,7 +272,7 @@ impl Task {
             interrupt_blocked: AtomicU8::new(0),
             ipc_blocked: AtomicBool::new(true),
             syscall_delegated: AtomicBool::new(false),
-            idle: AtomicBool::new(false),
+            sched_lazy: AtomicBool::new(false),
             tags: Mutex::new(Default::default()),
             local_state: Default::default(),
             nanosleep_deadline: AtomicU64::new(0),
@@ -357,7 +360,7 @@ impl Task {
             interrupt_blocked: AtomicU8::new(0),
             ipc_blocked: AtomicBool::new(false),
             syscall_delegated: AtomicBool::new(self.syscall_delegated.load(Ordering::SeqCst)),
-            idle: AtomicBool::new(false),
+            sched_lazy: AtomicBool::new(self.sched_lazy.load(Ordering::Relaxed)),
             tags: Mutex::new(Default::default()),
             local_state: Default::default(),
             nanosleep_deadline: AtomicU64::new(0),
@@ -410,6 +413,14 @@ impl Task {
 
     pub fn set_syscall_delegated(&self, enable: bool) {
         self.syscall_delegated.store(enable, Ordering::Relaxed);
+    }
+
+    pub fn get_sched_lazy(&self) -> bool {
+        self.sched_lazy.load(Ordering::Relaxed)
+    }
+
+    pub fn set_sched_lazy(&self, enable: bool) {
+        self.sched_lazy.store(enable, Ordering::Relaxed);
     }
 
     pub fn get_nanosleep_deadline(&self) -> u64 {
@@ -667,10 +678,6 @@ impl Task {
         }
         None
     }
-
-    pub fn is_idle(&self) -> bool {
-        self.idle.load(Ordering::SeqCst)
-    }
 }
 
 fn hash_ptid_to_pcid(ptid: u64) -> u64 {
@@ -766,9 +773,7 @@ pub fn enter_user_mode_with_registers(mode: StateRestoreMode, registers: &TaskRe
     let task = unsafe {
         Task::borrow_current()
     };
-    if task.is_idle() {
-        wait_for_interrupt();
-    } else if unsafe { task.local_state().softuser_enabled } {
+    if unsafe { task.local_state().softuser_enabled } {
         unsafe {
             task.local_state().softuser_context.enter();
         }

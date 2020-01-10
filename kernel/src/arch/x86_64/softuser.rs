@@ -30,3 +30,11 @@ pub unsafe fn arch_softuser_hostcall_leave() {
         "# :::: "volatile"
     );
 }
+
+pub unsafe fn arch_softuser_wait_for_interrupt_in_user_context() {
+    asm!(
+        r#"
+            hlt
+        "# :::: "volatile"
+    );
+}

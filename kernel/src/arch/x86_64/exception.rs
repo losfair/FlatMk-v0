@@ -1,5 +1,5 @@
 use super::config::*;
-use super::task::{get_hlt, set_hlt, TaskRegisters};
+use super::task::TaskRegisters;
 use crate::serial::with_serial_port;
 use crate::task::{invoke_interrupt, Task, enter_user_mode_with_registers, StateRestoreMode};
 use crate::spec::TaskFaultReason;
@@ -356,8 +356,7 @@ fn handle_external_interrupt(
     registers: &mut TaskRegisters,
     index: u8,
 ) -> ! {
-    let hlt = get_hlt();
-    if !is_user_fault(frame) && hlt == 0 {
+    if !is_user_fault(frame) {
         // Interrupts are enabled in softuser mode, but we cannot preempt out execution until an opcode boundary.
         // So, we just set a flag and let the interpreter check it per cycle.
         //
@@ -373,16 +372,6 @@ fn handle_external_interrupt(
         panic!("External interrupt in kernel mode");
     }
 
-    let maybe_owned_registers: TaskRegisters;
-    let registers: &TaskRegisters = if hlt != 0 {
-        unsafe {
-            set_hlt(0);
-            maybe_owned_registers = (*Task::borrow_current().local_state.unsafe_deref()).registers.clone();
-            &maybe_owned_registers
-        }
-    } else {
-        registers
-    };
     unsafe {
         arch_handle_interrupt(registers, index)
     }
@@ -393,20 +382,25 @@ pub unsafe fn arch_handle_interrupt(
     registers: &TaskRegisters,
     index: u8
 ) -> ! {
+    let wfi = {
+        let state = Task::borrow_current().local_state();
+        if state.wfi {
+            state.wfi = false;
+            true
+        } else {
+            false
+        }
+    };
     match index {
         32 => {
             // Timer interrupt
             super::task::arch_unblock_interrupt(index);
-            (*super::task::arch_get_cpu_scheduler()).tick(1000000, registers, false); // 1 millisecond per tick
+            (*super::task::arch_get_cpu_scheduler()).tick(1000000, registers, wfi); // 1 millisecond per tick
         }
         _ => {
             invoke_interrupt(index, registers);
             // If fails, ignore this interrupt.
-            if Task::borrow_current().is_idle() {
-                super::task::wait_for_interrupt();
-            } else {
-                enter_user_mode_with_registers(StateRestoreMode::Full, registers);
-            }
+            enter_user_mode_with_registers(StateRestoreMode::Full, registers);
         }
     }
 }

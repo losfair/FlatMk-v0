@@ -22,6 +22,7 @@ impl From<Exception> for TaskFaultReason {
             Exception::InvalidMemoryReference => TaskFaultReason::VMAccess,
             Exception::InstructionAddressMisaligned => TaskFaultReason::InvalidOperation,
             Exception::Ebreak => TaskFaultReason::InvalidOperation,
+            Exception::Wfi => panic!("TaskFaultReason::From<Exception>: Wfi should not be converted to TaskFaultReason."),
         }
     }
 }
@@ -39,12 +40,27 @@ struct KernelHost {
 
 impl Host for KernelHost {
     #[inline(never)]
-    fn raise_exception(m: &mut Machine<Self>, pc: u32, exc: Exception) -> ! {
-        unsafe {
-            arch_softuser_hostcall_enter();
-            Task::borrow_current().local_state().softuser_active = false;
+    fn raise_exception(m: &mut Machine<Self>, mut pc: u32, exc: Exception) -> ! {
+        // Execute WFI in the softuser context, before switching to host context.
+        if exc == Exception::Wfi {
+            unsafe {
+                arch_softuser_wait_for_interrupt_in_user_context();
+            }
+            pc += 4;
         }
+
+        let local_state = unsafe {
+            arch_softuser_hostcall_enter();
+            Task::borrow_current().local_state()
+        };
+        local_state.softuser_active = false;
         m.host.pc = pc;
+
+        // Set wfi flag in local state.
+        if exc == Exception::Wfi {
+            local_state.wfi = true;
+        }
+
         unsafe {
             check_and_handle_pending_interrupt(&mut m.host);
         }

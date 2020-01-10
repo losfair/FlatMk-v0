@@ -165,7 +165,6 @@ pub struct TlsIndirect {
     pub kernel_stack: u64,
     pub user_stack: u64,
     pub context: u64,
-    pub(super) hlt: u64,
     #[cfg(feature = "x86_pcid")]
     pub(super) pcid2pto: Pcid2pto,
     scheduler: UnsafeCell<Scheduler>,
@@ -178,7 +177,6 @@ impl TlsIndirect {
             kernel_stack,
             user_stack: 0,
             context: 0,
-            hlt: 0,
             #[cfg(feature = "x86_pcid")]
             pcid2pto: [0; 4096],
             scheduler: UnsafeCell::new(Scheduler::new()),
@@ -251,18 +249,6 @@ pub fn arch_get_kernel_tls() -> u64 {
 /// Sets the kernel thread local storage (TLS) pointer for the current CPU.
 pub unsafe fn arch_set_kernel_tls(value: u64) {
     asm!("mov $0, %gs:24" :: "r"(value) :: "volatile");
-}
-
-pub(super) unsafe fn set_hlt(value: u64) {
-    asm!("mov $0, %gs:32" :: "r"(value) :: "volatile");
-}
-
-pub(super) fn get_hlt() -> u64 {
-    let result: u64;
-    unsafe {
-        asm!("mov %gs:32, $0" : "=r"(result) ::);
-    }
-    result
 }
 
 /// Safely copies a range of memory from userspace.
@@ -435,26 +421,6 @@ pub unsafe fn arch_init_syscall() {
         ((selectors.kernel_code_selector.0 as u64) << 32)
             | ((selectors.kernel_data_selector.0 as u64) << 48),
     );
-}
-
-/// Waits for an interrupt. Never returns because the interrupt handler will return to usermode.
-/// 
-/// Usermode task registers must be saved before calling this.
-pub fn wait_for_interrupt() -> ! {
-    unsafe {
-        set_hlt(1);
-        asm!(
-            r#"
-                mov %gs:8, %rsp // In case we recursively enter wait_for_interrupt without going through ring 3.
-                swapgs
-                sti
-                hlt
-                ud2
-            "# :::: "volatile"
-        );
-    }
-
-    unreachable!()
 }
 
 /// Low-level routine that notifies the hardware interrupt controller an interrupt unblock event.
