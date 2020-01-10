@@ -170,6 +170,7 @@ impl Scheduler {
     pub fn reschedule(&mut self, old_registers: &TaskRegisters, previous_change: PreviousTaskStateChange) -> ! {
         unsafe {
             if Task::borrow_current().is_interrupt_blocked() {
+                println!("Warning: Attempting to reschedule from an interrupt handler.");
                 // We cannot reschedule from within an interrupt handler task.
                 enter_user_mode_with_registers(StateRestoreMode::Full, old_registers);
             }
@@ -209,7 +210,14 @@ impl Scheduler {
                 }
                 unsafe {
                     current.local_state().arch_state.will_switch_out();
-                    crate::task::switch_to(front, Some(old_registers)).expect("Scheduler::reschedule: switch_to() failed.");
+
+                    let regs_to_save = if current.local_state().softuser_enabled {
+                        None
+                    } else {
+                        Some(old_registers)
+                    };
+
+                    crate::task::switch_to(front, regs_to_save).expect("Scheduler::reschedule: switch_to() failed.");
                 }
 
                 // The `current` handle now points to the previous task.
