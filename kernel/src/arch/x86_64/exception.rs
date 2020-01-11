@@ -231,6 +231,9 @@ interrupt_with_code!(
 
 interrupt!(intr_divide_error, __intr_divide_error, frame, registers, {
     if !is_user_fault(frame) {
+        unsafe {
+            asm!("swapgs" :::: "volatile");
+        }
         if fault_try_take_softuser_if_active() {
             // Divide error in softuser mode.
         }
@@ -306,6 +309,9 @@ interrupt_with_code!(
 
         let fault_addr = Cr2::read().as_ptr::<u8>();
         if !is_user_fault(frame) {
+            unsafe {
+                asm!("swapgs" :::: "volatile");
+            }
             if fault_try_take_softuser_if_active() {
                 // A softuser page fault can either happen from within the first 32-bit range, or
                 // at `-1 as u64` (which indicates an invalid opcode).
