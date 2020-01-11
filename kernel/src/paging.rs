@@ -214,12 +214,12 @@ impl PageTableObject {
 
     pub fn map_anonymous(&self, target: UserAddr, prot: UserPteFlags) -> KernelResult<()> {
         target.check_page_alignment()?;
-        let mut page: MaybeUninit<KernelPageRef<Page>> = KernelPageRef::new_uninit()?;
+        let mut page: MaybeUninit<UniqueKernelPageRef<Page>> = UniqueKernelPageRef::new_uninit()?;
         for b in unsafe { (*page.as_mut_ptr()).0.iter_mut() } {
             *b = 0;
         }
         self.0
-            .attach_leaf(target.get(), unsafe { page.assume_init() })?;
+            .attach_leaf(target.get(), unsafe { page.assume_init() }.into())?;
         self.0.lookup_leaf_entry(target.get(), |entry| {
             entry.set_protection(prot);
         })?;

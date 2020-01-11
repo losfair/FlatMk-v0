@@ -2,7 +2,7 @@
 
 use crate::arch;
 use crate::error::*;
-use crate::pagealloc::KernelPageRef;
+use crate::pagealloc::{UniqueKernelPageRef, KernelPageRef};
 use bit_field::BitField;
 use core::marker::PhantomData;
 use core::mem::{ManuallyDrop, MaybeUninit};
@@ -44,7 +44,7 @@ pub struct MultilevelTableObject<
     const START_BIT: u8,
     const TABLE_SIZE: usize,
 > {
-    root: Mutex<KernelPageRef<Level<T, P, TABLE_SIZE>>>,
+    root: Mutex<UniqueKernelPageRef<Level<T, P, TABLE_SIZE>>>,
     id: u64,
     _phantom: PhantomData<L>,
 }
@@ -366,10 +366,10 @@ impl<
         const TABLE_SIZE: usize,
     > MultilevelTableObject<T, P, L, BITS, LEVELS, START_BIT, TABLE_SIZE>
 {
-    fn default_level_table() -> KernelResult<KernelPageRef<Level<T, P, TABLE_SIZE>>> {
+    fn default_level_table() -> KernelResult<UniqueKernelPageRef<Level<T, P, TABLE_SIZE>>> {
         unsafe {
-            let mut table: MaybeUninit<KernelPageRef<Level<T, P, TABLE_SIZE>>> =
-                KernelPageRef::new_uninit()?;
+            let mut table: MaybeUninit<UniqueKernelPageRef<Level<T, P, TABLE_SIZE>>> =
+                UniqueKernelPageRef::new_uninit()?;
             for entry in (*table.as_mut_ptr()).table.iter_mut() {
                 core::ptr::write(entry, P::default());
             }
@@ -400,7 +400,7 @@ impl<
             }
 
             let next_level = Self::default_level_table()?;
-            entry.attach_level(KernelPageRef::into_raw(next_level), false);
+            entry.attach_level(KernelPageRef::into_raw(next_level.into()), false);
 
             Ok(true)
         })?? {}

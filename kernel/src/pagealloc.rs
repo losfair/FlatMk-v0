@@ -8,6 +8,7 @@ use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
+use core::convert::TryFrom;
 
 /// This number is chosen to ensure size_of::<AllocFrame>() == size_of::<Page>() .
 pub const PAGES_PER_ALLOC_FRAME: usize = PAGE_SIZE / size_of::<usize>() - 3;
@@ -107,6 +108,9 @@ unsafe fn pop_physical_page() -> KernelResult<PhysAddr> {
 #[repr(transparent)]
 pub struct KernelPageRef<T>(NonNull<T>);
 
+#[repr(transparent)]
+pub struct UniqueKernelPageRef<T>(KernelPageRef<T>);
+
 unsafe impl<T: Send> Send for KernelPageRef<T> {}
 unsafe impl<T: Sync> Sync for KernelPageRef<T> {}
 
@@ -196,8 +200,49 @@ impl<T> Deref for KernelPageRef<T> {
     }
 }
 
-impl<T> DerefMut for KernelPageRef<T> {
+impl<T> TryFrom<KernelPageRef<T>> for UniqueKernelPageRef<T> {
+    type Error = KernelError;
+
+    fn try_from(that: KernelPageRef<T>) -> KernelResult<Self> {
+        unsafe {
+            let phys = PhysAddr::from_phys_mapped_virt(VirtAddr::from_nonnull(that.0)).unwrap();
+            let metadata = phys.page_metadata().as_nonnull().unwrap();
+            let metadata: &AtomicU64 = metadata.as_ref();
+            if metadata.load(Ordering::Relaxed) != 1 {
+                return Err(KernelError::InvalidState);
+            }
+            Ok(UniqueKernelPageRef(that))
+        }
+    }
+}
+
+impl<T> UniqueKernelPageRef<T> {
+    pub fn new_uninit() -> KernelResult<MaybeUninit<Self>> {
+        KernelPageRef::new_uninit().map(|x| unsafe {
+            core::mem::transmute::<MaybeUninit<KernelPageRef<T>>, MaybeUninit<UniqueKernelPageRef<T>>>(x)
+        })
+    }
+    pub fn as_nonnull(&mut self) -> NonNull<T> {
+        self.0.as_nonnull()
+    }
+}
+
+impl<T> From<UniqueKernelPageRef<T>> for KernelPageRef<T> {
+    fn from(that: UniqueKernelPageRef<T>) -> KernelPageRef<T> {
+        that.0
+    }
+}
+
+impl<T> Deref for UniqueKernelPageRef<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        unsafe { (self.0).0.as_ref() }
+    }
+}
+
+impl<T> DerefMut for UniqueKernelPageRef<T> {
     fn deref_mut(&mut self) -> &mut T {
-        unsafe { self.0.as_mut() }
+        unsafe { (self.0).0.as_mut() }
     }
 }

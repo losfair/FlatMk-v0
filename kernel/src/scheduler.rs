@@ -2,7 +2,7 @@
 
 use crate::arch::PAGE_SIZE;
 use core::mem::size_of;
-use crate::pagealloc::KernelPageRef;
+use crate::pagealloc::{UniqueKernelPageRef, KernelPageRef};
 use crate::kobj::*;
 use crate::task::{Task, enter_user_mode_with_registers, StateRestoreMode};
 use crate::error::*;
@@ -58,7 +58,7 @@ struct SchedState {
 /// Collection of running tasks.
 struct TaskCollection {
     /// Pages that form the run queue.
-    task_pages: [KernelPageRef<TaskPage>; N_TASK_PAGES],
+    task_pages: [UniqueKernelPageRef<TaskPage>; N_TASK_PAGES],
 }
 
 /// A task page.
@@ -104,7 +104,7 @@ impl TaskCollection {
         unsafe {
             let mut uninit: MaybeUninit<TaskCollection> = MaybeUninit::uninit();
             for page in (*uninit.as_mut_ptr()).task_pages.iter_mut() {
-                core::ptr::write(page, KernelPageRef::new(TaskPage::default()).expect("TaskCollection::new: Cannot allocate page."));
+                core::ptr::write(page, UniqueKernelPageRef::try_from(KernelPageRef::new(TaskPage::default()).expect("TaskCollection::new: Cannot allocate page.")).unwrap());
             }
             uninit.assume_init()
         }
