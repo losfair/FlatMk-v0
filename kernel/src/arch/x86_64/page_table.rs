@@ -251,7 +251,7 @@ pub unsafe fn arch_set_current_page_table_with_pcid(addr: PhysAddr, _pcid: u64) 
     #[cfg(feature = "x86_pcid")]
     {
         let pcid = _pcid & 0xfffu64;
-        let value = addr | pcid;
+        let value = addr | pcid | (1u64 << 63);
         asm!("mov $0, %cr3" :: "r" (value) : "memory");
     }
     #[cfg(not(feature = "x86_pcid"))]
@@ -266,7 +266,7 @@ pub fn arch_get_current_page_table_with_pcid() -> (PhysAddr, u64) {
         asm!("mov %cr3, $0" : "=r" (value));
     }
     (
-        PhysAddr(value & !0xfffu64),
+        PhysAddr(value & !0xfffu64 & !(1u64 << 63)),
         value & 0xfffu64
     )
 }
