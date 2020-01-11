@@ -50,7 +50,6 @@ impl EntryFilter for PageTableKernelEntryFilter {
 pub type PageTableMto = MultilevelTableObject<
     Page,
     PageTableEntry,
-    GenericLeafCache,
     PageTableUserEntryFilter,
     PAGE_TABLE_LEVEL_BITS,
     PAGE_TABLE_LEVELS,

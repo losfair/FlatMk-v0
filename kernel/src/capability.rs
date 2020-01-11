@@ -82,7 +82,6 @@ pub struct CapabilitySet(pub CapabilityTable);
 pub type CapabilityTable = MultilevelTableObject<
     CapabilityEndpointSet,
     CapabilityTableNode,
-    GenericLeafCache,
     NullEntryFilter,
     9,
     3,

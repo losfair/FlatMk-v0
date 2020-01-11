@@ -10,63 +10,6 @@ use core::ptr::NonNull;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-pub enum OpaqueCacheElement {}
-
-pub struct GenericLeafCache {
-    inner: [Option<(u64, NonNull<OpaqueCacheElement>)>; 8],
-    next: usize,
-}
-unsafe impl Send for GenericLeafCache {}
-
-impl LeafCache for GenericLeafCache {
-    fn new() -> Self {
-        Self {
-            inner: [None; 8],
-            next: 0,
-        }
-    }
-
-    fn lookup(&mut self, ptr: u64) -> Option<NonNull<OpaqueCacheElement>> {
-        for elem in self.inner.iter() {
-            if let Some(ref elem) = *elem {
-                if elem.0 == ptr {
-                    return Some(elem.1);
-                }
-            }
-        }
-        None
-    }
-
-    fn insert(&mut self, ptr: u64, value: NonNull<OpaqueCacheElement>) {
-        self.inner[self.next] = Some((ptr, value));
-        if self.next + 1 == self.inner.len() {
-            self.next = 0;
-        } else {
-            self.next += 1;
-        }
-    }
-
-    fn invalidate(&mut self, _ptr: u64) {
-        unimplemented!()
-    }
-}
-
-pub trait LeafCache: Sized + Send {
-    /// Creates Self.
-    fn new() -> Self;
-
-    /// Looks up an entry in this cache.
-    ///
-    /// The caller needs to ensure proper cache validation.
-    fn lookup(&mut self, ptr: u64) -> Option<NonNull<OpaqueCacheElement>>;
-
-    /// Inserts an entry.
-    fn insert(&mut self, ptr: u64, value: NonNull<OpaqueCacheElement>);
-
-    /// Invalidates an entry.
-    fn invalidate(&mut self, ptr: u64);
-}
-
 pub trait EntryFilter {
     fn is_valid(depth: u8, index: usize) -> bool;
 }
@@ -95,7 +38,6 @@ impl MtoId {
 pub struct MultilevelTableObject<
     T: Send,
     P: AsLevel<T, TABLE_SIZE> + Send,
-    C: LeafCache,
     L: EntryFilter,
     const BITS: u8,
     const LEVELS: u8,
@@ -103,7 +45,6 @@ pub struct MultilevelTableObject<
     const TABLE_SIZE: usize,
 > {
     root: Mutex<KernelPageRef<Level<T, P, TABLE_SIZE>>>,
-    cache: Mutex<C>,
     id: u64,
     _phantom: PhantomData<L>,
 }
@@ -111,26 +52,24 @@ pub struct MultilevelTableObject<
 unsafe impl<
         T: Send,
         P: AsLevel<T, TABLE_SIZE> + Send,
-        C: LeafCache,
         L: EntryFilter,
         const BITS: u8,
         const LEVELS: u8,
         const START_BIT: u8,
         const TABLE_SIZE: usize,
-    > Send for MultilevelTableObject<T, P, C, L, BITS, LEVELS, START_BIT, TABLE_SIZE>
+    > Send for MultilevelTableObject<T, P, L, BITS, LEVELS, START_BIT, TABLE_SIZE>
 {
 }
 
 unsafe impl<
         T: Send,
         P: AsLevel<T, TABLE_SIZE> + Send,
-        C: LeafCache,
         L: EntryFilter,
         const BITS: u8,
         const LEVELS: u8,
         const START_BIT: u8,
         const TABLE_SIZE: usize,
-    > Sync for MultilevelTableObject<T, P, C, L, BITS, LEVELS, START_BIT, TABLE_SIZE>
+    > Sync for MultilevelTableObject<T, P, L, BITS, LEVELS, START_BIT, TABLE_SIZE>
 {
 }
 
@@ -231,13 +170,12 @@ pub trait AsLevel<T: Send, const TABLE_SIZE: usize>: Sized + Send {
 impl<
         T: Send,
         P: AsLevel<T, TABLE_SIZE> + Send,
-        C: LeafCache,
         L: EntryFilter,
         const BITS: u8,
         const LEVELS: u8,
         const START_BIT: u8,
         const TABLE_SIZE: usize,
-    > Drop for MultilevelTableObject<T, P, C, L, BITS, LEVELS, START_BIT, TABLE_SIZE>
+    > Drop for MultilevelTableObject<T, P, L, BITS, LEVELS, START_BIT, TABLE_SIZE>
 {
     fn drop(&mut self) {
         self.foreach_entry(|depth, _, entry| {
@@ -268,13 +206,12 @@ impl<
 impl<
         T: Send,
         P: AsLevel<T, TABLE_SIZE> + Send,
-        C: LeafCache,
         L: EntryFilter,
         const BITS: u8,
         const LEVELS: u8,
         const START_BIT: u8,
         const TABLE_SIZE: usize,
-    > MultilevelTableObject<T, P, C, L, BITS, LEVELS, START_BIT, TABLE_SIZE>
+    > MultilevelTableObject<T, P, L, BITS, LEVELS, START_BIT, TABLE_SIZE>
 {
     /// Checks that the constant type parameters are correct.
     const fn check() {
@@ -351,19 +288,11 @@ impl<
         cb: F,
     ) -> Option<R> {
         let mut root = self.root.lock();
-        let mut cache = self.cache.lock();
-        if let Some(x) = cache.lookup(ptr) {
-            Some(cb(unsafe { &mut *(x.as_ptr() as *mut P) }))
-        } else {
-            unsafe {
-                root.lookup_leaf_entry::<L2, _, _>(ptr, LEVELS, START_BIT, BITS, |x| {
-                    cache.insert(
-                        ptr,
-                        NonNull::new_unchecked(x as *mut P as *mut OpaqueCacheElement),
-                    );
-                    cb(x)
-                })
-            }
+        unsafe {
+            root.lookup_leaf_entry::<L2, _, _>(ptr, LEVELS, START_BIT, BITS, |x| {
+
+                cb(x)
+            })
         }
     }
 
@@ -430,13 +359,12 @@ impl<
 impl<
         T: Send,
         P: AsLevel<T, TABLE_SIZE> + Default + Send,
-        C: LeafCache,
         L: EntryFilter,
         const BITS: u8,
         const LEVELS: u8,
         const START_BIT: u8,
         const TABLE_SIZE: usize,
-    > MultilevelTableObject<T, P, C, L, BITS, LEVELS, START_BIT, TABLE_SIZE>
+    > MultilevelTableObject<T, P, L, BITS, LEVELS, START_BIT, TABLE_SIZE>
 {
     fn default_level_table() -> KernelResult<KernelPageRef<Level<T, P, TABLE_SIZE>>> {
         unsafe {
@@ -455,7 +383,6 @@ impl<
         let root = Self::default_level_table()?;
         Ok(MultilevelTableObject {
             root: Mutex::new(root),
-            cache: Mutex::new(C::new()),
             id: mto_id.next(),
             _phantom: PhantomData,
         })
