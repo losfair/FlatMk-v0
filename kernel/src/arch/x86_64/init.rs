@@ -1,6 +1,6 @@
 /// Enables SSE/AVX instructions.
 unsafe fn enable_sse() {
-    asm!(r#"
+    llvm_asm!(r#"
         mov %cr4, %rax
         or $$0x600, %rax // CR4.OSFXSR + CR4.OSXMMEXCPT
         mov %rax, %cr4
@@ -9,7 +9,7 @@ unsafe fn enable_sse() {
 
 /// Enables global flag in PT entries.
 unsafe fn enable_global_flag() {
-    asm!(r#"
+    llvm_asm!(r#"
         mov %cr4, %rax
         or $$0x80, %rax // CR4.PGE
         mov %rax, %cr4
@@ -19,7 +19,7 @@ unsafe fn enable_global_flag() {
 /// Enables PCID.
 #[cfg(feature = "x86_pcid")]
 unsafe fn enable_pcid() {
-    asm!(r#"
+    llvm_asm!(r#"
         mov %cr4, %rax
         or $$0x20000, %rax // CR4.PCIDE
         mov %rax, %cr4
@@ -28,7 +28,7 @@ unsafe fn enable_pcid() {
 
 /// Enables fsgsbase instructions.
 unsafe fn enable_fsgsbase() {
-    asm!(r#"
+    llvm_asm!(r#"
         mov %cr4, %rax
         or $$0x10000, %rax // CR4.FSGSBASE
         mov %rax, %cr4

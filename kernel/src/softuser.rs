@@ -23,6 +23,7 @@ impl From<Exception> for TaskFaultReason {
             Exception::InstructionAddressMisaligned => TaskFaultReason::InvalidOperation,
             Exception::Ebreak => TaskFaultReason::InvalidOperation,
             Exception::Wfi => panic!("TaskFaultReason::From<Exception>: Wfi should not be converted to TaskFaultReason."),
+            _ => panic!("Unknown FlatRv exception: {:?}", other),
         }
     }
 }

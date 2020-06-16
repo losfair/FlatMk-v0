@@ -252,18 +252,18 @@ pub unsafe fn arch_set_current_page_table_with_pcid(addr: PhysAddr, _pcid: u64) 
     {
         let pcid = _pcid & 0xfffu64;
         let value = addr | pcid | (1u64 << 63);
-        asm!("mov $0, %cr3" :: "r" (value) : "memory");
+        llvm_asm!("mov $0, %cr3" :: "r" (value) : "memory");
     }
     #[cfg(not(feature = "x86_pcid"))]
     {
-        asm!("mov $0, %cr3" :: "r" (addr) : "memory");
+        llvm_asm!("mov $0, %cr3" :: "r" (addr) : "memory");
     }
 }
 
 pub fn arch_get_current_page_table_with_pcid() -> (PhysAddr, u64) {
     let value: u64;
     unsafe {
-        asm!("mov %cr3, $0" : "=r" (value));
+        llvm_asm!("mov %cr3, $0" : "=r" (value));
     }
     (
         PhysAddr(value & !0xfffu64 & !(1u64 << 63)),
@@ -285,7 +285,7 @@ pub unsafe fn arch_with_pcid_array<F: FnOnce(Option<&mut Pcid2pto>) -> R, R>(f: 
 pub unsafe fn arch_flush_pcid(pcid: u64) {
     let ty: u64 = 1; // single-context invalidation
     let memarg: [u64; 2] = [pcid, 0];
-    asm!(
+    llvm_asm!(
         "invpcid ($1), $0" :: "r"(ty), "r"(&memarg) : "memory"
     );
 }

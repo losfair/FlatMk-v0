@@ -18,25 +18,25 @@ global_asm!(include_str!("asm.s"));
 
 pub fn arch_cpu_relax_long() {
     unsafe {
-        asm!("pause" :::: "volatile");
-        asm!("pause" :::: "volatile");
-        asm!("pause" :::: "volatile");
-        asm!("pause" :::: "volatile");
-        asm!("pause" :::: "volatile");
-        asm!("pause" :::: "volatile");
-        asm!("pause" :::: "volatile");
-        asm!("pause" :::: "volatile");
-        asm!("pause" :::: "volatile");
-        asm!("pause" :::: "volatile");
-        asm!("pause" :::: "volatile");
-        asm!("pause" :::: "volatile");
-        asm!("pause" :::: "volatile");
-        asm!("pause" :::: "volatile");
-        asm!("pause" :::: "volatile");
-        asm!("pause" :::: "volatile");
-        asm!("pause" :::: "volatile");
-        asm!("pause" :::: "volatile");
-        asm!("pause" :::: "volatile");
-        asm!("pause" :::: "volatile");
+        llvm_asm!("pause" :::: "volatile");
+        llvm_asm!("pause" :::: "volatile");
+        llvm_asm!("pause" :::: "volatile");
+        llvm_asm!("pause" :::: "volatile");
+        llvm_asm!("pause" :::: "volatile");
+        llvm_asm!("pause" :::: "volatile");
+        llvm_asm!("pause" :::: "volatile");
+        llvm_asm!("pause" :::: "volatile");
+        llvm_asm!("pause" :::: "volatile");
+        llvm_asm!("pause" :::: "volatile");
+        llvm_asm!("pause" :::: "volatile");
+        llvm_asm!("pause" :::: "volatile");
+        llvm_asm!("pause" :::: "volatile");
+        llvm_asm!("pause" :::: "volatile");
+        llvm_asm!("pause" :::: "volatile");
+        llvm_asm!("pause" :::: "volatile");
+        llvm_asm!("pause" :::: "volatile");
+        llvm_asm!("pause" :::: "volatile");
+        llvm_asm!("pause" :::: "volatile");
+        llvm_asm!("pause" :::: "volatile");
     }
 }

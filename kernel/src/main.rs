@@ -1,7 +1,7 @@
 #![no_main]
 #![no_std]
 #![feature(
-    asm,
+    llvm_asm,
     naked_functions,
     lang_items,
     abi_x86_interrupt,
@@ -124,7 +124,7 @@ fn on_panic(info: &core::panic::PanicInfo) -> ! {
     println!("Task ID = {}", Task::current().id);
     loop {
         unsafe {
-            asm!("hlt" :::: "volatile");
+            llvm_asm!("hlt" :::: "volatile");
         }
     }
 }

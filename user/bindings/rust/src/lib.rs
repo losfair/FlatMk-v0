@@ -1,4 +1,4 @@
 #![no_std]
-#![feature(asm)]
+#![feature(llvm_asm)]
 
 pub mod spec;

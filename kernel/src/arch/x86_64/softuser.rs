@@ -1,7 +1,7 @@
 use crate::softuser::SoftuserContext;
 
 pub unsafe fn arch_softuser_enter(ctx: &mut SoftuserContext) -> ! {
-    asm!(
+    llvm_asm!(
         r#"
             mov %gs:8, %rsp
             push %rax
@@ -14,7 +14,7 @@ pub unsafe fn arch_softuser_enter(ctx: &mut SoftuserContext) -> ! {
 }
 
 pub unsafe fn arch_softuser_hostcall_enter() {
-    asm!(
+    llvm_asm!(
         r#"
             cli
             swapgs
@@ -23,7 +23,7 @@ pub unsafe fn arch_softuser_hostcall_enter() {
 }
 
 pub unsafe fn arch_softuser_hostcall_leave() {
-    asm!(
+    llvm_asm!(
         r#"
             swapgs
             sti
@@ -32,7 +32,7 @@ pub unsafe fn arch_softuser_hostcall_leave() {
 }
 
 pub unsafe fn arch_softuser_wait_for_interrupt_in_user_context() {
-    asm!(
+    llvm_asm!(
         r#"
             hlt
         "# :::: "volatile"

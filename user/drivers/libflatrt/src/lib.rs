@@ -1,5 +1,5 @@
 #![no_std]
-#![feature(asm, new_uninit, maybe_uninit_extra)]
+#![feature(llvm_asm, new_uninit, maybe_uninit_extra)]
 
 extern crate alloc;
 
@@ -11,7 +11,7 @@ pub mod capalloc;
 #[panic_handler]
 fn on_panic(info: &core::panic::PanicInfo) -> ! {
     unsafe {
-        asm!("ud2" :::: "volatile");
+        llvm_asm!("ud2" :::: "volatile");
     }
     loop {}
 }

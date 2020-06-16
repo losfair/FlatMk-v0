@@ -190,13 +190,13 @@ impl Default for Xsave {
 
 impl ArchTaskLocalState {
     pub unsafe fn will_switch_out(&mut self) {
-        asm!(
+        llvm_asm!(
             "fxsave ($0)" :: "r"(&mut self.xsave) : "rax", "rdx" : "volatile"
         );
     }
 
     pub unsafe fn did_switch_in(&mut self) {
-        asm!(
+        llvm_asm!(
             "fxrstor ($0)" :: "r"(&self.xsave) : "rax", "rdx" : "volatile"
         );
     }
@@ -216,7 +216,7 @@ pub unsafe fn arch_init_kernel_tls_for_cpu(tls_indirect: *mut TlsIndirect) {
 pub(super) fn get_indirect_tls() -> *mut TlsIndirect {
     let result: *mut TlsIndirect;
     unsafe {
-        asm!("mov %gs:0, $0" : "=r"(result) ::);
+        llvm_asm!("mov %gs:0, $0" : "=r"(result) ::);
     }
     result
 }
@@ -225,14 +225,14 @@ pub(super) fn get_indirect_tls() -> *mut TlsIndirect {
 pub fn arch_get_kernel_tls() -> u64 {
     let result: u64;
     unsafe {
-        asm!("mov %gs:24, $0" : "=r"(result) ::);
+        llvm_asm!("mov %gs:24, $0" : "=r"(result) ::);
     }
     result
 }
 
 /// Sets the kernel thread local storage (TLS) pointer for the current CPU.
 pub unsafe fn arch_set_kernel_tls(value: u64) {
-    asm!("mov $0, %gs:24" :: "r"(value) :: "volatile");
+    llvm_asm!("mov $0, %gs:24" :: "r"(value) :: "volatile");
 }
 
 /// Safely copies a range of memory from userspace.
@@ -307,7 +307,7 @@ pub unsafe fn arch_enter_user_mode_syscall(registers: *const TaskRegisters) -> !
         Task::raise_fault(TaskFaultReason::VMAccess, (*registers).rip, &*registers);
     }
 
-    asm!(
+    llvm_asm!(
         r#"
             swapgs
             mov 152(%rsi), %rax
@@ -343,7 +343,7 @@ pub unsafe fn arch_enter_user_mode_syscall(registers: *const TaskRegisters) -> !
 }
 
 unsafe fn iret_with_selector(registers: *const TaskRegisters, code_sel: u64, data_sel: u64) -> ! {
-    asm!(
+    llvm_asm!(
         r#"
             swapgs
             mov 152(%rsi), %rax

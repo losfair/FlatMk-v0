@@ -25,7 +25,7 @@ impl CPtr {
 #[cfg(target_arch = "x86_64")]
 unsafe fn _do_syscall(p0: i64, p1: i64, p2: i64, p3: i64, p4: i64, p5: i64) -> i64 {
     let result: i64;
-    asm!(
+    llvm_asm!(
         "mov $$0, %rax\nsyscall" :
             "={rax}"(result) :
             "{rdi}"(p0), "{rsi}"(p1), "{rdx}"(p2), "{r10}"(p3), "{r8}"(p4), "{r9}"(p5) :
@@ -38,7 +38,7 @@ unsafe fn _do_syscall(p0: i64, p1: i64, p2: i64, p3: i64, p4: i64, p5: i64) -> i
 unsafe fn _do_syscall(p0: i64, p1: i64, p2: i64, p3: i64, p4: i64, p5: i64) -> i64 {
     let result_lo: i32;
     let result_hi: i32;
-    asm!(
+    llvm_asm!(
         "ecall" :
             "={x10}"(result_lo), "={x11}"(result_hi) :
             "{x10}"(p0 as i32), "{x11}"((p0 >> 32) as i32),

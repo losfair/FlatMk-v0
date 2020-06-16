@@ -8,15 +8,15 @@ edition = "2018"
 
 [dependencies]
 bootloader = { path = "../bootloader", features = ["map_physical_memory", "vesa_1024x768"] }
-x86 = "0.28"
-x86_64 = "0.8"
+x86 = "0.34"
+x86_64 = "0.11"
 spin = "0.5"
-pic8259_simple = "0.1"
+pic8259_simple = "0.2"
 bitflags = "1.2"
 num_enum = { version = "0.4", default-features = false }
 lazy_static = { version = "1.4", features = ["spin_no_std"] }
 bit_field = { version = "0.10" }
-flatrv = { path = "../../FlatRv" }
+flatrv = { version = "0.1.1", default-features = false }
 
 [features]
 x86_pcid = []

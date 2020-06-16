@@ -2,7 +2,7 @@
 //! on FlatMk.
 
 #![no_std]
-#![feature(asm)]
+#![feature(llvm_asm)]
 
 use core::mem::MaybeUninit;
 
@@ -16,7 +16,7 @@ impl FastIpcPayload {
     pub fn read() -> FastIpcPayload {
         unsafe {
             let mut result: MaybeUninit<FastIpcPayload> = MaybeUninit::uninit();
-            asm!(
+            llvm_asm!(
                 r#"
                 mov %xmm0, 0($0)
                 mov %xmm1, 8($0)
@@ -33,7 +33,7 @@ impl FastIpcPayload {
 
     pub fn write(&self) {
         unsafe {
-            asm!(
+            llvm_asm!(
                 r#"
                 mov 0($0), %xmm0
                 mov 8($0), %xmm1

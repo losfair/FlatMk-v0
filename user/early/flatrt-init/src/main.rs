@@ -7,7 +7,7 @@
 
 #![no_std]
 #![no_main]
-#![feature(naked_functions, asm)]
+#![feature(naked_functions, llvm_asm)]
 
 #[macro_use]
 mod debug;
@@ -39,7 +39,7 @@ static mut STACK: Stack = Stack([0; 1048576]);
 #[naked]
 #[no_mangle]
 pub unsafe extern "C" fn _start() -> ! {
-    asm!(r#"
+    llvm_asm!(r#"
         leaq STACK, %rsp
         addq $$1048576, %rsp
         jmp init_start

@@ -38,7 +38,9 @@ make || exit 1
 
 echo "Building linux init for sequencer-linux"
 cd ../sequencer-linux/linux || exit 1
-#gcc -static -O2 -o ./generated/init.elf ./init.c || exit 1
+rm -r generated || true
+mkdir generated
+gcc -static -O2 -o ./generated/init.elf ./init.c || exit 1
 python3 ./gen_bytes.py ./generated/init.elf > ./generated/init.h || exit 1
 
 echo "Building driver: sequencer-linux"

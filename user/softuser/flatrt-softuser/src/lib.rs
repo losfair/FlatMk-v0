@@ -1,5 +1,5 @@
 #![no_std]
-#![feature(asm, global_asm)]
+#![feature(llvm_asm, global_asm)]
 
 use flatmk_sys::spec::{self, KernelError};
 
@@ -29,7 +29,7 @@ ebreak
 fn on_panic(info: &core::panic::PanicInfo) -> ! {
     loop {
         unsafe {
-            asm!("ebreak" :::: "volatile");
+            llvm_asm!("ebreak" :::: "volatile");
         }
     }
 }

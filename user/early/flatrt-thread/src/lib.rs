@@ -1,7 +1,7 @@
 //! This crate builds a thread abstraction on top of FlatMk's Task capability.
 
 #![no_std]
-#![feature(naked_functions, asm, new_uninit)]
+#![feature(naked_functions, llvm_asm, new_uninit)]
 
 extern crate flatrt_allocator;
 extern crate alloc;
@@ -210,7 +210,7 @@ impl Thread {
 
 #[naked]
 unsafe extern "C" fn ipc_entry() -> ! {
-    asm!(
+    llvm_asm!(
         r#"
             mov %gs:0, %rsp
             mov %gs:8, %rdx // task cptr

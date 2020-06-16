@@ -3,7 +3,7 @@
 //! Requires a capability to the task's own root page table.
 
 #![no_std]
-#![feature(asm, alloc_error_handler)]
+#![feature(llvm_asm, alloc_error_handler)]
 
 use flatmk_sys::spec::{PAGE_SIZE, RootPageTable, UserPteFlags};
 use spin::Once;
@@ -60,7 +60,7 @@ fn do_mmap(bytes: usize) -> Option<NonNull<u8>> {
 #[alloc_error_handler]
 fn on_alloc_error(_: core::alloc::Layout) -> ! {
     unsafe {
-        asm!("mov $$0xffff8000000a110c, %rax\nmov (%rax), %rax" :::: "volatile");
+        llvm_asm!("mov $$0xffff8000000a110c, %rax\nmov (%rax), %rax" :::: "volatile");
     }
     loop {}
 }

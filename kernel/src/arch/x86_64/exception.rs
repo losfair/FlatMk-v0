@@ -120,7 +120,7 @@ macro_rules! interrupt {
 
         #[naked]
         unsafe extern "C" fn $name() {
-            asm!(concat!(r#"
+            llvm_asm!(concat!(r#"
                 push %rbp
                 mov %rsp, %rbp
 
@@ -169,7 +169,7 @@ macro_rules! interrupt_with_code {
 
         #[naked]
         unsafe extern "C" fn $name() {
-            asm!(concat!(r#"
+            llvm_asm!(concat!(r#"
                 push %rbp
                 mov %rsp, %rbp
 
@@ -232,7 +232,7 @@ interrupt_with_code!(
 interrupt!(intr_divide_error, __intr_divide_error, frame, registers, {
     if !is_user_fault(frame) {
         unsafe {
-            asm!("swapgs" :::: "volatile");
+            llvm_asm!("swapgs" :::: "volatile");
         }
         if fault_try_take_softuser_if_active() {
             // Divide error in softuser mode.
@@ -291,7 +291,7 @@ interrupt_with_code!(
         // and `gs` was swapped twice to the user gs.
         if !is_user_fault(frame) && registers.rip == super::asm_import::__copy_user_checked_argreversed__copyinst as u64 {
             unsafe {
-                asm!(
+                llvm_asm!(
                     r#"
                         swapgs
                         jmp *%rax
@@ -310,7 +310,7 @@ interrupt_with_code!(
         let fault_addr = Cr2::read().as_ptr::<u8>();
         if !is_user_fault(frame) {
             unsafe {
-                asm!("swapgs" :::: "volatile");
+                llvm_asm!("swapgs" :::: "volatile");
             }
             if fault_try_take_softuser_if_active() {
                 // A softuser page fault can either happen from within the first 32-bit range, or

@@ -2,7 +2,7 @@
 
 #![no_std]
 #![no_main]
-#![feature(naked_functions, asm, new_uninit)]
+#![feature(naked_functions, llvm_asm, new_uninit)]
 
 #[macro_use]
 extern crate lazy_static;
@@ -260,7 +260,7 @@ unsafe fn dealloc_page(x: u64) {
 #[panic_handler]
 fn on_panic(info: &core::panic::PanicInfo) -> ! {
     unsafe {
-        asm!("ud2" :::: "volatile");
+        llvm_asm!("ud2" :::: "volatile");
     }
     loop {}
 }
